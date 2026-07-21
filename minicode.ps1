@@ -10,18 +10,38 @@ function Normalize-Domain([string]$Value) {
   return ($Value -replace '^https?://', '').TrimEnd('/')
 }
 
-$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$launcher = Join-Path $repoRoot "opencode\packages\opencode\bin\opencode"
-$tuiPath = Join-Path $repoRoot "minicode"
+$installRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$launcher = Join-Path $installRoot "opencode\packages\opencode\bin\opencode"
+$tuiPath = Join-Path $installRoot "minicode"
+$repo_root = $null
+$effectiveArgs = @()
+for ($i = 0; $i -lt $Arguments.Count; $i++) {
+  $arg = $Arguments[$i]
+  if ($arg -eq "-repo_root") {
+    if ($i + 1 -lt $Arguments.Count) {
+      $repo_root = $Arguments[$i + 1]
+      $i++
+      continue
+    }
+    throw "Missing value for -repo_root"
+  }
+  $effectiveArgs += $arg
+}
+$executionRoot = if ($repo_root) { $repo_root } else { (Get-Location).Path }
+
+if (-not (Test-Path -LiteralPath $executionRoot)) {
+  throw "repo_root does not exist: $executionRoot"
+}
 
 if (-not (Test-Path -LiteralPath $launcher)) {
   throw "OpenCode launcher not found at: $launcher"
 }
 
-if ($Arguments.Count -ge 1 -and $Arguments[0] -eq "tui") {
+if ($effectiveArgs.Count -ge 1 -and $effectiveArgs[0] -eq "tui") {
   if (-not (Test-Path -LiteralPath $tuiPath)) {
     throw "TUI project not found at: $tuiPath"
   }
+  $env:MINICODE_REPO_ROOT = $executionRoot
   Push-Location $tuiPath
   try {
     npm start
@@ -31,9 +51,9 @@ if ($Arguments.Count -ge 1 -and $Arguments[0] -eq "tui") {
   }
 }
 
-$isProviderCommand = $Arguments.Count -ge 2 -and (
-  (($Arguments[0] -eq "auth") -or ($Arguments[0] -eq "providers")) -and
-  (($Arguments[1] -eq "login") -or ($Arguments[1] -eq "list") -or ($Arguments[1] -eq "logout"))
+$isProviderCommand = $effectiveArgs.Count -ge 2 -and (
+  (($effectiveArgs[0] -eq "auth") -or ($effectiveArgs[0] -eq "providers")) -and
+  (($effectiveArgs[1] -eq "login") -or ($effectiveArgs[1] -eq "list") -or ($effectiveArgs[1] -eq "logout"))
 )
 
 if (-not $isProviderCommand) {
@@ -61,7 +81,7 @@ if (-not $isProviderCommand) {
   $env:OPENCODE_API_KEY = $copilot.refresh
   $env:OPENCODE_BASE_URL = if ($domain) { "https://copilot-api.$domain" } else { "https://api.githubcopilot.com" }
   if (-not $env:OPENCODE_MODEL) {
-    $env:OPENCODE_MODEL = "gpt-4o-mini"
+    $env:OPENCODE_MODEL = "claude-opus-4.8"
   }
 }
 
@@ -69,25 +89,23 @@ function Invoke-OpenCode {
   param(
     [string[]]$InvokeArgs
   )
-  & node.exe $launcher @InvokeArgs
+  $env:MINICODE_REPO_ROOT = $executionRoot
+  Push-Location $executionRoot
+  try {
+    & node.exe $launcher @InvokeArgs
+  } finally {
+    Pop-Location
+  }
 }
 
 if ($isProviderCommand) {
-  Invoke-OpenCode -InvokeArgs $Arguments
+  Invoke-OpenCode -InvokeArgs $effectiveArgs
   exit $LASTEXITCODE
 }
 
-if ($Arguments.Count -gt 0) {
-  Invoke-OpenCode -InvokeArgs $Arguments
+if ($effectiveArgs.Count -gt 0) {
+  Invoke-OpenCode -InvokeArgs $effectiveArgs
   exit $LASTEXITCODE
 }
 
-while ($true) {
-  $prompt = Read-Host "minicode>"
-  if ($null -eq $prompt) { continue }
-  $text = $prompt.Trim()
-  if (-not $text) { continue }
-  if ($text -eq "exit" -or $text -eq "/exit") { break }
-
-  Invoke-OpenCode -InvokeArgs @($text)
-}
+Invoke-OpenCode -InvokeArgs @()

@@ -72,6 +72,10 @@ export async function runAgentPrompt(prompt, config, onEvent) {
   const systemPrompt = [
     "You are a practical coding agent.",
     "You can run shell commands to complete user requests.",
+    "You are running inside a local git working directory and can read project files.",
+    "For coding tasks, inspect files first using shell commands before answering.",
+    "Use non-destructive read commands like Get-ChildItem, Get-Content, and git --no-pager status/log/diff.",
+    "Do not claim you cannot access files when shell commands can read them.",
     "Respond ONLY with one JSON object:",
     '{"type":"tool","command":"<shell command>","reason":"<short reason>"}',
     "or",
