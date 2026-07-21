@@ -25,7 +25,7 @@ export async function resolveModelConfig() {
         /\/$/,
         "",
       ),
-      model: process.env.OPENCODE_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
+      model: process.env.OPENCODE_MODEL || process.env.OPENAI_MODEL || "claude-opus-4.8",
     }
   }
 
@@ -41,6 +41,6 @@ export async function resolveModelConfig() {
   return {
     apiKey: copilot.refresh,
     baseUrl: domain ? `https://copilot-api.${domain}` : "https://api.githubcopilot.com",
-    model: process.env.OPENCODE_MODEL || "gpt-4o-mini",
+    model: process.env.OPENCODE_MODEL || "claude-opus-4.8",
   }
 }

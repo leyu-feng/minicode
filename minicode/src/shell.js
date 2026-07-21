@@ -1,7 +1,7 @@
 import childProcess from "node:child_process"
 
 export async function runShellCommand(command, options = {}) {
-  const cwd = options.cwd || process.cwd()
+  const cwd = options.cwd || process.env.MINICODE_REPO_ROOT || process.cwd()
   const timeoutMs = options.timeoutMs || 120000
   const onData = options.onData || (() => {})
 
