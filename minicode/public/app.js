@@ -364,6 +364,11 @@ function pasteText(pane, text) {
 const EXIT_COMMANDS = new Set(["exit", "quit", "/exit", "/quit", ":q", "logout"])
 
 function handleInput(pane, data) {
+  // While the pane is busy (a prompt was sent and the agent/model is still
+  // working) block all input except Ctrl+C so the user cannot type until the
+  // model is done and the prompt returns.
+  if (pane.busy && data !== "\u0003") return
+
   if (data === "\u0016") {
     // Ctrl+V: paste from the clipboard.
     if (navigator.clipboard && navigator.clipboard.readText) {
