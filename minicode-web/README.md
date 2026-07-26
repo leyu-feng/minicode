@@ -111,11 +111,10 @@ There is no PTY, so sessions are line based. Full-screen/curses applications
 (`vim`, `htop`, `git` pagers) will not render — use non-interactive flags such
 as `git --no-pager`.
 
-## Legacy entry points
+## Legacy entry point
 
-Superseded, kept only as escape hatches:
+Superseded, kept only as an escape hatch:
 
 | Command | What it runs |
 | --- | --- |
-| `.\minicode.ps1 tui` | The older Ink terminal UI (`minicode/`). |
 | `.\minicode.ps1 raw ...` | The original opencode Node fallback agent, which has no conversation memory. |
