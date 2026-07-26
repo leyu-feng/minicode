@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { WebSocketServer } from "ws"
 import { AgentSession } from "./agent-session.js"
 import { ShellSession } from "./shell-session.js"
+import { PiSession } from "./pi-session.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, "..")
@@ -93,7 +94,12 @@ function appendBuffer(entry, text) {
 }
 
 function createSession(sessionId, kind, cwd) {
-  const session = kind === "agent" ? new AgentSession({ id: sessionId, cwd }) : new ShellSession({ id: sessionId, cwd })
+  const session =
+    kind === "agent"
+      ? new AgentSession({ id: sessionId, cwd })
+      : kind === "pi"
+        ? new PiSession({ id: sessionId, cwd })
+        : new ShellSession({ id: sessionId, cwd })
   const entry = { session, kind: session.kind, cwd, buffer: "", busy: false, subscriber: null, detachedAt: 0 }
 
   session.on("output", ({ stream, data }) => {
@@ -191,6 +197,11 @@ wss.on("connection", (socket) => {
       // replay buffer matches what the user saw.
       if (typeof message.echo === "string") appendBuffer(entry, message.echo)
       entry.session.write(String(message.data ?? ""))
+    } else if (type === "clear") {
+      // Drop the replay buffer and the agent conversation so neither the UI
+      // transcript nor the model context grows without bound.
+      entry.buffer = ""
+      entry.session.clearContext?.()
     } else if (type === "interrupt") {
       entry.session.interrupt()
     } else if (type === "close") {

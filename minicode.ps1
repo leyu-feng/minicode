@@ -55,13 +55,41 @@ function Invoke-Node([string]$Script, [string[]]$NodeArgs) {
 
 $command = if ($effectiveArgs.Count -ge 1) { $effectiveArgs[0] } else { $null }
 
+$piPath = Join-Path $installRoot "pi-agent"
+
+function Ensure-Pi {
+  if (-not (Test-Path -LiteralPath $piPath)) {
+    Push-Location $installRoot
+    try { git submodule update --init pi-agent } finally { Pop-Location }
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $piPath "node_modules"))) {
+    Push-Location $piPath
+    try { npm install } finally { Pop-Location }
+  }
+}
+
 # Browser portal: multi-pane terminal at http://127.0.0.1
 if ($command -eq "web") {
   Ensure-Dependencies $agentPath "Web portal project"
+  Ensure-Pi
   if ($effectiveArgs.Count -ge 2) {
     $env:MINICODE_WEB_PORT = $effectiveArgs[1]
   }
   Invoke-Node (Join-Path $agentPath "server\index.js") @()
+}
+
+# Pi coding agent CLI passthrough.
+if ($command -eq "pi") {
+  Ensure-Pi
+  $tsx = Join-Path $piPath "node_modules\.bin\tsx.cmd"
+  $piCli = Join-Path $piPath "packages\coding-agent\src\cli.ts"
+  Push-Location $executionRoot
+  try {
+    & $tsx $piCli @($effectiveArgs | Select-Object -Skip 1)
+    exit $LASTEXITCODE
+  } finally {
+    Pop-Location
+  }
 }
 
 # Legacy opencode node fallback, kept as an escape hatch.

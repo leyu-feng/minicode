@@ -5,7 +5,7 @@ import { EventEmitter } from "node:events"
 import { resolveModelConfig } from "./auth.js"
 import { killTree } from "./kill-tree.js"
 
-const MAX_TOOL_TURNS = 10
+const MAX_TOOL_TURNS = 1000
 const MAX_OUTPUT_CHARS = 12000
 
 function extractTextContent(message) {
@@ -25,6 +25,26 @@ function extractTextContent(message) {
 }
 
 const ACTION_TYPES = new Set(["tool", "edit", "write", "final"])
+
+// Models frequently emit Windows paths (e.g. minicode\server\index.js) inside
+// JSON string values without escaping the backslashes. Sequences like \s or \i
+// are illegal JSON escapes, so JSON.parse rejects the whole object and the
+// action is lost. Double up any backslash that is not part of a valid JSON
+// escape so the string parses back to what the model intended.
+function repairJsonEscapes(text) {
+  return text.replace(/\\(?!["\\/bfnrtu])/g, "\\\\")
+}
+
+// Parse JSON, retrying with escape repair when the raw text fails.
+function tryParseJson(text) {
+  try {
+    return JSON.parse(text)
+  } catch {}
+  try {
+    return JSON.parse(repairJsonEscapes(text))
+  } catch {}
+  return undefined
+}
 
 // Scan for the first balanced {...} that parses as JSON and looks like one of
 // our actions. This tolerates models that wrap the JSON in reasoning/prose, add
@@ -47,10 +67,8 @@ function extractFirstAction(text) {
       else if (ch === "}") {
         depth--
         if (depth === 0) {
-          try {
-            const obj = JSON.parse(text.slice(start, i + 1))
-            if (obj && typeof obj === "object" && ACTION_TYPES.has(obj.type)) return obj
-          } catch {}
+          const obj = tryParseJson(text.slice(start, i + 1))
+          if (obj && typeof obj === "object" && ACTION_TYPES.has(obj.type)) return obj
           break // this "{" didn't yield a valid action; try the next one
         }
       }
@@ -59,16 +77,20 @@ function extractFirstAction(text) {
   return null
 }
 
+// Heuristic: the model clearly meant to emit an action (it wrote a "type":
+// "<action>" key) but parseJsonAction returned nothing, so the JSON is broken.
+function looksLikeAction(text) {
+  return /"type"\s*:\s*"(?:tool|edit|write|final)"/.test(text)
+}
+
 function parseJsonAction(text) {
   const trimmed = text.trim()
-  try {
-    return JSON.parse(trimmed)
-  } catch {}
+  const whole = tryParseJson(trimmed)
+  if (whole !== undefined) return whole
   const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
   if (fence) {
-    try {
-      return JSON.parse(fence[1])
-    } catch {}
+    const fenced = tryParseJson(fence[1])
+    if (fenced !== undefined) return fenced
   }
   return extractFirstAction(trimmed)
 }
@@ -285,6 +307,29 @@ export class AgentSession extends EventEmitter {
         const action = parseJsonAction(raw)
 
         if (!action || typeof action !== "object" || action.type === "final") {
+          if (!action && looksLikeAction(raw)) {
+            // The model tried to emit an action but the JSON was unparseable.
+            // Surface it loudly in red and feed the error back so it can retry.
+            this.#emitOutput("\u001b[31mCould not parse model action as JSON:\u001b[0m\r\n", "stderr")
+            this.#emitOutput(`\u001b[31m${raw.replace(/\n/g, "\r\n")}\u001b[0m\r\n`, "stderr")
+            this.messages.push(
+              { role: "assistant", content: raw },
+              {
+                role: "user",
+                content: [
+                  "TOOL_RESULT",
+                  "ok: false",
+                  "result: Your previous message was not valid JSON and could not be parsed.",
+                  "Respond with exactly ONE valid JSON action object and nothing else.",
+                  "Remember to escape backslashes in Windows paths (write \\\\ for each \\).",
+                ].join("\n"),
+              },
+            )
+            if (turn === MAX_TOOL_TURNS - 1) {
+              this.#emitOutput("\u001b[31mStopped after max tool turns.\u001b[0m\r\n", "stderr")
+            }
+            continue
+          }
           const message = action?.type === "final" && typeof action.message === "string" ? action.message : raw
           this.messages.push({ role: "assistant", content: raw })
           this.#emitOutput(`\u001b[36m${message.replace(/\n/g, "\r\n")}\u001b[0m\r\n`)
@@ -362,6 +407,12 @@ export class AgentSession extends EventEmitter {
       this.controller = null
       this.emit("done", { exitCode: 0 })
     }
+  }
+
+  // Forget the conversation so far so the model context stops growing without
+  // bound. Does not touch the system prompt or the current turn.
+  clearContext() {
+    this.messages.length = 0
   }
 
   interrupt() {

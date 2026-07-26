@@ -145,6 +145,10 @@ button:hover {
   color: #3fb950;
 }
 
+.pane.kind-pi .pane-kind {
+  color: #d29922;
+}
+
 .pane-body {
   flex: 1;
   min-height: 0;

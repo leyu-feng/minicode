@@ -33,6 +33,7 @@ Options:
 
 REPL commands:
   exit, quit, :q     Leave
+  cls, clear         Clear the screen and forget the conversation
   /clear             Forget the conversation so far
   /cwd               Show the working directory
   /model             Show the active model
@@ -190,6 +191,14 @@ async function runRepl() {
     if (value === "/clear") {
       session.messages.length = 0
       console.log(`${C.dim}conversation cleared${C.reset}`)
+      rl.prompt()
+      continue
+    }
+    if (value === "cls" || value === "clear") {
+      // Clear the screen and forget the conversation so the model context and
+      // the terminal scrollback both stay bounded.
+      session.messages.length = 0
+      process.stdout.write("\u001b[2J\u001b[3J\u001b[H")
       rl.prompt()
       continue
     }

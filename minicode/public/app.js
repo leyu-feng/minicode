@@ -164,7 +164,7 @@ function focusPane(paneId) {
 }
 
 function promptText(pane, leadingNewline = false) {
-  const label = pane.kind === "agent" ? "minicode" : "PS"
+  const label = pane.kind === "agent" ? "minicode" : pane.kind === "pi" ? "pi" : "PS"
   const prefix = leadingNewline ? "\r\n" : ""
   return `${prefix}\u001b[32m${label}\u001b[0m \u001b[90m${pane.cwd || repoRoot}\u001b[0m> `
 }
@@ -362,6 +362,7 @@ function pasteText(pane, text) {
 }
 
 const EXIT_COMMANDS = new Set(["exit", "quit", "/exit", "/quit", ":q", "logout"])
+const CLEAR_COMMANDS = new Set(["cls", "clear", "/clear"])
 
 function handleInput(pane, data) {
   // While the pane is busy (a prompt was sent and the agent/model is still
@@ -404,6 +405,18 @@ function handleInput(pane, data) {
     if (EXIT_COMMANDS.has(line.trim().toLowerCase())) {
       pane.term.write("\u001b[90mclosing pane…\u001b[0m\r\n")
       removePane(pane.id)
+      return
+    }
+
+    if (CLEAR_COMMANDS.has(line.trim().toLowerCase())) {
+      // Wipe the on-screen scrollback and ask the server to drop both the
+      // replay buffer and the agent conversation so context stays bounded.
+      pane.term.reset()
+      send({ type: "clear", sessionId: pane.id })
+      pane.history = []
+      pane.historyIndex = 0
+      saveState()
+      prompt(pane)
       return
     }
 
@@ -477,7 +490,9 @@ function connect() {
         pane.term.write(
           pane.kind === "agent"
             ? "\u001b[90mAsk anything. The agent runs shell commands in this repo. Type 'exit' to close this pane.\u001b[0m\r\n"
-            : "\u001b[90mLine-based shell (no PTY): full-screen TUI apps are unsupported. Type 'exit' to close this pane.\u001b[0m\r\n",
+            : pane.kind === "pi"
+              ? "\u001b[90mPi coding agent. Ask anything; Pi runs tools in this repo and keeps conversation history. Type 'exit' to close this pane.\u001b[0m\r\n"
+              : "\u001b[90mLine-based shell (no PTY): full-screen TUI apps are unsupported. Type 'exit' to close this pane.\u001b[0m\r\n",
         )
       }
 
@@ -520,6 +535,7 @@ function runToolbarAction(action) {
     saveState()
     location.reload()
   } else if (action === "new-agent") addPane("agent")
+  else if (action === "new-pi") addPane("pi")
   else if (action === "new-shell") addPane("shell")
   else if (action === "split-right" && focusedId) splitPane(focusedId, "row", panes.get(focusedId).kind)
   else if (action === "split-down" && focusedId) splitPane(focusedId, "col", panes.get(focusedId).kind)
