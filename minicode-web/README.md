@@ -36,6 +36,10 @@ and close the focused pane. Panes can be nested arbitrarily.
 Terminal keys: `Enter` submits, `Backspace` edits, `Up`/`Down` walk history,
 `Ctrl+C` clears the line (and cancels an in-flight agent turn).
 
+Function keys and browser shortcuts are deliberately **not** captured by the
+terminal, so `F11` (fullscreen), `F12` (devtools), `Ctrl+Shift+I`, `Ctrl+R`,
+zoom and tab shortcuts keep working normally in Edge/Chrome.
+
 ## Environment
 
 | Variable | Purpose |
