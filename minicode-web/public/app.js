@@ -29,6 +29,36 @@ function send(payload) {
   if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload))
 }
 
+/* ------------------------------------------------------- state persistence */
+
+const STATE_KEY = "minicode-web:layout"
+
+// The layout and pane identities live in localStorage so reloading the page
+// reattaches to the same server-side sessions instead of starting new ones.
+function saveState() {
+  try {
+    const entries = [...panes.values()].map((pane) => ({
+      id: pane.id,
+      kind: pane.kind,
+      cwd: pane.cwd,
+      history: pane.history.slice(-100),
+    }))
+    localStorage.setItem(STATE_KEY, JSON.stringify({ layout, panes: entries }))
+  } catch {}
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STATE_KEY)
+    if (!raw) return null
+    const state = JSON.parse(raw)
+    if (!state?.layout || !Array.isArray(state.panes) || state.panes.length === 0) return null
+    return state
+  } catch {
+    return null
+  }
+}
+
 /* ---------------------------------------------------------------- layout */
 
 function findParent(node, paneId, parent = null) {
@@ -60,6 +90,7 @@ function splitPane(paneId, dir, kind) {
   delete leaf.paneId
   render()
   focusPane(pane.id)
+  saveState()
 }
 
 function removePane(paneId) {
@@ -73,6 +104,7 @@ function removePane(paneId) {
     layout = null
     render()
     focusedId = null
+    saveState()
     return
   }
 
@@ -84,6 +116,7 @@ function removePane(paneId) {
   render()
   const next = firstLeaf(layout)
   if (next) focusPane(next.paneId)
+  saveState()
 }
 
 function renderNode(node) {
@@ -130,10 +163,14 @@ function focusPane(paneId) {
   }
 }
 
-function prompt(pane, leadingNewline = false) {
+function promptText(pane, leadingNewline = false) {
   const label = pane.kind === "agent" ? "minicode" : "PS"
   const prefix = leadingNewline ? "\r\n" : ""
-  pane.term.write(`${prefix}\u001b[32m${label}\u001b[0m \u001b[90m${pane.cwd || repoRoot}\u001b[0m> `)
+  return `${prefix}\u001b[32m${label}\u001b[0m \u001b[90m${pane.cwd || repoRoot}\u001b[0m> `
+}
+
+function prompt(pane, leadingNewline = false) {
+  pane.term.write(promptText(pane, leadingNewline))
 }
 
 // Keys the browser owns. The terminal is line based and never needs function
@@ -170,8 +207,8 @@ function passThroughToBrowser(event) {
   return true
 }
 
-function createPane(kind) {
-  const id = uid(kind)
+function createPane(kind, restore = null) {
+  const id = restore?.id || uid(kind)
 
   const el = document.createElement("div")
   el.className = `pane kind-${kind}`
@@ -198,6 +235,9 @@ function createPane(kind) {
   term.attachCustomKeyEventHandler(passThroughToBrowser)
   term.open(body)
 
+  const cwd = restore?.cwd || repoRoot
+  const history = Array.isArray(restore?.history) ? [...restore.history] : []
+
   const pane = {
     id,
     kind,
@@ -205,10 +245,10 @@ function createPane(kind) {
     header,
     term,
     fit,
-    cwd: repoRoot,
+    cwd,
     buffer: "",
-    history: [],
-    historyIndex: -1,
+    history,
+    historyIndex: history.length,
     busy: false,
   }
 
@@ -216,8 +256,8 @@ function createPane(kind) {
   term.onData((data) => handleInput(pane, data))
   panes.set(id, pane)
 
-  header.querySelector(".pane-title").textContent = id
-  send({ type: "create", sessionId: id, kind, cwd: repoRoot })
+  header.querySelector(".pane-title").textContent = cwd
+  send({ type: "create", sessionId: id, kind, cwd })
   return pane
 }
 
@@ -228,6 +268,49 @@ function addPane(kind) {
   else layout = { type: "split", dir: "row", a: layout, b: leaf }
   render()
   focusPane(pane.id)
+  saveState()
+}
+
+function restoreFromState(state) {
+  layout = state.layout
+  for (const entry of state.panes) {
+    if (findLeaf(layout, entry.id)) createPane(entry.kind, entry)
+  }
+  // Drop layout leaves whose pane metadata was missing.
+  for (const leaf of collectLeaves(layout)) {
+    if (!panes.has(leaf.paneId)) removeLeaf(leaf.paneId)
+  }
+  if (!layout || panes.size === 0) {
+    layout = null
+    render()
+    addPane("agent")
+    return
+  }
+  render()
+  const first = firstLeaf(layout)
+  if (first) focusPane(first.paneId)
+}
+
+function collectLeaves(node, acc = []) {
+  if (!node) return acc
+  if (node.type === "leaf") acc.push(node)
+  else {
+    collectLeaves(node.a, acc)
+    collectLeaves(node.b, acc)
+  }
+  return acc
+}
+
+function removeLeaf(paneId) {
+  if (layout && layout.type === "leaf" && layout.paneId === paneId) {
+    layout = null
+    return
+  }
+  const parent = findParent(layout, paneId)
+  if (!parent) return
+  const survivor = parent.a.type === "leaf" && parent.a.paneId === paneId ? parent.b : parent.a
+  Object.keys(parent).forEach((key) => delete parent[key])
+  Object.assign(parent, survivor)
 }
 
 function replaceLine(pane, value) {
@@ -267,7 +350,10 @@ function handleInput(pane, data) {
     }
 
     pane.busy = true
-    send({ type: "input", sessionId: pane.id, data: line })
+    // Echo is what the server stores in its replay buffer so a page reload
+    // shows the same transcript the user typed.
+    send({ type: "input", sessionId: pane.id, data: line, echo: `${promptText(pane)}${line}\r\n` })
+    saveState()
     return
   }
 
@@ -302,7 +388,9 @@ function connect() {
     statusEl.textContent = "connected"
     if (!started) {
       started = true
-      addPane("agent")
+      const state = loadState()
+      if (state) restoreFromState(state)
+      else addPane("agent")
     } else {
       panes.forEach((pane) => send({ type: "create", sessionId: pane.id, kind: pane.kind, cwd: pane.cwd }))
     }
@@ -321,13 +409,30 @@ function connect() {
     if (message.type === "ready") {
       pane.cwd = message.cwd
       pane.header.querySelector(".pane-title").textContent = message.cwd
-      pane.term.write(
-        pane.kind === "agent"
-          ? "\u001b[90mAsk anything. The agent runs shell commands in this repo. Type 'exit' to close this pane.\u001b[0m\r\n"
-          : "\u001b[90mLine-based shell (no PTY): full-screen TUI apps are unsupported. Type 'exit' to close this pane.\u001b[0m\r\n",
-      )
-      pane.busy = false
-      prompt(pane)
+      pane.term.reset?.()
+
+      if (message.restored) {
+        // Replay the transcript the server buffered while we were away.
+        if (message.buffer) pane.term.write(message.buffer)
+        pane.term.write("\u001b[90m—— reattached to running session ——\u001b[0m\r\n")
+      } else {
+        pane.term.write(
+          pane.kind === "agent"
+            ? "\u001b[90mAsk anything. The agent runs shell commands in this repo. Type 'exit' to close this pane.\u001b[0m\r\n"
+            : "\u001b[90mLine-based shell (no PTY): full-screen TUI apps are unsupported. Type 'exit' to close this pane.\u001b[0m\r\n",
+        )
+      }
+
+      pane.buffer = ""
+      pane.busy = Boolean(message.busy)
+      if (pane.busy) pane.term.write("\u001b[90mstill working…\u001b[0m\r\n")
+      else prompt(pane)
+      saveState()
+      return
+    }
+
+    if (message.type === "detached") {
+      pane.term.write("\r\n\u001b[33mthis session was taken over by another tab\u001b[0m\r\n")
       return
     }
 
@@ -354,12 +459,18 @@ function connect() {
 document.querySelector(".toolbar").addEventListener("click", (event) => {
   const action = event.target.dataset?.action
   if (!action) return
-  if (action === "new-agent") addPane("agent")
+  if (action === "refresh") {
+    // Sessions live on the server, so a plain reload reattaches to them.
+    saveState()
+    location.reload()
+  } else if (action === "new-agent") addPane("agent")
   else if (action === "new-shell") addPane("shell")
   else if (action === "split-right" && focusedId) splitPane(focusedId, "row", panes.get(focusedId).kind)
   else if (action === "split-down" && focusedId) splitPane(focusedId, "col", panes.get(focusedId).kind)
   else if (action === "close" && focusedId) removePane(focusedId)
 })
+
+window.addEventListener("beforeunload", saveState)
 
 window.addEventListener("resize", () => panes.forEach(fitPane))
 

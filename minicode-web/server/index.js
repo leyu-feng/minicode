@@ -69,22 +69,71 @@ const server = http.createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ server })
 
+const MAX_BUFFER_CHARS = 200000
+const IDLE_REAP_MS = Number(process.env.MINICODE_WEB_IDLE_MS || 30 * 60 * 1000)
+
+/**
+ * Sessions are owned by the server, not by a WebSocket connection, so the web
+ * UI can be reloaded (or briefly disconnected) without losing shell state or
+ * agent conversation history. Output is buffered per session and replayed to
+ * whichever client attaches next.
+ * @type {Map<string, {session: ShellSession|AgentSession, kind: string, cwd: string, buffer: string, busy: boolean, subscriber: import("ws").WebSocket|null, detachedAt: number}>}
+ */
+const sessions = new Map()
+
+function sendTo(socket, payload) {
+  if (socket && socket.readyState === socket.OPEN) socket.send(JSON.stringify(payload))
+}
+
+function appendBuffer(entry, text) {
+  entry.buffer += text
+  if (entry.buffer.length > MAX_BUFFER_CHARS) {
+    entry.buffer = entry.buffer.slice(entry.buffer.length - MAX_BUFFER_CHARS)
+  }
+}
+
+function createSession(sessionId, kind, cwd) {
+  const session = kind === "agent" ? new AgentSession({ id: sessionId, cwd }) : new ShellSession({ id: sessionId, cwd })
+  const entry = { session, kind: session.kind, cwd, buffer: "", busy: false, subscriber: null, detachedAt: 0 }
+
+  session.on("output", ({ stream, data }) => {
+    // Store exactly what a client would render so replay is byte-identical.
+    appendBuffer(entry, stream === "stderr" ? `\u001b[31m${data}\u001b[0m` : data)
+    sendTo(entry.subscriber, { type: "output", sessionId, stream, data })
+  })
+  session.on("done", ({ exitCode }) => {
+    entry.busy = false
+    sendTo(entry.subscriber, { type: "done", sessionId, exitCode })
+  })
+  session.on("exit", ({ code }) => {
+    sendTo(entry.subscriber, { type: "exit", sessionId, code })
+    sessions.delete(sessionId)
+  })
+
+  sessions.set(sessionId, entry)
+  return entry
+}
+
+function disposeSession(sessionId) {
+  const entry = sessions.get(sessionId)
+  if (!entry) return
+  entry.session.dispose()
+  sessions.delete(sessionId)
+}
+
+setInterval(() => {
+  const now = Date.now()
+  for (const [id, entry] of sessions) {
+    if (!entry.subscriber && entry.detachedAt && now - entry.detachedAt > IDLE_REAP_MS) {
+      disposeSession(id)
+    }
+  }
+}, 60000).unref()
+
 wss.on("connection", (socket) => {
-  /** @type {Map<string, ShellSession|AgentSession>} */
-  const sessions = new Map()
+  const owned = new Set()
 
-  const send = (payload) => {
-    if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(payload))
-  }
-
-  const attach = (session) => {
-    session.on("output", ({ stream, data }) => send({ type: "output", sessionId: session.id, stream, data }))
-    session.on("done", ({ exitCode }) => send({ type: "done", sessionId: session.id, exitCode }))
-    session.on("exit", ({ code }) => {
-      send({ type: "exit", sessionId: session.id, code })
-      sessions.delete(session.id)
-    })
-  }
+  const send = (payload) => sendTo(socket, payload)
 
   socket.on("message", async (raw) => {
     let message
@@ -98,37 +147,69 @@ wss.on("connection", (socket) => {
     if (!sessionId) return
 
     if (type === "create") {
-      if (sessions.has(sessionId)) return
+      const existing = sessions.get(sessionId)
+      if (existing) {
+        // Reattach after a UI reload: steal the subscription and replay output.
+        sendTo(existing.subscriber, { type: "detached", sessionId })
+        existing.subscriber = socket
+        existing.detachedAt = 0
+        owned.add(sessionId)
+        send({
+          type: "ready",
+          sessionId,
+          kind: existing.kind,
+          cwd: existing.cwd,
+          restored: true,
+          busy: existing.busy,
+          buffer: existing.buffer,
+        })
+        return
+      }
+
       const cwd = message.cwd && fs.existsSync(message.cwd) ? message.cwd : repoRoot
       try {
-        const session =
-          message.kind === "agent"
-            ? new AgentSession({ id: sessionId, cwd })
-            : new ShellSession({ id: sessionId, cwd })
-        sessions.set(sessionId, session)
-        attach(session)
-        send({ type: "ready", sessionId, kind: session.kind, cwd })
+        const entry = createSession(sessionId, message.kind, cwd)
+        entry.subscriber = socket
+        owned.add(sessionId)
+        send({ type: "ready", sessionId, kind: entry.kind, cwd, restored: false, busy: false, buffer: "" })
       } catch (error) {
         send({ type: "output", sessionId, stream: "stderr", data: `${error.message}\r\n` })
       }
       return
     }
 
-    const session = sessions.get(sessionId)
-    if (!session) return
+    const entry = sessions.get(sessionId)
+    if (!entry) {
+      // The client believes this session exists; tell it otherwise.
+      send({ type: "exit", sessionId, code: 0 })
+      return
+    }
 
-    if (type === "input") session.write(String(message.data ?? ""))
-    else if (type === "interrupt") session.interrupt()
-    else if (type === "close") {
-      session.dispose()
-      sessions.delete(sessionId)
+    if (type === "input") {
+      entry.busy = true
+      // The client sends the exact text it rendered (prompt + command) so the
+      // replay buffer matches what the user saw.
+      if (typeof message.echo === "string") appendBuffer(entry, message.echo)
+      entry.session.write(String(message.data ?? ""))
+    } else if (type === "interrupt") {
+      entry.session.interrupt()
+    } else if (type === "close") {
+      disposeSession(sessionId)
+      owned.delete(sessionId)
       send({ type: "exit", sessionId, code: 0 })
     }
   })
 
   socket.on("close", () => {
-    for (const session of sessions.values()) session.dispose()
-    sessions.clear()
+    // Keep sessions alive so a page reload can reattach to them.
+    for (const id of owned) {
+      const entry = sessions.get(id)
+      if (entry && entry.subscriber === socket) {
+        entry.subscriber = null
+        entry.detachedAt = Date.now()
+      }
+    }
+    owned.clear()
   })
 })
 

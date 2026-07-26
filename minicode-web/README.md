@@ -43,6 +43,20 @@ Function keys and browser shortcuts are deliberately **not** captured by the
 terminal, so `F11` (fullscreen), `F12` (devtools), `Ctrl+Shift+I`, `Ctrl+R`,
 zoom and tab shortcuts keep working normally in Edge/Chrome.
 
+## Sessions survive a reload
+
+Sessions are owned by the **server**, not by the browser tab. Each session keeps
+a replay buffer of its transcript, so reloading the page (the toolbar `⟳ refresh`
+button, `F5`, or `Ctrl+R`) reattaches to the still-running shells and agents —
+working directory, shell variables, and agent conversation history are all kept.
+
+The split layout, pane kinds, and per-pane command history are stored in
+`localStorage`, so the workspace comes back looking the same.
+
+Sessions end only when you close the pane (`exit`, or the `close` button), when
+the server stops, or after `MINICODE_WEB_IDLE_MS` (default 30 min) with no
+browser attached.
+
 ## Environment
 
 | Variable | Purpose |
@@ -50,6 +64,7 @@ zoom and tab shortcuts keep working normally in Edge/Chrome.
 | `MINICODE_REPO_ROOT` | Working directory for all sessions (defaults to `process.cwd()`). |
 | `MINICODE_WEB_PORT` | Listen port (`0`/unset picks a free port). |
 | `MINICODE_WEB_OPEN` | Set to `0` to skip launching the browser. |
+| `MINICODE_WEB_IDLE_MS` | Dispose detached sessions after this long with no client (default 30 min). |
 | `OPENCODE_API_KEY` / `OPENCODE_BASE_URL` / `OPENCODE_MODEL` | Model overrides; otherwise the saved GitHub Copilot credential in `auth.json` is used. |
 
 ## Limitation
