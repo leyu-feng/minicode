@@ -17,6 +17,8 @@ body {
 }
 
 .toolbar {
+  position: relative;
+  z-index: 10;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -152,3 +154,25 @@ button:hover {
 .pane-body .xterm {
   height: 100%;
 }
+
+.pane-body,
+.pane-body .xterm {
+  position: relative;
+}
+
+.xterm-helper-textarea {
+  pointer-events: none;
+}
+
+
+.toolbar {
+  isolation: isolate;
+  z-index: 100;
+}
+
+#layout {
+  position: relative;
+  z-index: 1;
+  overflow: hidden;
+}
+

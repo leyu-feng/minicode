@@ -1,5 +1,6 @@
 import childProcess from "node:child_process"
 import { EventEmitter } from "node:events"
+import { killTree, killDescendants } from "./kill-tree.js"
 
 const DONE_MARKER = "__MINICODE_DONE__"
 
@@ -82,9 +83,12 @@ export class ShellSession extends EventEmitter {
 
   interrupt() {
     if (this.closed) return
-    // Without a PTY we cannot deliver Ctrl+C, so restart-free cancellation is
-    // limited to killing the current child tree.
-    this.emit("output", { stream: "stderr", data: "\r\n[interrupt not supported without a PTY]\r\n" })
+    // Without a PTY we cannot deliver Ctrl+C, so cancellation is best effort:
+    // kill the child processes the shell spawned for the current command while
+    // leaving the shell itself alive. Shell builtins that run in-process (e.g.
+    // Start-Sleep) cannot be interrupted this way.
+    killDescendants(this.proc.pid)
+    this.emit("output", { stream: "stderr", data: "\r\n[sent kill to running command (best effort; no PTY)]\r\n" })
   }
 
   dispose() {
@@ -92,7 +96,7 @@ export class ShellSession extends EventEmitter {
     this.closed = true
     try {
       this.proc.stdin.end()
-      this.proc.kill()
+      killTree(this.proc.pid)
     } catch {}
   }
 }

@@ -232,7 +232,25 @@ function createPane(kind, restore = null) {
   })
   const fit = new FitAddon()
   term.loadAddon(fit)
-  term.attachCustomKeyEventHandler(passThroughToBrowser)
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type === "keydown" && term.hasSelection()) {
+      if (event.key === "Enter") {
+        const sel = term.getSelection()
+        if (sel && navigator.clipboard) navigator.clipboard.writeText(sel).catch(() => {})
+        term.clearSelection()
+        event.preventDefault()
+        event.stopPropagation()
+        return false
+      }
+      if (event.key === "Escape") {
+        term.clearSelection()
+        event.preventDefault()
+        event.stopPropagation()
+        return false
+      }
+    }
+    return passThroughToBrowser(event)
+  })
   term.open(body)
 
   const cwd = restore?.cwd || repoRoot
@@ -253,6 +271,17 @@ function createPane(kind, restore = null) {
   }
 
   el.addEventListener("mousedown", () => focusPane(id))
+  body.addEventListener("contextmenu", (event) => {
+    event.preventDefault()
+    focusPane(id)
+    if (!navigator.clipboard || !navigator.clipboard.readText) return
+    navigator.clipboard
+      .readText()
+      .then((text) => {
+        if (text) pasteText(pane, text)
+      })
+      .catch(() => {})
+  })
   term.onData((data) => handleInput(pane, data))
   panes.set(id, pane)
 
@@ -321,9 +350,33 @@ function replaceLine(pane, value) {
   pane.buffer = value
 }
 
+// Insert clipboard text into the current line. Embedded newlines are treated
+// as Enter presses so multi-line pastes submit each line in turn.
+function pasteText(pane, text) {
+  const normalized = text.replace(/\r\n?/g, "\n")
+  for (let i = 0; i < normalized.length; i++) {
+    const ch = normalized[i]
+    if (ch === "\n") handleInput(pane, "\r")
+    else if (ch === "\t" || ch.charCodeAt(0) >= 32) handleInput(pane, ch)
+  }
+}
+
 const EXIT_COMMANDS = new Set(["exit", "quit", "/exit", "/quit", ":q", "logout"])
 
 function handleInput(pane, data) {
+  if (data === "\u0016") {
+    // Ctrl+V: paste from the clipboard.
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (text) pasteText(pane, text)
+        })
+        .catch(() => {})
+    }
+    return
+  }
+
   if (data === "\u0003") {
     pane.term.write("^C\r\n")
     pane.buffer = ""
@@ -456,11 +509,9 @@ function connect() {
 
 /* --------------------------------------------------------------- toolbar */
 
-document.querySelector(".toolbar").addEventListener("click", (event) => {
-  const action = event.target.dataset?.action
+function runToolbarAction(action) {
   if (!action) return
   if (action === "refresh") {
-    // Sessions live on the server, so a plain reload reattaches to them.
     saveState()
     location.reload()
   } else if (action === "new-agent") addPane("agent")
@@ -468,6 +519,14 @@ document.querySelector(".toolbar").addEventListener("click", (event) => {
   else if (action === "split-right" && focusedId) splitPane(focusedId, "row", panes.get(focusedId).kind)
   else if (action === "split-down" && focusedId) splitPane(focusedId, "col", panes.get(focusedId).kind)
   else if (action === "close" && focusedId) removePane(focusedId)
+}
+
+document.querySelectorAll(".toolbar button[data-action]").forEach((btn) => {
+  const action = btn.dataset.action
+  let handled = false
+  const run = () => { if (handled) return; handled = true; setTimeout(() => (handled = false), 300); runToolbarAction(action) }
+  btn.addEventListener("click", run)
+  btn.addEventListener("pointerup", run)
 })
 
 window.addEventListener("beforeunload", saveState)
