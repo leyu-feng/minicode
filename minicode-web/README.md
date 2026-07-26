@@ -34,7 +34,10 @@ Toolbar actions: new agent/shell pane, split the focused pane right or down,
 and close the focused pane. Panes can be nested arbitrarily.
 
 Terminal keys: `Enter` submits, `Backspace` edits, `Up`/`Down` walk history,
-`Ctrl+C` clears the line (and cancels an in-flight agent turn).
+`Ctrl+C` clears the line (and cancels an in-flight agent turn). Typing `exit`
+(or `quit`) closes the pane and disposes its backend session; a pane also closes
+automatically if its backend process ends. Closing the last pane leaves an empty
+workspace — reopen one from the toolbar.
 
 Function keys and browser shortcuts are deliberately **not** captured by the
 terminal, so `F11` (fullscreen), `F12` (devtools), `Ctrl+Shift+I`, `Ctrl+R`,

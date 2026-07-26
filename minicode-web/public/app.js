@@ -10,6 +10,7 @@ let layout = null
 let focusedId = null
 let paneCounter = 0
 let socket = null
+let started = false
 let repoRoot = ""
 
 const THEME = {
@@ -71,7 +72,7 @@ function removePane(paneId) {
   if (layout && layout.type === "leaf" && layout.paneId === paneId) {
     layout = null
     render()
-    addPane("agent")
+    focusedId = null
     return
   }
 
@@ -99,8 +100,16 @@ function renderNode(node) {
 }
 
 function render() {
-  layoutEl.replaceChildren(renderNode(layout))
+  layoutEl.replaceChildren(layout ? renderNode(layout) : emptyState())
   requestAnimationFrame(() => panes.forEach(fitPane))
+}
+
+function emptyState() {
+  const el = document.createElement("div")
+  el.className = "empty-state"
+  el.innerHTML =
+    '<p>No sessions open.</p><p class="hint">Use <b>+ agent</b> or <b>+ shell</b> above to start one.</p>'
+  return el
 }
 
 function fitPane(pane) {
@@ -229,6 +238,8 @@ function replaceLine(pane, value) {
   pane.buffer = value
 }
 
+const EXIT_COMMANDS = new Set(["exit", "quit", "/exit", "/quit", ":q", "logout"])
+
 function handleInput(pane, data) {
   if (data === "\u0003") {
     pane.term.write("^C\r\n")
@@ -248,6 +259,13 @@ function handleInput(pane, data) {
     }
     pane.history.push(line)
     pane.historyIndex = pane.history.length
+
+    if (EXIT_COMMANDS.has(line.trim().toLowerCase())) {
+      pane.term.write("\u001b[90mclosing pane…\u001b[0m\r\n")
+      removePane(pane.id)
+      return
+    }
+
     pane.busy = true
     send({ type: "input", sessionId: pane.id, data: line })
     return
@@ -282,8 +300,12 @@ function connect() {
 
   socket.addEventListener("open", () => {
     statusEl.textContent = "connected"
-    if (!layout) addPane("agent")
-    else panes.forEach((pane) => send({ type: "create", sessionId: pane.id, kind: pane.kind, cwd: pane.cwd }))
+    if (!started) {
+      started = true
+      addPane("agent")
+    } else {
+      panes.forEach((pane) => send({ type: "create", sessionId: pane.id, kind: pane.kind, cwd: pane.cwd }))
+    }
   })
 
   socket.addEventListener("close", () => {
@@ -301,8 +323,8 @@ function connect() {
       pane.header.querySelector(".pane-title").textContent = message.cwd
       pane.term.write(
         pane.kind === "agent"
-          ? "\u001b[90mAsk anything. The agent runs shell commands in this repo.\u001b[0m\r\n"
-          : "\u001b[90mLine-based shell (no PTY): full-screen TUI apps are unsupported.\u001b[0m\r\n",
+          ? "\u001b[90mAsk anything. The agent runs shell commands in this repo. Type 'exit' to close this pane.\u001b[0m\r\n"
+          : "\u001b[90mLine-based shell (no PTY): full-screen TUI apps are unsupported. Type 'exit' to close this pane.\u001b[0m\r\n",
       )
       pane.busy = false
       prompt(pane)
@@ -321,8 +343,8 @@ function connect() {
     }
 
     if (message.type === "exit") {
-      pane.term.write(`\r\n\u001b[90msession ended (${message.code})\u001b[0m\r\n`)
       pane.busy = false
+      removePane(pane.id)
     }
   })
 }
