@@ -127,6 +127,40 @@ function prompt(pane, leadingNewline = false) {
   pane.term.write(`${prefix}\u001b[32m${label}\u001b[0m \u001b[90m${pane.cwd || repoRoot}\u001b[0m> `)
 }
 
+// Keys the browser owns. The terminal is line based and never needs function
+// keys, so let Edge/Chrome handle fullscreen (F11), devtools (F12), reload,
+// zoom and tab switching instead of swallowing them.
+const BROWSER_KEYS = new Set([
+  "F1",
+  "F2",
+  "F3",
+  "F4",
+  "F5",
+  "F6",
+  "F7",
+  "F8",
+  "F9",
+  "F10",
+  "F11",
+  "F12",
+])
+
+function passThroughToBrowser(event) {
+  if (BROWSER_KEYS.has(event.key)) return false
+
+  // Ctrl+Shift+I / J / C (devtools), Ctrl+Shift+M, Ctrl+Shift+P, etc.
+  if (event.ctrlKey && event.shiftKey && !event.altKey) return false
+
+  // Ctrl+R reload, Ctrl+L address bar, Ctrl +/-/0 zoom, Ctrl+T/W/N tabs.
+  if (event.ctrlKey && !event.shiftKey && !event.altKey) {
+    if (["r", "l", "t", "w", "n", "+", "-", "=", "0"].includes(event.key.toLowerCase())) return false
+  }
+
+  if (event.altKey && !event.ctrlKey) return false
+
+  return true
+}
+
 function createPane(kind) {
   const id = uid(kind)
 
@@ -152,6 +186,7 @@ function createPane(kind) {
   })
   const fit = new FitAddon()
   term.loadAddon(fit)
+  term.attachCustomKeyEventHandler(passThroughToBrowser)
   term.open(body)
 
   const pane = {
