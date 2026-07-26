@@ -2,32 +2,44 @@
 
 The minicode agent core, plus two front ends:
 
-- a **web portal** — a background Node.js server that serves a localhost page
-  with xterm.js split panes;
-- a **terminal REPL** (`cli.js`) — the same agent, standalone, no server.
+- a **terminal CLI** (`cli.js`) — REPL, one-shot prompts, and auth;
+- a **web portal** (`server/`) — a background Node.js server that serves a
+  localhost page with xterm.js split panes.
 
-Both drive the same `AgentSession` class, so there is one agent implementation
-to maintain. Nothing here needs native modules (no `node-pty`, no platform
-binaries).
+Both drive the same `AgentSession` class and the same `auth.js`, so there is one
+agent implementation and one credential path to maintain. Nothing here needs
+native modules (no `node-pty`, no platform binaries).
 
 ## Run the terminal agent
 
 ```cmd
-bootstrap\minicode.cmd chat                     REM interactive REPL
-bootstrap\minicode.cmd chat "explain build.ps1" REM one prompt, then exit
+bootstrap\minicode.cmd                            REM interactive REPL
+bootstrap\minicode.cmd "explain minicode.ps1"     REM one prompt, then exit
+bootstrap\minicode.cmd --no-tools "what is bun?"  REM no shell commands
 ```
 
 Or directly:
 
 ```powershell
-.\minicode.ps1 chat
-.\minicode.ps1 chat --repo-root C:\some\repo
+.\minicode.ps1
+.\minicode.ps1 "explain minicode.ps1"
+.\minicode.ps1 --repo-root C:\some\repo
+.\minicode.ps1 --model gpt-5.4 "summarise this repo"
+```
+
+Sign in once with GitHub Copilot:
+
+```powershell
+.\minicode.ps1 auth login
+.\minicode.ps1 auth list
+.\minicode.ps1 auth logout
 ```
 
 REPL commands: `exit`/`quit`/`:q` to leave, `/clear` to reset the conversation,
-`/cwd` to show the working directory. `Ctrl+C` cancels the current turn;
-`Ctrl+C` at an empty prompt exits. Conversation history persists for the
-lifetime of the process.
+`/cwd` for the working directory, `/model` for the active model. `Ctrl+C`
+cancels the current turn; `Ctrl+C` at an empty prompt exits. **Conversation
+history persists across prompts**, so follow-ups like "now add a flag to it"
+work.
 
 This runs entirely in your terminal — no server is started and no browser is
 opened.
@@ -98,3 +110,12 @@ browser attached.
 There is no PTY, so sessions are line based. Full-screen/curses applications
 (`vim`, `htop`, `git` pagers) will not render — use non-interactive flags such
 as `git --no-pager`.
+
+## Legacy entry points
+
+Superseded, kept only as escape hatches:
+
+| Command | What it runs |
+| --- | --- |
+| `.\minicode.ps1 tui` | The older Ink terminal UI (`minicode/`). |
+| `.\minicode.ps1 raw ...` | The original opencode Node fallback agent, which has no conversation memory. |

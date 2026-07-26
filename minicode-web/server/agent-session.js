@@ -98,7 +98,7 @@ async function callModel(config, messages, systemPrompt, signal) {
     body: JSON.stringify({
       model: config.model,
       temperature: 0.2,
-      messages: [{ role: "system", content: systemPrompt }, ...messages],
+      messages: systemPrompt ? [{ role: "system", content: systemPrompt }, ...messages] : messages,
     }),
   })
 
@@ -110,6 +110,11 @@ async function callModel(config, messages, systemPrompt, signal) {
   const text = extractTextContent(data?.choices?.[0]?.message)
   if (!text) throw new Error("Model returned an empty response.")
   return text
+}
+
+/** One plain completion with no tool loop and no system prompt. */
+export function callModelOnce(config, messages) {
+  return callModel(config, messages, undefined, undefined)
 }
 
 /**
