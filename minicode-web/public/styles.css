@@ -1,0 +1,132 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  font-size: 12px;
+}
+
+.brand {
+  font-weight: 700;
+  color: #58a6ff;
+}
+
+.repo {
+  color: #8b949e;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.status {
+  color: #8b949e;
+  min-width: 90px;
+  text-align: right;
+}
+
+button {
+  background: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #30363d;
+}
+
+#layout {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  padding: 6px;
+  gap: 6px;
+}
+
+.split {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  gap: 6px;
+}
+
+.split.row {
+  flex-direction: row;
+}
+
+.split.col {
+  flex-direction: column;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #010409;
+}
+
+.pane.focused {
+  border-color: #58a6ff;
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: #161b22;
+  font-size: 11px;
+  color: #8b949e;
+  cursor: pointer;
+}
+
+.pane-kind {
+  text-transform: uppercase;
+  font-weight: 700;
+  color: #58a6ff;
+}
+
+.pane.kind-shell .pane-kind {
+  color: #3fb950;
+}
+
+.pane-body {
+  flex: 1;
+  min-height: 0;
+  padding: 4px;
+}
+
+.pane-body .xterm {
+  height: 100%;
+}
