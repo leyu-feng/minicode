@@ -107,6 +107,25 @@ if ($effectiveArgs.Count -ge 1 -and $effectiveArgs[0] -eq "web") {
   }
 }
 
+if ($effectiveArgs.Count -ge 1 -and $effectiveArgs[0] -eq "chat") {
+  if (-not (Test-Path -LiteralPath $webPath)) {
+    throw "Agent project not found at: $webPath"
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $webPath "node_modules"))) {
+    Push-Location $webPath
+    try { npm install } finally { Pop-Location }
+  }
+  $env:MINICODE_REPO_ROOT = $executionRoot
+  $chatArgs = @($effectiveArgs | Select-Object -Skip 1)
+  Push-Location $executionRoot
+  try {
+    & node.exe (Join-Path $webPath "cli.js") @chatArgs
+    exit $LASTEXITCODE
+  } finally {
+    Pop-Location
+  }
+}
+
 function Invoke-OpenCode {
   param(
     [string[]]$InvokeArgs

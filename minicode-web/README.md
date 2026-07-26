@@ -1,12 +1,38 @@
 # minicode-web
 
-A local web portal that gives minicode a multi-pane terminal experience in the
-browser, with no native modules (no `node-pty`, no platform binaries).
+The minicode agent core, plus two front ends:
 
-A background Node.js process serves the page, owns every session, and proxies
-stdin/stdout/stderr over a WebSocket.
+- a **web portal** — a background Node.js server that serves a localhost page
+  with xterm.js split panes;
+- a **terminal REPL** (`cli.js`) — the same agent, standalone, no server.
 
-## Run
+Both drive the same `AgentSession` class, so there is one agent implementation
+to maintain. Nothing here needs native modules (no `node-pty`, no platform
+binaries).
+
+## Run the terminal agent
+
+```cmd
+bootstrap\minicode.cmd chat                     REM interactive REPL
+bootstrap\minicode.cmd chat "explain build.ps1" REM one prompt, then exit
+```
+
+Or directly:
+
+```powershell
+.\minicode.ps1 chat
+.\minicode.ps1 chat --repo-root C:\some\repo
+```
+
+REPL commands: `exit`/`quit`/`:q` to leave, `/clear` to reset the conversation,
+`/cwd` to show the working directory. `Ctrl+C` cancels the current turn;
+`Ctrl+C` at an empty prompt exits. Conversation history persists for the
+lifetime of the process.
+
+This runs entirely in your terminal — no server is started and no browser is
+opened.
+
+## Run the web portal
 
 From any git repository:
 
