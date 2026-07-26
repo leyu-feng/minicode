@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>minicode web portal</title>
+    <link rel="stylesheet" href="/vendor/xterm.css" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <span class="brand">minicode</span>
+      <span class="repo" id="repo-root">…</span>
+      <span class="spacer"></span>
+      <button data-action="new-agent" title="New agent pane">+ agent</button>
+      <button data-action="new-shell" title="New shell pane">+ shell</button>
+      <button data-action="split-right" title="Split focused pane right">split →</button>
+      <button data-action="split-down" title="Split focused pane down">split ↓</button>
+      <button data-action="close" title="Close focused pane">close</button>
+      <span class="status" id="status">connecting…</span>
+    </header>
+    <main id="layout"></main>
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/addon-fit.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

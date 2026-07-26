@@ -13,6 +13,7 @@ function Normalize-Domain([string]$Value) {
 $installRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $launcher = Join-Path $installRoot "opencode\packages\opencode\bin\opencode"
 $tuiPath = Join-Path $installRoot "minicode"
+$webPath = Join-Path $installRoot "minicode-web"
 $repo_root = $null
 $effectiveArgs = @()
 for ($i = 0; $i -lt $Arguments.Count; $i++) {
@@ -82,6 +83,27 @@ if (-not $isProviderCommand) {
   $env:OPENCODE_BASE_URL = if ($domain) { "https://copilot-api.$domain" } else { "https://api.githubcopilot.com" }
   if (-not $env:OPENCODE_MODEL) {
     $env:OPENCODE_MODEL = "claude-opus-4.8"
+  }
+}
+
+if ($effectiveArgs.Count -ge 1 -and $effectiveArgs[0] -eq "web") {
+  if (-not (Test-Path -LiteralPath $webPath)) {
+    throw "Web portal project not found at: $webPath"
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $webPath "node_modules"))) {
+    Push-Location $webPath
+    try { npm install } finally { Pop-Location }
+  }
+  $env:MINICODE_REPO_ROOT = $executionRoot
+  if ($effectiveArgs.Count -ge 2) {
+    $env:MINICODE_WEB_PORT = $effectiveArgs[1]
+  }
+  Push-Location $executionRoot
+  try {
+    & node.exe (Join-Path $webPath "server\index.js")
+    exit $LASTEXITCODE
+  } finally {
+    Pop-Location
   }
 }
 
