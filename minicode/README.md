@@ -1,6 +1,6 @@
-# minicode-web
+# minicode
 
-The minicode agent core, plus two front ends:
+A pure-Node coding agent that runs shell commands, with two front ends:
 
 - a **terminal CLI** (`cli.js`) — REPL, one-shot prompts, and auth;
 - a **web portal** (`server/`) — a background Node.js server that serves a

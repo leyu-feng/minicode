@@ -31,7 +31,7 @@ function send(payload) {
 
 /* ------------------------------------------------------- state persistence */
 
-const STATE_KEY = "minicode-web:layout"
+const STATE_KEY = "minicode:layout"
 
 // The layout and pane identities live in localStorage so reloading the page
 // reattaches to the same server-side sessions instead of starting new ones.

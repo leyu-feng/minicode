@@ -1,7 +1,7 @@
 {
-  "name": "minicode-web",
+  "name": "minicode",
   "version": "0.1.0",
-  "description": "Local web terminal portal for minicode agent",
+  "description": "Pure-Node coding agent with a terminal CLI and a browser terminal portal",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
