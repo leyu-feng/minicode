@@ -5,15 +5,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Normalize-Domain([string]$Value) {
-  if (-not $Value) { return $null }
-  return ($Value -replace '^https?://', '').TrimEnd('/')
-}
-
 $installRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $launcher = Join-Path $installRoot "opencode\packages\opencode\bin\opencode"
 $tuiPath = Join-Path $installRoot "minicode"
-$webPath = Join-Path $installRoot "minicode-web"
+$agentPath = Join-Path $installRoot "minicode-web"
+
+# -repo_root is parsed by hand: declaring it as a typed parameter alongside
+# ValueFromRemainingArguments makes PowerShell bind the prompt text to it.
 $repo_root = $null
 $effectiveArgs = @()
 for ($i = 0; $i -lt $Arguments.Count; $i++) {
@@ -28,21 +26,48 @@ for ($i = 0; $i -lt $Arguments.Count; $i++) {
   }
   $effectiveArgs += $arg
 }
-$executionRoot = if ($repo_root) { $repo_root } else { (Get-Location).Path }
 
+$executionRoot = if ($repo_root) { $repo_root } else { (Get-Location).Path }
 if (-not (Test-Path -LiteralPath $executionRoot)) {
   throw "repo_root does not exist: $executionRoot"
 }
 
-if (-not (Test-Path -LiteralPath $launcher)) {
-  throw "OpenCode launcher not found at: $launcher"
+$env:MINICODE_REPO_ROOT = $executionRoot
+
+function Ensure-Dependencies([string]$ProjectPath, [string]$Label) {
+  if (-not (Test-Path -LiteralPath $ProjectPath)) {
+    throw "$Label not found at: $ProjectPath"
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $ProjectPath "node_modules"))) {
+    Push-Location $ProjectPath
+    try { npm install } finally { Pop-Location }
+  }
 }
 
-if ($effectiveArgs.Count -ge 1 -and $effectiveArgs[0] -eq "tui") {
-  if (-not (Test-Path -LiteralPath $tuiPath)) {
-    throw "TUI project not found at: $tuiPath"
+function Invoke-Node([string]$Script, [string[]]$NodeArgs) {
+  Push-Location $executionRoot
+  try {
+    & node.exe $Script @NodeArgs
+    exit $LASTEXITCODE
+  } finally {
+    Pop-Location
   }
-  $env:MINICODE_REPO_ROOT = $executionRoot
+}
+
+$command = if ($effectiveArgs.Count -ge 1) { $effectiveArgs[0] } else { $null }
+
+# Browser portal: multi-pane terminal at http://127.0.0.1
+if ($command -eq "web") {
+  Ensure-Dependencies $agentPath "Web portal project"
+  if ($effectiveArgs.Count -ge 2) {
+    $env:MINICODE_WEB_PORT = $effectiveArgs[1]
+  }
+  Invoke-Node (Join-Path $agentPath "server\index.js") @()
+}
+
+# Legacy Ink TUI.
+if ($command -eq "tui") {
+  Ensure-Dependencies $tuiPath "TUI project"
   Push-Location $tuiPath
   try {
     npm start
@@ -52,101 +77,16 @@ if ($effectiveArgs.Count -ge 1 -and $effectiveArgs[0] -eq "tui") {
   }
 }
 
-$isProviderCommand = $effectiveArgs.Count -ge 2 -and (
-  (($effectiveArgs[0] -eq "auth") -or ($effectiveArgs[0] -eq "providers")) -and
-  (($effectiveArgs[1] -eq "login") -or ($effectiveArgs[1] -eq "list") -or ($effectiveArgs[1] -eq "logout"))
-)
-
-if (-not $isProviderCommand) {
-  if ($env:XDG_DATA_HOME) {
-    $authPath = Join-Path $env:XDG_DATA_HOME "opencode\auth.json"
-  } elseif ($env:LOCALAPPDATA) {
-    $authPath = Join-Path $env:LOCALAPPDATA "opencode\auth.json"
-  } elseif ($env:APPDATA) {
-    $authPath = Join-Path $env:APPDATA "opencode\auth.json"
-  } else {
-    $authPath = Join-Path $HOME ".local\share\opencode\auth.json"
+# Legacy opencode node fallback, kept as an escape hatch.
+if ($command -eq "raw") {
+  if (-not (Test-Path -LiteralPath $launcher)) {
+    throw "OpenCode launcher not found at: $launcher"
   }
-
-  if (-not (Test-Path -LiteralPath $authPath)) {
-    throw "Auth file not found at $authPath. Run: .\minicode.ps1 auth login --provider github-copilot"
-  }
-
-  $auth = Get-Content -LiteralPath $authPath -Raw | ConvertFrom-Json
-  $copilot = $auth.'github-copilot'
-  if (-not $copilot -or -not $copilot.refresh) {
-    throw "No github-copilot credential in $authPath. Run: .\minicode.ps1 auth login --provider github-copilot"
-  }
-
-  $domain = Normalize-Domain $copilot.enterpriseUrl
-  $env:OPENCODE_API_KEY = $copilot.refresh
-  $env:OPENCODE_BASE_URL = if ($domain) { "https://copilot-api.$domain" } else { "https://api.githubcopilot.com" }
-  if (-not $env:OPENCODE_MODEL) {
-    $env:OPENCODE_MODEL = "claude-opus-4.8"
-  }
+  Invoke-Node $launcher @($effectiveArgs | Select-Object -Skip 1)
 }
 
-if ($effectiveArgs.Count -ge 1 -and $effectiveArgs[0] -eq "web") {
-  if (-not (Test-Path -LiteralPath $webPath)) {
-    throw "Web portal project not found at: $webPath"
-  }
-  if (-not (Test-Path -LiteralPath (Join-Path $webPath "node_modules"))) {
-    Push-Location $webPath
-    try { npm install } finally { Pop-Location }
-  }
-  $env:MINICODE_REPO_ROOT = $executionRoot
-  if ($effectiveArgs.Count -ge 2) {
-    $env:MINICODE_WEB_PORT = $effectiveArgs[1]
-  }
-  Push-Location $executionRoot
-  try {
-    & node.exe (Join-Path $webPath "server\index.js")
-    exit $LASTEXITCODE
-  } finally {
-    Pop-Location
-  }
-}
-
-if ($effectiveArgs.Count -ge 1 -and $effectiveArgs[0] -eq "chat") {
-  if (-not (Test-Path -LiteralPath $webPath)) {
-    throw "Agent project not found at: $webPath"
-  }
-  if (-not (Test-Path -LiteralPath (Join-Path $webPath "node_modules"))) {
-    Push-Location $webPath
-    try { npm install } finally { Pop-Location }
-  }
-  $env:MINICODE_REPO_ROOT = $executionRoot
-  $chatArgs = @($effectiveArgs | Select-Object -Skip 1)
-  Push-Location $executionRoot
-  try {
-    & node.exe (Join-Path $webPath "cli.js") @chatArgs
-    exit $LASTEXITCODE
-  } finally {
-    Pop-Location
-  }
-}
-
-function Invoke-OpenCode {
-  param(
-    [string[]]$InvokeArgs
-  )
-  $env:MINICODE_REPO_ROOT = $executionRoot
-  Push-Location $executionRoot
-  try {
-    & node.exe $launcher @InvokeArgs
-  } finally {
-    Pop-Location
-  }
-}
-
-if ($isProviderCommand) {
-  Invoke-OpenCode -InvokeArgs $effectiveArgs
-  exit $LASTEXITCODE
-}
-
-if ($effectiveArgs.Count -gt 0) {
-  Invoke-OpenCode -InvokeArgs $effectiveArgs
-  exit $LASTEXITCODE
-}
-
-Invoke-OpenCode -InvokeArgs @()
+# Everything else - prompts, the REPL, auth, --no-tools - goes to the unified
+# agent CLI, which resolves credentials and the model itself.
+Ensure-Dependencies $agentPath "Agent project"
+$cliArgs = if ($command -eq "chat") { @($effectiveArgs | Select-Object -Skip 1) } else { $effectiveArgs }
+Invoke-Node (Join-Path $agentPath "cli.js") $cliArgs
