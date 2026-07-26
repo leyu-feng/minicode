@@ -7,7 +7,6 @@ $ErrorActionPreference = "Stop"
 
 $installRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $launcher = Join-Path $installRoot "opencode\packages\opencode\bin\opencode"
-$tuiPath = Join-Path $installRoot "minicode"
 $agentPath = Join-Path $installRoot "minicode-web"
 
 # -repo_root is parsed by hand: declaring it as a typed parameter alongside
@@ -63,18 +62,6 @@ if ($command -eq "web") {
     $env:MINICODE_WEB_PORT = $effectiveArgs[1]
   }
   Invoke-Node (Join-Path $agentPath "server\index.js") @()
-}
-
-# Legacy Ink TUI.
-if ($command -eq "tui") {
-  Ensure-Dependencies $tuiPath "TUI project"
-  Push-Location $tuiPath
-  try {
-    npm start
-    exit $LASTEXITCODE
-  } finally {
-    Pop-Location
-  }
 }
 
 # Legacy opencode node fallback, kept as an escape hatch.
