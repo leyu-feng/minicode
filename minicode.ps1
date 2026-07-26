@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 
 $installRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $launcher = Join-Path $installRoot "opencode\packages\opencode\bin\opencode"
-$agentPath = Join-Path $installRoot "minicode-web"
+$agentPath = Join-Path $installRoot "minicode"
 
 # -repo_root is parsed by hand: declaring it as a typed parameter alongside
 # ValueFromRemainingArguments makes PowerShell bind the prompt text to it.
