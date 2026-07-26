@@ -1,3 +1,6 @@
 [submodule "opencode"]
 	path = opencode
 	url = https://github.com/anomalyco/opencode.git
+[submodule "pi-agent"]
+	path = pi-agent
+	url = https://github.com/earendil-works/pi.git
