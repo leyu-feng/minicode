@@ -265,6 +265,7 @@ function createPane(kind, restore = null) {
     fit,
     cwd,
     buffer: "",
+    cursor: 0,
     history,
     historyIndex: history.length,
     busy: false,
@@ -358,10 +359,10 @@ function removeLeaf(paneId) {
 
 function replaceLine(pane, value) {
   pane.term.write(`\u001b[2K\r`)
-  pane.buffer = ""
   prompt(pane)
   pane.term.write(value)
   pane.buffer = value
+  pane.cursor = value.length
 }
 
 // Insert clipboard text into the current line. Embedded newlines are treated
@@ -400,6 +401,7 @@ function handleInput(pane, data) {
   if (data === "\u0003") {
     pane.term.write("^C\r\n")
     pane.buffer = ""
+    pane.cursor = 0
     send({ type: "interrupt", sessionId: pane.id })
     if (!pane.busy) prompt(pane)
     return
@@ -408,6 +410,7 @@ function handleInput(pane, data) {
   if (data === "\r") {
     const line = pane.buffer
     pane.buffer = ""
+    pane.cursor = 0
     pane.term.write("\r\n")
     if (!line.trim()) {
       prompt(pane)
@@ -443,9 +446,57 @@ function handleInput(pane, data) {
   }
 
   if (data === "\u007f") {
-    if (pane.buffer.length > 0) {
-      pane.buffer = pane.buffer.slice(0, -1)
-      pane.term.write("\b \b")
+    // Backspace: delete the character before the cursor.
+    if (pane.cursor > 0) {
+      pane.buffer = pane.buffer.slice(0, pane.cursor - 1) + pane.buffer.slice(pane.cursor)
+      pane.cursor--
+      redrawLine(pane)
+    }
+    return
+  }
+
+  if (data === "\u001b[3~") {
+    // Delete: remove the character at the cursor.
+    if (pane.cursor < pane.buffer.length) {
+      pane.buffer = pane.buffer.slice(0, pane.cursor) + pane.buffer.slice(pane.cursor + 1)
+      redrawLine(pane)
+    }
+    return
+  }
+
+  if (data === "\u001b[D") {
+    // Left arrow: move the cursor left one column.
+    if (pane.cursor > 0) {
+      pane.cursor--
+      pane.term.write("\u001b[D")
+    }
+    return
+  }
+
+  if (data === "\u001b[C") {
+    // Right arrow: move the cursor right one column.
+    if (pane.cursor < pane.buffer.length) {
+      pane.cursor++
+      pane.term.write("\u001b[C")
+    }
+    return
+  }
+
+  if (data === "\u001b[H" || data === "\u0001") {
+    // Home / Ctrl+A: jump to the start of the line.
+    if (pane.cursor > 0) {
+      pane.term.write(`\u001b[${pane.cursor}D`)
+      pane.cursor = 0
+    }
+    return
+  }
+
+  if (data === "\u001b[F" || data === "\u0005") {
+    // End / Ctrl+E: jump to the end of the line.
+    const remaining = pane.buffer.length - pane.cursor
+    if (remaining > 0) {
+      pane.term.write(`\u001b[${remaining}C`)
+      pane.cursor = pane.buffer.length
     }
     return
   }
@@ -460,8 +511,20 @@ function handleInput(pane, data) {
 
   if (data.charCodeAt(0) < 32 && data !== "\t") return
 
-  pane.buffer += data
-  pane.term.write(data)
+  // Insert typed text at the cursor position.
+  pane.buffer = pane.buffer.slice(0, pane.cursor) + data + pane.buffer.slice(pane.cursor)
+  pane.cursor += data.length
+  redrawLine(pane)
+}
+
+// Repaint the current input line and restore the cursor to pane.cursor. Used
+// whenever an edit happens somewhere other than the end of the line.
+function redrawLine(pane) {
+  pane.term.write(`\u001b[2K\r`)
+  pane.term.write(promptText(pane))
+  pane.term.write(pane.buffer)
+  const back = pane.buffer.length - pane.cursor
+  if (back > 0) pane.term.write(`\u001b[${back}D`)
 }
 
 /* ------------------------------------------------------------------- ws */
