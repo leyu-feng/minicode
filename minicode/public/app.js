@@ -764,7 +764,13 @@ function connect() {
       // clock preserved across output bursts.
       hideSpinner(pane)
       pane.term.write(renderOutput(message.data, message.stream))
-      if (pane.busy) startSpinner(pane)
+      // The spinner redraws with "\r\u001b[K", which clears the current line.
+      // If the output just written did not end in a newline, the cursor still
+      // sits on a line holding real text, so restarting the spinner there
+      // would erase it (it survives only in the server replay buffer, hence it
+      // reappears on reload). Only resume the spinner on a fresh line.
+      const endsOnNewLine = /\r?\n$/.test(message.data)
+      if (pane.busy && endsOnNewLine) startSpinner(pane)
       return
     }
 
