@@ -448,9 +448,12 @@ function handleInput(pane, data) {
   if (data === "\u007f") {
     // Backspace: delete the character before the cursor.
     if (pane.cursor > 0) {
+      const atEnd = pane.cursor === pane.buffer.length
       pane.buffer = pane.buffer.slice(0, pane.cursor - 1) + pane.buffer.slice(pane.cursor)
       pane.cursor--
-      redrawLine(pane)
+      // At the end of the line a simple erase avoids a flickering repaint.
+      if (atEnd) pane.term.write("\b \b")
+      else redrawLine(pane)
     }
     return
   }
@@ -511,7 +514,14 @@ function handleInput(pane, data) {
 
   if (data.charCodeAt(0) < 32 && data !== "\t") return
 
-  // Insert typed text at the cursor position.
+  // Insert typed text at the cursor position. Appending at the end is the
+  // common case: just echo the character to avoid repainting (which flickers).
+  if (pane.cursor === pane.buffer.length) {
+    pane.buffer += data
+    pane.cursor += data.length
+    pane.term.write(data)
+    return
+  }
   pane.buffer = pane.buffer.slice(0, pane.cursor) + data + pane.buffer.slice(pane.cursor)
   pane.cursor += data.length
   redrawLine(pane)
