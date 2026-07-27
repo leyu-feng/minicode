@@ -95,6 +95,15 @@ function parseJsonAction(text) {
   return extractFirstAction(trimmed)
 }
 
+// PowerShell's formatter right-pads output lines with spaces to a fixed nominal
+// width when stdout is a pipe rather than a real console. Strip that trailing
+// padding so lines aren't ragged. Only trailing whitespace before line breaks
+// (and at the very end) is removed, so real output is preserved.
+function trimLinePadding(text) {
+  if (process.platform !== "win32") return text
+  return text.replace(/[ \t]+(?=\r?\n)/g, "").replace(/[ \t]+$/, "")
+}
+
 function truncate(value, max = MAX_OUTPUT_CHARS) {
   if (!value) return ""
   if (value.length <= max) return value
@@ -202,7 +211,7 @@ function runShellCommand(command, { cwd, onData, signal }) {
     signal?.addEventListener("abort", abort, { once: true })
 
     const append = (chunk) => {
-      const text = chunk.toString()
+      const text = trimLinePadding(chunk.toString())
       output += text
       onData?.(text)
     }
@@ -262,6 +271,11 @@ export class AgentSession extends EventEmitter {
     this.closed = false
     this.messages = []
     this.controller = null
+    // Each submitted prompt owns one run. Invalidating the run on Ctrl+C
+    // prevents a late model response or tool completion from resuming work
+    // after the browser has returned to its prompt.
+    this.activeRun = null
+    this.nextRunId = 0
     this.systemPrompt = [
       "You are a practical coding agent.",
       `You are running inside the local working directory ${cwd} and can read and modify project files.`,
@@ -285,6 +299,14 @@ export class AgentSession extends EventEmitter {
     this.emit("output", { stream, data })
   }
 
+  #isActive(run) {
+    return !this.closed && this.activeRun === run && !run.controller.signal.aborted
+  }
+
+  #throwIfInactive(run) {
+    if (!this.#isActive(run)) throw new Error("aborted")
+  }
+
   async write(line) {
     const prompt = line.trim()
     if (!prompt || this.closed) return
@@ -293,17 +315,28 @@ export class AgentSession extends EventEmitter {
       return
     }
 
+    const run = {
+      id: ++this.nextRunId,
+      controller: new AbortController(),
+      // An interrupted prompt is rolled back from model context. Its commands
+      // may already have changed files, but its unfinished task cannot steer
+      // the next user request.
+      messageStart: this.messages.length,
+    }
+    this.activeRun = run
     this.busy = true
-    this.controller = new AbortController()
-    const signal = this.controller.signal
+    this.controller = run.controller
+    const signal = run.controller.signal
 
     try {
       if (!this.config) this.config = await resolveModelConfig()
+      this.#throwIfInactive(run)
       this.messages.push({ role: "user", content: prompt })
 
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-        if (signal.aborted) throw new Error("aborted")
+        this.#throwIfInactive(run)
         const raw = await callModel(this.config, this.messages, this.systemPrompt, signal)
+        this.#throwIfInactive(run)
         const action = parseJsonAction(raw)
 
         if (!action || typeof action !== "object" || action.type === "final") {
@@ -312,6 +345,7 @@ export class AgentSession extends EventEmitter {
             // Surface it loudly in red and feed the error back so it can retry.
             this.#emitOutput("\u001b[31mCould not parse model action as JSON:\u001b[0m\r\n", "stderr")
             this.#emitOutput(`\u001b[31m${raw.replace(/\n/g, "\r\n")}\u001b[0m\r\n`, "stderr")
+            this.#throwIfInactive(run)
             this.messages.push(
               { role: "assistant", content: raw },
               {
@@ -331,6 +365,7 @@ export class AgentSession extends EventEmitter {
             continue
           }
           const message = action?.type === "final" && typeof action.message === "string" ? action.message : raw
+          this.#throwIfInactive(run)
           this.messages.push({ role: "assistant", content: raw })
           this.#emitOutput(`\u001b[36m${message.replace(/\n/g, "\r\n")}\u001b[0m\r\n`)
           break
@@ -349,12 +384,15 @@ export class AgentSession extends EventEmitter {
               action.type === "write"
                 ? await writeFileAction(this.cwd, action)
                 : await editFileAction(this.cwd, action)
+            this.#throwIfInactive(run)
             this.#emitOutput(`\u001b[90m${summary}\u001b[0m\r\n`)
           } catch (error) {
+            this.#throwIfInactive(run)
             ok = false
             summary = error.message
             this.#emitOutput(`\u001b[31m${summary}\u001b[0m\r\n`, "stderr")
           }
+          this.#throwIfInactive(run)
           this.messages.push(
             { role: "assistant", content: raw },
             {
@@ -378,8 +416,13 @@ export class AgentSession extends EventEmitter {
         const result = await runShellCommand(command, {
           cwd: this.cwd,
           signal,
-          onData: (chunk) => this.#emitOutput(chunk.replace(/\r?\n/g, "\r\n")),
+          // A killed process can flush buffered output after Ctrl+C. Do not
+          // let output from an invalidated run appear in the next prompt.
+          onData: (chunk) => {
+            if (this.#isActive(run)) this.#emitOutput(chunk.replace(/\r?\n/g, "\r\n"))
+          },
         })
+        this.#throwIfInactive(run)
         this.#emitOutput(`\u001b[90mexit code: ${result.code}\u001b[0m\r\n`)
 
         this.messages.push(
@@ -400,12 +443,21 @@ export class AgentSession extends EventEmitter {
         }
       }
     } catch (error) {
-      const message = signal.aborted ? "cancelled" : error.message
-      this.#emitOutput(`\u001b[31m${message}\u001b[0m\r\n`, "stderr")
+      // Ctrl+C already restored the prompt. Suppress delayed cancellation
+      // output from the abandoned run so it cannot corrupt the next turn.
+      if (this.#isActive(run)) {
+        const message = signal.aborted ? "cancelled" : error.message
+        this.#emitOutput(`\u001b[31m${message}\u001b[0m\r\n`, "stderr")
+      }
     } finally {
-      this.busy = false
-      this.controller = null
-      this.emit("done", { exitCode: 0 })
+      // An old async operation may finish after a new prompt has started;
+      // only its owning run is allowed to alter session state or emit done.
+      if (this.activeRun === run) {
+        this.busy = false
+        this.controller = null
+        this.activeRun = null
+        this.emit("done", { exitCode: 0 })
+      }
     }
   }
 
@@ -416,11 +468,25 @@ export class AgentSession extends EventEmitter {
   }
 
   interrupt() {
-    this.controller?.abort()
+    const run = this.activeRun
+    if (!run) return
+
+    // Release the pane immediately. Abort fetches and kill any current tool,
+    // then invalidate this run so late async completions cannot issue another
+    // tool call, append to context, or change the busy state of a newer run.
+    this.activeRun = null
+    this.busy = false
+    this.controller = null
+    this.messages.length = run.messageStart
+    run.controller.abort()
+    this.emit("done", { exitCode: 130 })
   }
 
   dispose() {
     this.closed = true
-    this.controller?.abort()
+    const run = this.activeRun
+    this.activeRun = null
+    this.controller = null
+    run?.controller.abort()
   }
 }

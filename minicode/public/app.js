@@ -567,6 +567,18 @@ function runToolbarAction(action) {
   else if (action === "split-right" && focusedId) splitPane(focusedId, "row", panes.get(focusedId).kind)
   else if (action === "split-down" && focusedId) splitPane(focusedId, "col", panes.get(focusedId).kind)
   else if (action === "close" && focusedId) removePane(focusedId)
+  else if (action === "restart") restartBackend()
+}
+
+async function restartBackend() {
+  if (!window.confirm("Restart the backend server? Running sessions will be terminated.")) return
+  if (statusEl) statusEl.textContent = "restarting\u2026"
+  try {
+    await fetch("/api/restart", { method: "POST" })
+  } catch {}
+  // Give the server time to respawn and rebind the port, then reload the UI
+  // so it reconnects to the fresh backend.
+  setTimeout(() => location.reload(), 1500)
 }
 
 document.querySelectorAll(".toolbar button[data-action]").forEach((btn) => {

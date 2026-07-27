@@ -57,10 +57,16 @@ $command = if ($effectiveArgs.Count -ge 1) { $effectiveArgs[0] } else { $null }
 
 $piPath = Join-Path $installRoot "pi-agent"
 
+# Returns $true when Pi is usable. Standalone (zipped) installs ship without the
+# pi-agent submodule, so this must degrade to $false instead of throwing -- the
+# web portal still runs, and Pi panes report that Pi is unavailable.
 function Ensure-Pi {
   if (-not (Test-Path -LiteralPath $piPath)) {
-    Push-Location $installRoot
-    try { git submodule update --init pi-agent } finally { Pop-Location }
+    if (Test-Path -LiteralPath (Join-Path $installRoot ".git")) {
+      Push-Location $installRoot
+      try { git submodule update --init pi-agent } finally { Pop-Location }
+    }
+    if (-not (Test-Path -LiteralPath $piPath)) { return $false }
   }
   if (-not (Test-Path -LiteralPath (Join-Path $piPath "node_modules"))) {
     Push-Location $piPath
@@ -72,12 +78,15 @@ function Ensure-Pi {
     Push-Location $piPath
     try { npm run build } finally { Pop-Location }
   }
+  return $true
 }
 
 # Browser portal: multi-pane terminal at http://127.0.0.1
 if ($command -eq "web") {
   Ensure-Dependencies $agentPath "Web portal project"
-  Ensure-Pi
+  if (-not (Ensure-Pi)) {
+    Write-Host "pi-agent not installed; Pi panes will be unavailable." -ForegroundColor Yellow
+  }
   if ($effectiveArgs.Count -ge 2) {
     $env:MINICODE_WEB_PORT = $effectiveArgs[1]
   }
@@ -86,7 +95,9 @@ if ($command -eq "web") {
 
 # Pi coding agent CLI passthrough.
 if ($command -eq "pi") {
-  Ensure-Pi
+  if (-not (Ensure-Pi)) {
+    throw "pi-agent is not installed at: $piPath"
+  }
   $piCli = Join-Path $piPath "packages\coding-agent\dist\cli.js"
   Invoke-Node $piCli @($effectiveArgs | Select-Object -Skip 1)
 }

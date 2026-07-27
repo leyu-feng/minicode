@@ -4,6 +4,15 @@ import { killTree, killDescendants } from "./kill-tree.js"
 
 const DONE_MARKER = "__MINICODE_DONE__"
 
+// PowerShell's formatter right-pads output lines with spaces to a fixed nominal
+// width (120 cols) when stdout is a pipe rather than a real console. Strip that
+// trailing padding so lines aren't ragged in the web terminal. Only affects
+// trailing whitespace before line breaks, so real output is preserved.
+function trimLinePadding(text) {
+  if (process.platform !== "win32") return text
+  return text.replace(/[ \t]+(?=\r?\n)/g, "").replace(/[ \t]+$/, "")
+}
+
 function shellLauncher() {
   if (process.platform === "win32") {
     return { file: "powershell.exe", args: ["-NoProfile", "-NoLogo", "-Command", "-"] }
@@ -42,7 +51,7 @@ export class ShellSession extends EventEmitter {
     })
 
     this.proc.stdout.on("data", (chunk) => this.#handleChunk(chunk.toString(), "stdout"))
-    this.proc.stderr.on("data", (chunk) => this.emit("output", { stream: "stderr", data: chunk.toString() }))
+    this.proc.stderr.on("data", (chunk) => this.emit("output", { stream: "stderr", data: trimLinePadding(chunk.toString()) }))
     this.proc.on("error", (error) => this.emit("output", { stream: "stderr", data: `${error.message}\n` }))
     this.proc.on("close", (code) => {
       this.closed = true
@@ -58,7 +67,7 @@ export class ShellSession extends EventEmitter {
       const rest = this.pending.slice(index)
       const match = rest.match(new RegExp(`^${DONE_MARKER}:(-?\\d+)\\r?\\n?`))
       if (!match) break
-      if (before) this.emit("output", { stream, data: before })
+      if (before) this.emit("output", { stream, data: trimLinePadding(before) })
       this.busy = false
       this.emit("done", { exitCode: Number(match[1]) })
       this.pending = rest.slice(match[0].length)
@@ -70,7 +79,9 @@ export class ShellSession extends EventEmitter {
     if (safeLength > 0) {
       const flush = this.pending.slice(0, safeLength)
       this.pending = this.pending.slice(safeLength)
-      this.emit("output", { stream, data: flush })
+      // Only trim padding before line breaks here; the tail may be mid-line so
+      // don't strip its trailing whitespace.
+      this.emit("output", { stream, data: flush.replace(/[ \t]+(?=\r?\n)/g, "") })
     }
   }
 

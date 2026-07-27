@@ -48,6 +48,41 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost")
   const pathname = url.pathname
 
+  if (pathname === "/api/restart" && req.method === "POST") {
+    res.writeHead(200, { "Content-Type": "application/json" })
+    res.end(JSON.stringify({ ok: true }))
+    // Respawn a fresh copy of the server with the same arguments, then exit so
+    // the new process takes over. Running sessions are intentionally dropped.
+    console.log("restart requested via portal; respawning…")
+    setTimeout(() => {
+      const boundPort = server.address()?.port
+      // Tear down listeners so the port is free before the replacement binds,
+      // and reuse the same port so the reloading UI reconnects seamlessly.
+      for (const [id] of sessions) disposeSession(id)
+      try { wss.close() } catch {}
+      server.close(() => {
+        try {
+          const child = childProcess.spawn(process.execPath, process.argv.slice(1), {
+            cwd: process.cwd(),
+            env: {
+              ...process.env,
+              MINICODE_WEB_OPEN: "0",
+              MINICODE_WEB_PORT: String(boundPort || ""),
+            },
+            detached: true,
+            stdio: "inherit",
+            windowsHide: true,
+          })
+          child.unref()
+        } catch (error) {
+          console.error(`restart failed: ${error.message}`)
+        }
+        process.exit(0)
+      })
+    }, 150)
+    return
+  }
+
   if (pathname === "/api/info") {
     res.writeHead(200, { "Content-Type": "application/json" })
     res.end(JSON.stringify({ repoRoot, platform: process.platform, model: process.env.OPENCODE_MODEL || "default" }))
