@@ -93,12 +93,12 @@ function appendBuffer(entry, text) {
   }
 }
 
-function createSession(sessionId, kind, cwd) {
+function createSession(sessionId, kind, cwd, cols, rows) {
   const session =
     kind === "agent"
       ? new AgentSession({ id: sessionId, cwd })
       : kind === "pi"
-        ? new PiSession({ id: sessionId, cwd })
+        ? new PiSession({ id: sessionId, cwd, cols, rows })
         : new ShellSession({ id: sessionId, cwd })
   const entry = { session, kind: session.kind, cwd, buffer: "", busy: false, subscriber: null, detachedAt: 0 }
 
@@ -174,7 +174,7 @@ wss.on("connection", (socket) => {
 
       const cwd = message.cwd && fs.existsSync(message.cwd) ? message.cwd : repoRoot
       try {
-        const entry = createSession(sessionId, message.kind, cwd)
+        const entry = createSession(sessionId, message.kind, cwd, message.cols, message.rows)
         entry.subscriber = socket
         owned.add(sessionId)
         send({ type: "ready", sessionId, kind: entry.kind, cwd, restored: false, busy: false, buffer: "" })
@@ -197,6 +197,9 @@ wss.on("connection", (socket) => {
       // replay buffer matches what the user saw.
       if (typeof message.echo === "string") appendBuffer(entry, message.echo)
       entry.session.write(String(message.data ?? ""))
+    } else if (type === "resize") {
+      // Raw-passthrough sessions (Pi) relay terminal size into the faked TTY.
+      entry.session.resize?.(message.cols, message.rows)
     } else if (type === "clear") {
       // Drop the replay buffer and the agent conversation so neither the UI
       // transcript nor the model context grows without bound.

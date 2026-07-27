@@ -6,23 +6,43 @@ import { EventEmitter } from "node:events"
 import { killTree } from "./kill-tree.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const TTY_LAUNCH = path.join(__dirname, "pi-tty-launch.mjs")
 // minicode/server -> repo root that contains the pi-agent submodule
 const INSTALL_ROOT = path.resolve(__dirname, "..", "..")
 const PI_ROOT = path.join(INSTALL_ROOT, "pi-agent")
-const PI_CLI = path.join(PI_ROOT, "packages", "coding-agent", "src", "cli.ts")
+// Prefer the compiled CLI (runs under plain node); fall back to source via tsx.
+const PI_DIST_CLI = path.join(PI_ROOT, "packages", "coding-agent", "dist", "cli.js")
+const PI_SRC_CLI = path.join(PI_ROOT, "packages", "coding-agent", "src", "cli.ts")
 
 function tsxBin() {
   const name = process.platform === "win32" ? "tsx.cmd" : "tsx"
   return path.join(PI_ROOT, "node_modules", ".bin", name)
 }
 
+// Resolve how to launch the software-TTY wrapper: [file, prefixArgs, entry, shell].
+// The wrapper (pi-tty-launch.mjs) fakes a TTY and then imports PI_CLI_ENTRY,
+// which boots Pi's real interactive TUI.
+function resolveLauncher() {
+  if (fs.existsSync(PI_DIST_CLI)) {
+    return { file: process.execPath, prefix: [TTY_LAUNCH], entry: PI_DIST_CLI, shell: false }
+  }
+  const bin = tsxBin()
+  if (fs.existsSync(bin) && fs.existsSync(PI_SRC_CLI)) {
+    return { file: bin, prefix: [TTY_LAUNCH], entry: PI_SRC_CLI, shell: process.platform === "win32" }
+  }
+  return null
+}
+
 /**
- * A conversational Pi coding-agent bound to one web pane. Each prompt spawns the
- * Pi CLI in --print mode against a stable per-pane session id, so conversation
- * history is preserved by Pi itself across turns. Output is streamed live.
+ * A full interactive Pi coding-agent bound to one web pane. Instead of running
+ * Pi in batch (--print) mode, this launches Pi's genuine interactive TUI inside
+ * a child process whose piped stdin/stdout are patched to look like a terminal
+ * (see pi-tty-launch.mjs). Raw keystrokes from the client's xterm.js are written
+ * straight to Pi's stdin, and Pi's VT output is streamed back verbatim, giving
+ * the same experience as running Pi in a real console -- without a native PTY.
  */
 export class PiSession extends EventEmitter {
-  constructor({ id, cwd }) {
+  constructor({ id, cwd, cols, rows }) {
     super()
     this.id = id
     this.kind = "pi"
@@ -30,49 +50,45 @@ export class PiSession extends EventEmitter {
     this.busy = false
     this.closed = false
     this.proc = null
-    // Pi session ids must be filesystem/URL safe; derive one from the pane id.
-    this.piSessionId = String(id).replace(/[^a-zA-Z0-9_-]/g, "-")
-    this.started = false
+    this.cols = cols || 80
+    this.rows = rows || 24
+    this.#start()
   }
 
   #emitOutput(data, stream = "stdout") {
     this.emit("output", { stream, data })
   }
 
-  write(line) {
-    const prompt = line.replace(/\r?\n$/, "").trim()
-    if (!prompt || this.closed) return
-    if (this.busy) {
-      this.#emitOutput("\u001b[33mPi is still working; wait for it to finish.\u001b[0m\r\n", "stderr")
-      return
-    }
-
-    const bin = tsxBin()
-    if (!fs.existsSync(bin) || !fs.existsSync(PI_CLI)) {
+  #start() {
+    const launcher = resolveLauncher()
+    if (!launcher) {
       this.#emitOutput(
-        `\u001b[31mPi is not installed. Run \"minicode pi\" once (or 'npm install' inside pi-agent) to set it up.\u001b[0m\r\n`,
+        "\u001b[31mPi is not built. Run 'npm run build' inside pi-agent (or 'minicode web' which does it) to set it up.\u001b[0m\r\n",
         "stderr",
       )
-      this.busy = false
-      this.emit("done", { exitCode: 1 })
+      // Defer so listeners are attached before the exit fires.
+      setImmediate(() => this.emit("exit", { code: 1 }))
       return
     }
 
-    // After the first turn, resume the existing session so history carries over.
-    // A stable --session-id reuses the same Pi session file across turns, so
-    // conversation history is preserved without --continue (which targets the
-    // most-recent session and could conflict with an explicit id).
-    const args = [PI_CLI, "--print", "--session-id", this.piSessionId, prompt]
-
-    this.busy = true
-    this.started = true
-
-    const proc = childProcess.spawn(bin, args, {
+    const proc = childProcess.spawn(launcher.file, launcher.prefix, {
       cwd: this.cwd,
-      env: { ...process.env, FORCE_COLOR: "1", PI_CODING_AGENT: "true" },
-      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        FORCE_COLOR: "1",
+        PI_CODING_AGENT: "true",
+        PI_CLI_ENTRY: launcher.entry,
+        PI_TTY_COLS: String(this.cols),
+        PI_TTY_ROWS: String(this.rows),
+        TERM: process.env.TERM || "xterm-256color",
+        COLUMNS: String(this.cols),
+        LINES: String(this.rows),
+      },
+      // stdin/stdout/stderr are pipes; the 4th fd is an IPC channel used to
+      // relay terminal resize events into the faked TTY.
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
       windowsHide: true,
-      shell: process.platform === "win32", // .cmd shim needs a shell on Windows
+      shell: launcher.shell,
     })
     this.proc = proc
 
@@ -81,17 +97,35 @@ export class PiSession extends EventEmitter {
     proc.on("error", (error) => this.#emitOutput(`${error.message}\r\n`, "stderr"))
     proc.on("close", (code) => {
       this.proc = null
-      this.busy = false
-      this.emit("done", { exitCode: typeof code === "number" ? code : 0 })
+      this.closed = true
+      this.emit("exit", { code: typeof code === "number" ? code : 0 })
     })
   }
 
+  // Raw keystroke passthrough from the client's terminal.
+  write(data) {
+    if (this.closed || !this.proc) return
+    try {
+      this.proc.stdin.write(data)
+    } catch {}
+  }
+
+  resize(cols, rows) {
+    this.cols = cols || this.cols
+    this.rows = rows || this.rows
+    if (this.closed || !this.proc) return
+    try {
+      this.proc.send({ type: "resize", cols: this.cols, rows: this.rows })
+    } catch {}
+  }
+
+  // In interactive mode Ctrl+C is a keystroke Pi handles itself (cancel the
+  // current turn), so deliver it as an ETX byte rather than killing the tree.
   interrupt() {
     if (this.closed || !this.proc) return
     try {
-      killTree(this.proc.pid)
+      this.proc.stdin.write("\u0003")
     } catch {}
-    this.#emitOutput("\r\n[interrupted]\r\n", "stderr")
   }
 
   dispose() {

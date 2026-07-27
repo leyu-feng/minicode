@@ -66,6 +66,12 @@ function Ensure-Pi {
     Push-Location $piPath
     try { npm install } finally { Pop-Location }
   }
+  # The Pi CLI imports its workspace packages from their dist/ folders, so the
+  # monorepo must be built before it can run.
+  if (-not (Test-Path -LiteralPath (Join-Path $piPath "packages\coding-agent\dist\cli.js"))) {
+    Push-Location $piPath
+    try { npm run build } finally { Pop-Location }
+  }
 }
 
 # Browser portal: multi-pane terminal at http://127.0.0.1
@@ -81,15 +87,8 @@ if ($command -eq "web") {
 # Pi coding agent CLI passthrough.
 if ($command -eq "pi") {
   Ensure-Pi
-  $tsx = Join-Path $piPath "node_modules\.bin\tsx.cmd"
-  $piCli = Join-Path $piPath "packages\coding-agent\src\cli.ts"
-  Push-Location $executionRoot
-  try {
-    & $tsx $piCli @($effectiveArgs | Select-Object -Skip 1)
-    exit $LASTEXITCODE
-  } finally {
-    Pop-Location
-  }
+  $piCli = Join-Path $piPath "packages\coding-agent\dist\cli.js"
+  Invoke-Node $piCli @($effectiveArgs | Select-Object -Skip 1)
 }
 
 # Legacy opencode node fallback, kept as an escape hatch.

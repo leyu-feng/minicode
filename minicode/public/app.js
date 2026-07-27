@@ -282,11 +282,25 @@ function createPane(kind, restore = null) {
       })
       .catch(() => {})
   })
-  term.onData((data) => handleInput(pane, data))
+  pane.raw = kind === "pi"
+  term.onData((data) => {
+    if (pane.raw) {
+      // Raw passthrough: send every keystroke straight to the interactive
+      // process; the process (Pi's TUI) owns echo, editing and rendering.
+      send({ type: "input", sessionId: pane.id, data })
+      return
+    }
+    handleInput(pane, data)
+  })
+  // Relay terminal size to raw sessions so the faked TTY lays out correctly.
+  term.onResize(({ cols, rows }) => {
+    if (pane.raw) send({ type: "resize", sessionId: pane.id, cols, rows })
+  })
   panes.set(id, pane)
 
   header.querySelector(".pane-title").textContent = cwd
-  send({ type: "create", sessionId: id, kind, cwd })
+  const dims = fit.proposeDimensions?.() || {}
+  send({ type: "create", sessionId: id, kind, cwd, cols: dims.cols, rows: dims.rows })
   return pane
 }
 
@@ -463,7 +477,10 @@ function connect() {
       if (state) restoreFromState(state)
       else addPane("agent")
     } else {
-      panes.forEach((pane) => send({ type: "create", sessionId: pane.id, kind: pane.kind, cwd: pane.cwd }))
+      panes.forEach((pane) => {
+        const dims = pane.fit.proposeDimensions?.() || {}
+        send({ type: "create", sessionId: pane.id, kind: pane.kind, cwd: pane.cwd, cols: dims.cols, rows: dims.rows })
+      })
     }
   })
 
@@ -481,6 +498,16 @@ function connect() {
       pane.cwd = message.cwd
       pane.header.querySelector(".pane-title").textContent = message.cwd
       pane.term.reset?.()
+
+      if (pane.raw) {
+        // Interactive raw session (Pi): the process renders its own full TUI,
+        // so just replay any buffered bytes and get out of the way.
+        if (message.restored && message.buffer) pane.term.write(message.buffer)
+        pane.buffer = ""
+        pane.busy = false
+        saveState()
+        return
+      }
 
       if (message.restored) {
         // Replay the transcript the server buffered while we were away.
