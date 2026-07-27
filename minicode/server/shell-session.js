@@ -74,13 +74,18 @@ export class ShellSession extends EventEmitter {
       index = this.pending.indexOf(DONE_MARKER)
     }
 
-    // Flush everything that cannot be the start of a partial marker.
-    const safeLength = Math.max(0, this.pending.length - DONE_MARKER.length)
+    // Flush complete lines only. Holding back the partial tail keeps trailing
+    // padding adjacent to its newline so trimLinePadding can strip it; flushing
+    // mid-line could split a line's padding and leak the leading half through.
+    // A partial DONE marker only ever sits after the last newline (the marker
+    // always ends with its own newline), so flushing up to and including the
+    // last newline can never split a marker. Capping below lastBreak would flush
+    // a line mid-padding, leaving leading spaces with no trailing newline that
+    // the trim regex can't match -- which is the empty-line/padding leak.
+    const safeLength = this.pending.lastIndexOf("\n") + 1
     if (safeLength > 0) {
       const flush = this.pending.slice(0, safeLength)
       this.pending = this.pending.slice(safeLength)
-      // Only trim padding before line breaks here; the tail may be mid-line so
-      // don't strip its trailing whitespace.
       this.emit("output", { stream, data: flush.replace(/[ \t]+(?=\r?\n)/g, "") })
     }
   }
