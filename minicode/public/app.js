@@ -445,6 +445,23 @@ function handleInput(pane, data) {
     return
   }
 
+  if (data === "\u0017" || data === "\u0008") {
+    // Ctrl+W / Ctrl+Backspace: delete the word before the cursor. Skip any
+    // whitespace immediately left of the cursor, then the word characters.
+    if (pane.cursor > 0) {
+      let start = pane.cursor
+      while (start > 0 && /\s/.test(pane.buffer[start - 1])) start--
+      while (start > 0 && !/\s/.test(pane.buffer[start - 1])) start--
+      const atEnd = pane.cursor === pane.buffer.length
+      const removed = pane.cursor - start
+      pane.buffer = pane.buffer.slice(0, start) + pane.buffer.slice(pane.cursor)
+      pane.cursor = start
+      if (atEnd) pane.term.write("\b \b".repeat(removed))
+      else redrawLine(pane)
+    }
+    return
+  }
+
   if (data === "\u007f") {
     // Backspace: delete the character before the cursor.
     if (pane.cursor > 0) {
