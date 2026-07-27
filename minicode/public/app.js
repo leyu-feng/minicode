@@ -522,9 +522,11 @@ function handleInput(pane, data) {
     pane.term.write(data)
     return
   }
-  pane.buffer = pane.buffer.slice(0, pane.cursor) + data + pane.buffer.slice(pane.cursor)
+  // Mid-line: overwrite the existing characters rather than inserting, so the
+  // rest of the line stays put and no repaint (flicker) is needed.
+  pane.buffer = pane.buffer.slice(0, pane.cursor) + data + pane.buffer.slice(pane.cursor + data.length)
   pane.cursor += data.length
-  redrawLine(pane)
+  pane.term.write(data)
 }
 
 // Repaint the current input line and restore the cursor to pane.cursor. Used
