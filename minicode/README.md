@@ -71,8 +71,9 @@ The server listens on `127.0.0.1` only and opens your default browser.
 Toolbar actions: new agent/shell pane, split the focused pane right or down,
 and close the focused pane. Panes can be nested arbitrarily.
 
-Terminal keys: `Enter` submits, `Backspace` edits, `Up`/`Down` walk history,
-`Ctrl+C` clears the line (and cancels an in-flight agent turn). Typing `exit`
+Terminal keys: `Enter` submits, `Shift+Enter` inserts a newline in a prompt,
+`Backspace` edits, `Up`/`Down` walk history, `Ctrl+C` clears the line (and
+cancels an in-flight agent turn). Typing `exit`
 (or `quit`) closes the pane and disposes its backend session; a pane also closes
 automatically if its backend process ends. Closing the last pane leaves an empty
 workspace — reopen one from the toolbar.

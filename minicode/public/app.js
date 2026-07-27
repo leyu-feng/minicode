@@ -173,6 +173,60 @@ function prompt(pane, leadingNewline = false) {
   pane.term.write(promptText(pane, leadingNewline))
 }
 
+// Toggle a pane's busy state and reflect it in the cursor. While busy (a
+// prompt was sent and the agent is still working) input is already blocked,
+// so switch to a non-blinking bar cursor to signal the waiting state, like
+// Pi's TUI does. When idle, restore the blinking block cursor.
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+// Draw/refresh the spinner line in place. Shows the elapsed time so the user
+// can see how long the agent has been working or a command has been running.
+function renderSpinner(pane) {
+  const glyph = SPINNER_FRAMES[pane.spinnerFrame % SPINNER_FRAMES.length]
+  pane.spinnerFrame++
+  const secs = pane.spinnerStart ? Math.floor((Date.now() - pane.spinnerStart) / 1000) : 0
+  pane.term.write(`\r\u001b[K\u001b[90m${glyph} working… ${secs}s\u001b[0m`)
+  pane.spinnerVisible = true
+}
+
+function startSpinner(pane) {
+  if (pane.spinnerTimer) clearInterval(pane.spinnerTimer)
+  pane.spinnerFrame = 0
+  if (!pane.spinnerStart) pane.spinnerStart = Date.now()
+  renderSpinner(pane)
+  pane.spinnerTimer = setInterval(() => renderSpinner(pane), 80)
+}
+
+// Temporarily clear the spinner line (e.g. before writing real output) without
+// forgetting the elapsed clock, so it can resume afterwards.
+function hideSpinner(pane) {
+  if (pane.spinnerVisible) {
+    pane.term.write("\r\u001b[K")
+    pane.spinnerVisible = false
+  }
+}
+
+function stopSpinner(pane) {
+  if (pane.spinnerTimer) {
+    clearInterval(pane.spinnerTimer)
+    pane.spinnerTimer = null
+  }
+  hideSpinner(pane)
+  pane.spinnerStart = null
+}
+
+function setBusy(pane, busy) {
+  pane.busy = busy
+  if (busy) {
+    pane.term.options.cursorBlink = false
+    startSpinner(pane)
+  } else {
+    stopSpinner(pane)
+    pane.term.options.cursorStyle = "block"
+    pane.term.options.cursorBlink = true
+  }
+}
+
 // Keys the browser owns. The terminal is line based and never needs function
 // keys, so let Edge/Chrome handle fullscreen (F11), devtools (F12), reload,
 // zoom and tab switching instead of swallowing them.
@@ -225,6 +279,7 @@ function createPane(kind, restore = null) {
   const term = new Terminal({
     convertEol: true,
     cursorBlink: true,
+    cursorStyle: "block",
     fontSize: 13,
     fontFamily: '"Cascadia Code", Consolas, monospace',
     scrollback: 5000,
@@ -248,6 +303,15 @@ function createPane(kind, restore = null) {
         event.stopPropagation()
         return false
       }
+    }
+    // xterm reports Enter and Shift+Enter as the same data (\r), so handle
+    // the modified key event before it reaches onData. A bare Enter still
+    // submits the prompt; Shift+Enter inserts a newline into it.
+    if (event.type === "keydown" && event.key === "Enter" && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !pane.raw) {
+      handleInput(pane, "\n")
+      event.preventDefault()
+      event.stopPropagation()
+      return false
     }
     return passThroughToBrowser(event)
   })
@@ -358,11 +422,11 @@ function removeLeaf(paneId) {
 }
 
 function replaceLine(pane, value) {
-  pane.term.write(`\u001b[2K\r`)
-  prompt(pane)
-  pane.term.write(value)
+  const previousBuffer = pane.buffer
+  const previousCursor = pane.cursor
   pane.buffer = value
   pane.cursor = value.length
+  redrawLine(pane, previousBuffer, previousCursor)
 }
 
 // Insert clipboard text into the current line. Embedded newlines are treated
@@ -407,6 +471,18 @@ function handleInput(pane, data) {
     return
   }
 
+  if (data === "\n") {
+    // Shift+Enter inserts a newline without submitting.
+    const atEnd = pane.cursor === pane.buffer.length
+    const previousBuffer = pane.buffer
+    const previousCursor = pane.cursor
+    pane.buffer = pane.buffer.slice(0, pane.cursor) + "\n" + pane.buffer.slice(pane.cursor)
+    pane.cursor++
+    if (atEnd) pane.term.write("\r\n")
+    else redrawLine(pane, previousBuffer, previousCursor)
+    return
+  }
+
   if (data === "\r") {
     const line = pane.buffer
     pane.buffer = ""
@@ -437,10 +513,15 @@ function handleInput(pane, data) {
       return
     }
 
-    pane.busy = true
+    setBusy(pane, true)
     // Echo is what the server stores in its replay buffer so a page reload
     // shows the same transcript the user typed.
-    send({ type: "input", sessionId: pane.id, data: line, echo: `${promptText(pane)}${line}\r\n` })
+    send({
+      type: "input",
+      sessionId: pane.id,
+      data: line,
+      echo: `${promptText(pane)}${line.replace(/\n/g, "\r\n")}\r\n`,
+    })
     saveState()
     return
   }
@@ -453,11 +534,13 @@ function handleInput(pane, data) {
       while (start > 0 && /\s/.test(pane.buffer[start - 1])) start--
       while (start > 0 && !/\s/.test(pane.buffer[start - 1])) start--
       const atEnd = pane.cursor === pane.buffer.length
+      const previousBuffer = pane.buffer
+      const previousCursor = pane.cursor
       const removed = pane.cursor - start
       pane.buffer = pane.buffer.slice(0, start) + pane.buffer.slice(pane.cursor)
       pane.cursor = start
-      if (atEnd) pane.term.write("\b \b".repeat(removed))
-      else redrawLine(pane)
+      if (atEnd && !previousBuffer.includes("\n")) pane.term.write("\b \b".repeat(removed))
+      else redrawLine(pane, previousBuffer, previousCursor)
     }
     return
   }
@@ -466,11 +549,13 @@ function handleInput(pane, data) {
     // Backspace: delete the character before the cursor.
     if (pane.cursor > 0) {
       const atEnd = pane.cursor === pane.buffer.length
+      const previousBuffer = pane.buffer
+      const previousCursor = pane.cursor
       pane.buffer = pane.buffer.slice(0, pane.cursor - 1) + pane.buffer.slice(pane.cursor)
       pane.cursor--
-      // At the end of the line a simple erase avoids a flickering repaint.
-      if (atEnd) pane.term.write("\b \b")
-      else redrawLine(pane)
+      // At the end of a single line a simple erase avoids a flickering repaint.
+      if (atEnd && !previousBuffer.includes("\n")) pane.term.write("\b \b")
+      else redrawLine(pane, previousBuffer, previousCursor)
     }
     return
   }
@@ -478,8 +563,10 @@ function handleInput(pane, data) {
   if (data === "\u001b[3~") {
     // Delete: remove the character at the cursor.
     if (pane.cursor < pane.buffer.length) {
+      const previousBuffer = pane.buffer
+      const previousCursor = pane.cursor
       pane.buffer = pane.buffer.slice(0, pane.cursor) + pane.buffer.slice(pane.cursor + 1)
-      redrawLine(pane)
+      redrawLine(pane, previousBuffer, previousCursor)
     }
     return
   }
@@ -541,19 +628,47 @@ function handleInput(pane, data) {
   }
   // Mid-line: overwrite the existing characters rather than inserting, so the
   // rest of the line stays put and no repaint (flicker) is needed.
+  const previousBuffer = pane.buffer
+  const previousCursor = pane.cursor
   pane.buffer = pane.buffer.slice(0, pane.cursor) + data + pane.buffer.slice(pane.cursor + data.length)
   pane.cursor += data.length
-  pane.term.write(data)
+  if (previousBuffer.includes("\n")) redrawLine(pane, previousBuffer, previousCursor)
+  else pane.term.write(data)
 }
 
 // Repaint the current input line and restore the cursor to pane.cursor. Used
 // whenever an edit happens somewhere other than the end of the line.
-function redrawLine(pane) {
-  pane.term.write(`\u001b[2K\r`)
+function redrawLine(pane, previousBuffer = pane.buffer, previousCursor = pane.cursor) {
+  if (!previousBuffer.includes("\n") && !pane.buffer.includes("\n")) {
+    pane.term.write(`\u001b[2K\r`)
+    pane.term.write(promptText(pane))
+    pane.term.write(pane.buffer)
+    const back = pane.buffer.length - pane.cursor
+    if (back > 0) pane.term.write(`\u001b[${back}D`)
+    return
+  }
+
+  // Return to the first input row, erase the old multi-line input, then draw
+  // it again. This intentionally uses logical lines; xterm handles visual
+  // wrapping separately just as it does for normal terminal input.
+  const previousRow = previousBuffer.slice(0, previousCursor).split("\n").length - 1
+  pane.term.write("\r")
+  if (previousRow > 0) pane.term.write(`\u001b[${previousRow}A`)
+  pane.term.write("\u001b[J")
   pane.term.write(promptText(pane))
   pane.term.write(pane.buffer)
-  const back = pane.buffer.length - pane.cursor
-  if (back > 0) pane.term.write(`\u001b[${back}D`)
+
+  const beforeCursor = pane.buffer.slice(0, pane.cursor)
+  const cursorRow = beforeCursor.split("\n").length - 1
+  const rowsBack = pane.buffer.slice(pane.cursor).split("\n").length - 1
+  if (rowsBack > 0) pane.term.write(`\u001b[${rowsBack}A`)
+  pane.term.write("\r")
+  const column = beforeCursor.slice(beforeCursor.lastIndexOf("\n") + 1).length
+  // The first input row starts after the coloured prompt; continuation rows
+  // start at column zero.
+  const promptWidth = promptText(pane).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").length
+  const targetColumn = column + (cursorRow === 0 ? promptWidth : 0)
+  if (targetColumn > 0) pane.term.write(`\u001b[${targetColumn}C`)
 }
 
 /* ------------------------------------------------------------------- ws */
@@ -596,7 +711,7 @@ function connect() {
         // so just replay any buffered bytes and get out of the way.
         if (message.restored && message.buffer) pane.term.write(message.buffer)
         pane.buffer = ""
-        pane.busy = false
+        setBusy(pane, false)
         saveState()
         return
       }
@@ -616,7 +731,7 @@ function connect() {
       }
 
       pane.buffer = ""
-      pane.busy = Boolean(message.busy)
+      setBusy(pane, Boolean(message.busy))
       if (pane.busy) pane.term.write("\u001b[90mstill working…\u001b[0m\r\n")
       else prompt(pane)
       saveState()
@@ -629,18 +744,23 @@ function connect() {
     }
 
     if (message.type === "output") {
+      // Hide the spinner line, write the real output, then resume the spinner
+      // (still busy) so it keeps showing while commands run — with the elapsed
+      // clock preserved across output bursts.
+      hideSpinner(pane)
       pane.term.write(message.stream === "stderr" ? `\u001b[31m${message.data}\u001b[0m` : message.data)
+      if (pane.busy) startSpinner(pane)
       return
     }
 
     if (message.type === "done") {
-      pane.busy = false
+      setBusy(pane, false)
       prompt(pane, true)
       return
     }
 
     if (message.type === "exit") {
-      pane.busy = false
+      setBusy(pane, false)
       removePane(pane.id)
     }
   })
