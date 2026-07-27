@@ -419,7 +419,9 @@ export class AgentSession extends EventEmitter {
           // A killed process can flush buffered output after Ctrl+C. Do not
           // let output from an invalidated run appear in the next prompt.
           onData: (chunk) => {
-            if (this.#isActive(run)) this.#emitOutput(chunk.replace(/\r?\n/g, "\r\n"))
+            // Tag captured command output with its own stream so the UI can
+            // tint just these lines (not the "$ command" or "exit code" lines).
+            if (this.#isActive(run)) this.#emitOutput(chunk.replace(/\r?\n/g, "\r\n"), "command")
           },
         })
         this.#throwIfInactive(run)

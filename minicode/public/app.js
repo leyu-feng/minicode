@@ -215,6 +215,21 @@ function stopSpinner(pane) {
   pane.spinnerStart = null
 }
 
+// Render a chunk of session output. Captured command output (stream
+// "command") gets a subtle green background so it stands out from the AI text,
+// the "$ command" line and the "exit code" line, which are left untinted.
+const OUTPUT_BG = "\u001b[48;2;20;28;22m" // near-black gray with a hint of green
+
+function renderOutput(data, stream) {
+  if (stream === "stderr") return `\u001b[31m${data}\u001b[0m`
+  if (stream !== "command") return data
+  // Tint each line and extend the background to the row end with \u001b[K,
+  // reopening the background after each newline so every line is covered.
+  const open = OUTPUT_BG
+  const body = data.replace(/\r?\n/g, "\u001b[K\u001b[0m\r\n" + open)
+  return open + body + "\u001b[K\u001b[0m"
+}
+
 function setBusy(pane, busy) {
   pane.busy = busy
   if (busy) {
@@ -748,7 +763,7 @@ function connect() {
       // (still busy) so it keeps showing while commands run — with the elapsed
       // clock preserved across output bursts.
       hideSpinner(pane)
-      pane.term.write(message.stream === "stderr" ? `\u001b[31m${message.data}\u001b[0m` : message.data)
+      pane.term.write(renderOutput(message.data, message.stream))
       if (pane.busy) startSpinner(pane)
       return
     }
