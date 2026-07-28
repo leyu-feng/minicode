@@ -75,7 +75,6 @@ button:hover {
   flex: 1;
   min-width: 0;
   min-height: 0;
-  gap: 6px;
 }
 
 .split.row {
@@ -84,6 +83,37 @@ button:hover {
 
 .split.col {
   flex-direction: column;
+}
+
+.split-child {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.split-resizer {
+  flex: 0 0 6px;
+  background: #30363d;
+  transition: background 0.15s;
+}
+
+.split-resizer:hover,
+.split-resizer:active {
+  background: #58a6ff;
+}
+
+.split-resizer.row {
+  cursor: col-resize;
+}
+
+.split-resizer.col {
+  cursor: row-resize;
+}
+
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .empty-state {

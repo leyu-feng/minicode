@@ -127,9 +127,56 @@ function renderNode(node) {
   }
   const el = document.createElement("div")
   el.className = `split ${node.dir}`
-  el.appendChild(renderNode(node.a))
-  el.appendChild(renderNode(node.b))
+  if (typeof node.sizeA !== "number") node.sizeA = 0.5
+  const childA = renderNode(node.a)
+  const childB = renderNode(node.b)
+  const wrapA = document.createElement("div")
+  wrapA.className = "split-child"
+  wrapA.style.flex = `${node.sizeA} 1 0`
+  wrapA.appendChild(childA)
+  const wrapB = document.createElement("div")
+  wrapB.className = "split-child"
+  wrapB.style.flex = `${1 - node.sizeA} 1 0`
+  wrapB.appendChild(childB)
+  const resizer = document.createElement("div")
+  resizer.className = `split-resizer ${node.dir}`
+  attachResizer(resizer, el, wrapA, wrapB, node)
+  el.appendChild(wrapA)
+  el.appendChild(resizer)
+  el.appendChild(wrapB)
   return el
+}
+
+function attachResizer(resizer, container, wrapA, wrapB, node) {
+  resizer.addEventListener("pointerdown", (e) => {
+    e.preventDefault()
+    resizer.setPointerCapture(e.pointerId)
+    const horizontal = node.dir === "row"
+    const rect = container.getBoundingClientRect()
+    const total = horizontal ? rect.width : rect.height
+    const start = horizontal ? rect.left : rect.top
+    document.body.classList.add("resizing")
+
+    const onMove = (ev) => {
+      const pos = horizontal ? ev.clientX : ev.clientY
+      let frac = (pos - start) / total
+      frac = Math.max(0.1, Math.min(0.9, frac))
+      node.sizeA = frac
+      wrapA.style.flex = `${frac} 1 0`
+      wrapB.style.flex = `${1 - frac} 1 0`
+      panes.forEach(fitPane)
+    }
+    const onUp = (ev) => {
+      resizer.releasePointerCapture(e.pointerId)
+      document.body.classList.remove("resizing")
+      resizer.removeEventListener("pointermove", onMove)
+      resizer.removeEventListener("pointerup", onUp)
+      panes.forEach(fitPane)
+      saveState()
+    }
+    resizer.addEventListener("pointermove", onMove)
+    resizer.addEventListener("pointerup", onUp)
+  })
 }
 
 function render() {
