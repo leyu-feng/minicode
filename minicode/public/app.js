@@ -548,14 +548,11 @@ function handleInput(pane, data) {
       let start = pane.cursor
       while (start > 0 && /\s/.test(pane.buffer[start - 1])) start--
       while (start > 0 && !/\s/.test(pane.buffer[start - 1])) start--
-      const atEnd = pane.cursor === pane.buffer.length
       const previousBuffer = pane.buffer
       const previousCursor = pane.cursor
-      const removed = pane.cursor - start
       pane.buffer = pane.buffer.slice(0, start) + pane.buffer.slice(pane.cursor)
       pane.cursor = start
-      if (atEnd && !previousBuffer.includes("\n")) pane.term.write("\b \b".repeat(removed))
-      else redrawLine(pane, previousBuffer, previousCursor)
+      redrawLine(pane, previousBuffer, previousCursor)
     }
     return
   }
@@ -563,14 +560,14 @@ function handleInput(pane, data) {
   if (data === "\u007f") {
     // Backspace: delete the character before the cursor.
     if (pane.cursor > 0) {
-      const atEnd = pane.cursor === pane.buffer.length
       const previousBuffer = pane.buffer
       const previousCursor = pane.cursor
       pane.buffer = pane.buffer.slice(0, pane.cursor - 1) + pane.buffer.slice(pane.cursor)
       pane.cursor--
-      // At the end of a single line a simple erase avoids a flickering repaint.
-      if (atEnd && !previousBuffer.includes("\n")) pane.term.write("\b \b")
-      else redrawLine(pane, previousBuffer, previousCursor)
+      // A terminal backspace cannot cross xterm's soft-wrap boundary. Repaint
+      // instead, so deleting the first character on a wrapped row returns to
+      // the preceding row as expected.
+      redrawLine(pane, previousBuffer, previousCursor)
     }
     return
   }
@@ -651,39 +648,87 @@ function handleInput(pane, data) {
   else pane.term.write(data)
 }
 
-// Repaint the current input line and restore the cursor to pane.cursor. Used
-// whenever an edit happens somewhere other than the end of the line.
-function redrawLine(pane, previousBuffer = pane.buffer, previousCursor = pane.cursor) {
-  if (!previousBuffer.includes("\n") && !pane.buffer.includes("\n")) {
-    pane.term.write(`\u001b[2K\r`)
-    pane.term.write(promptText(pane))
-    pane.term.write(pane.buffer)
-    const back = pane.buffer.length - pane.cursor
-    if (back > 0) pane.term.write(`\u001b[${back}D`)
-    return
+// Return the cursor position relative to the start of the prompt after
+// rendering `offset` UTF-16 code units of `text`. `column === columns` means
+// xterm is at the right margin with a soft wrap pending; the next printable
+// character will move to the next row.
+function terminalPosition(text, offset, startColumn, columns) {
+  let row = 0
+  let column = startColumn
+
+  for (const char of text.slice(0, offset)) {
+    if (char === "\n") {
+      row++
+      column = 0
+      continue
+    }
+
+    const width = terminalCharWidth(char)
+    if (width === 0) continue
+    // xterm wraps before a character following the right margin. A wide
+    // character also wraps rather than straddling the final column.
+    if (column >= columns || column + width > columns) {
+      row++
+      column = 0
+    }
+    column += width
   }
 
-  // Return to the first input row, erase the old multi-line input, then draw
-  // it again. This intentionally uses logical lines; xterm handles visual
-  // wrapping separately just as it does for normal terminal input.
-  const previousRow = previousBuffer.slice(0, previousCursor).split("\n").length - 1
-  pane.term.write("\r")
-  if (previousRow > 0) pane.term.write(`\u001b[${previousRow}A`)
-  pane.term.write("\u001b[J")
-  pane.term.write(promptText(pane))
-  pane.term.write(pane.buffer)
+  return { row, column }
+}
 
-  const beforeCursor = pane.buffer.slice(0, pane.cursor)
-  const cursorRow = beforeCursor.split("\n").length - 1
-  const rowsBack = pane.buffer.slice(pane.cursor).split("\n").length - 1
-  if (rowsBack > 0) pane.term.write(`\u001b[${rowsBack}A`)
-  pane.term.write("\r")
-  const column = beforeCursor.slice(beforeCursor.lastIndexOf("\n") + 1).length
-  // The first input row starts after the coloured prompt; continuation rows
-  // start at column zero.
-  const promptWidth = promptText(pane).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").length
-  const targetColumn = column + (cursorRow === 0 ? promptWidth : 0)
-  if (targetColumn > 0) pane.term.write(`\u001b[${targetColumn}C`)
+// A compact wcwidth approximation for cursor positioning. Prompt editing is
+// normally ASCII, but treating combining marks and common East-Asian/emoji
+// characters correctly prevents a repaint from drifting after them.
+function terminalCharWidth(char) {
+  const code = char.codePointAt(0)
+  if (code === undefined || code === 0 || (code >= 0x300 && code <= 0x36f)) return 0
+  if (
+    code >= 0x1100 &&
+    (code <= 0x115f ||
+      code === 0x2329 ||
+      code === 0x232a ||
+      (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xfe10 && code <= 0xfe19) ||
+      (code >= 0xfe30 && code <= 0xfe6f) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      (code >= 0x1f300 && code <= 0x1faff))
+  ) return 2
+  return 1
+}
+
+// Repaint the current input and restore its cursor. Unlike a terminal's BS or
+// CUB control sequences, this accounts for both explicit newlines and xterm's
+// soft wraps, which do not allow the cursor to move backwards across a row.
+function redrawLine(pane, previousBuffer = pane.buffer, previousCursor = pane.cursor) {
+  const columns = Math.max(pane.term.cols || 80, 1)
+  const plainPrompt = promptText(pane).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+  const promptWidth = [...plainPrompt].reduce((width, char) => width + terminalCharWidth(char), 0)
+  // Preserve a right-margin position rather than reducing it to zero: the
+  // first typed character after a prompt exactly filling a row soft-wraps.
+  const startColumn = promptWidth === 0 ? 0 : ((promptWidth - 1) % columns) + 1
+  const oldCursor = terminalPosition(previousBuffer, previousCursor, startColumn, columns)
+
+  // Return to the prompt's first input row, remove every old visual row, then
+  // draw the replacement. Send this as one write: separate writes let xterm
+  // render an intermediate cursor at column zero, visible as a blue flash.
+  let redraw = "\r"
+  if (oldCursor.row > 0) redraw += `\u001b[${oldCursor.row}A`
+  redraw += `\u001b[J${promptText(pane)}${pane.buffer}`
+
+  if (pane.cursor !== pane.buffer.length) {
+    const cursor = terminalPosition(pane.buffer, pane.cursor, startColumn, columns)
+    const end = terminalPosition(pane.buffer, pane.buffer.length, startColumn, columns)
+    const rowsBack = end.row - cursor.row
+    if (rowsBack > 0) redraw += `\u001b[${rowsBack}A`
+    redraw += "\r"
+    if (cursor.column > 0) redraw += `\u001b[${cursor.column}C`
+  }
+
+  pane.term.write(redraw)
 }
 
 /* ------------------------------------------------------------------- ws */
