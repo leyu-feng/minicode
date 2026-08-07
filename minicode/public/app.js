@@ -351,6 +351,14 @@ function createPane(kind, restore = null) {
   term.loadAddon(fit)
   term.attachCustomKeyEventHandler((event) => {
     if (event.type === "keydown" && term.hasSelection()) {
+      if (event.key === "c" && event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
+        const sel = term.getSelection()
+        if (sel && navigator.clipboard) navigator.clipboard.writeText(sel).catch(() => {})
+        term.clearSelection()
+        event.preventDefault()
+        event.stopPropagation()
+        return false
+      }
       if (event.key === "Enter") {
         const sel = term.getSelection()
         if (sel && navigator.clipboard) navigator.clipboard.writeText(sel).catch(() => {})
@@ -497,7 +505,7 @@ function pasteText(pane, text) {
   const normalized = text.replace(/\r\n?/g, "\n")
   for (let i = 0; i < normalized.length; i++) {
     const ch = normalized[i]
-    if (ch === "\n") handleInput(pane, "\r")
+    if (ch === "\n") handleInput(pane, pane.raw ? "\r" : "\n")
     else if (ch === "\t" || ch.charCodeAt(0) >= 32) handleInput(pane, ch)
   }
 }
