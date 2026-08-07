@@ -517,7 +517,7 @@ function handleInput(pane, data) {
   // While the pane is busy (a prompt was sent and the agent/model is still
   // working) block all input except Ctrl+C so the user cannot type until the
   // model is done and the prompt returns.
-  if (pane.busy && data !== "\u0003") return
+  if (pane.busy && data !== "\u0003" && data !== "\u001b") return
 
   if (data === "\u0016") {
     // Ctrl+V: paste from the clipboard.
@@ -533,6 +533,16 @@ function handleInput(pane, data) {
   }
 
   if (data === "\u0003") {
+    pane.term.write("^C\r\n")
+    pane.buffer = ""
+    pane.cursor = 0
+    send({ type: "interrupt", sessionId: pane.id })
+    if (!pane.busy) prompt(pane)
+    return
+  }
+
+  if (data === "\u001b") {
+    // Bare Esc: break the loop just like Ctrl+C.
     pane.term.write("^C\r\n")
     pane.buffer = ""
     pane.cursor = 0
