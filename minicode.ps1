@@ -61,6 +61,10 @@ $piPath = Join-Path $installRoot "pi-agent"
 # pi-agent submodule, so this must degrade to $false instead of throwing -- the
 # web portal still runs, and Pi panes report that Pi is unavailable.
 function Ensure-Pi {
+  # pi-agent is disabled on this machine because its monorepo build fails here.
+  # Returning $false makes Pi degrade to "unavailable" without attempting a build.
+  return $false
+
   if (-not (Test-Path -LiteralPath $piPath)) {
     if (Test-Path -LiteralPath (Join-Path $installRoot ".git")) {
       Push-Location $installRoot
