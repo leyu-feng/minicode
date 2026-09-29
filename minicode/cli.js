@@ -1,8 +1,18 @@
 #!/usr/bin/env node
 import path from "node:path"
 import readline from "node:readline"
+import readlinePromises from "node:readline/promises"
 import { AgentSession, callModelOnce } from "./server/agent-session.js"
-import { authFilePath, listProviders, loginGithubCopilot, logoutProvider, resolveModelConfig } from "./server/auth.js"
+import {
+  DEFAULT_AZURE_MODEL,
+  addAzureDeployment,
+  authFilePath,
+  clearAuth,
+  listAuthConfigs,
+  loginAzureCli,
+  resolveModelConfig,
+  setActiveAuth,
+} from "./server/auth.js"
 
 const C = {
   reset: "\u001b[0m",
@@ -21,15 +31,17 @@ Usage:
   minicode                       Interactive REPL (conversation is remembered)
   minicode "<prompt>"            Run one prompt, print the answer, exit
   minicode --no-tools "<prompt>" Answer without running any shell commands
-  minicode auth login            Sign in to GitHub Copilot (device code)
-  minicode auth list             Show saved credentials
-  minicode auth logout [provider]
+  minicode auth login            Sign in with Azure CLI
+  minicode auth add [deployment] Add an Azure deployment
+  minicode auth use <name>       Select the active auth
+  minicode auth list             List configured auth options
+  minicode auth clear            Clear deployment configuration
   minicode --help
 
 Options:
   --repo-root <dir>       Working directory for shell commands
   --model <name>          Override the model for this run
-  --enterprise-url <url>  GitHub Enterprise host (with 'auth login')
+  --endpoint <url>        Responses endpoint (with 'auth add')
 
 REPL commands:
   exit, quit, :q     Leave
@@ -41,7 +53,8 @@ REPL commands:
 Ctrl+C cancels the current turn; Ctrl+C at an empty prompt exits.
 
 Environment:
-  OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL (default claude-opus-4.8)
+  AZURE_OPENAI_DEPLOYMENT, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_MODEL
+  OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL (custom provider override)
   MINICODE_REPO_ROOT`)
 }
 
@@ -54,8 +67,7 @@ function parseArgs(argv) {
     else if (arg === "--no-tools") options.noTools = true
     else if ((arg === "--repo-root" || arg === "-repo_root") && argv[i + 1]) options.repoRoot = argv[++i]
     else if (arg === "--model" && argv[i + 1]) options.model = argv[++i]
-    else if (arg === "--provider" && argv[i + 1]) options.provider = argv[++i]
-    else if (arg === "--enterprise-url" && argv[i + 1]) options.enterpriseUrl = argv[++i]
+    else if (arg === "--endpoint" && argv[i + 1]) options.endpoint = argv[++i]
     else options.positional.push(arg)
   }
   return options
@@ -81,36 +93,55 @@ async function runAuth(argv) {
   const action = argv[0] || "list"
 
   if (action === "login") {
-    const result = await loginGithubCopilot({
-      provider: options.provider,
-      enterpriseUrl: options.enterpriseUrl,
-      onPrompt: ({ verificationUri, userCode }) => {
-        console.log(`Go to:      ${C.cyan}${verificationUri}${C.reset}`)
-        console.log(`Enter code: ${C.cyan}${userCode}${C.reset}`)
-        console.log(`${C.dim}waiting for authorization…${C.reset}`)
-      },
-    })
-    console.log(`${C.green}Login successful for ${result.provider}${C.reset}`)
-    console.log(`${C.dim}saved to ${result.path}${C.reset}`)
+    await ensureAzureDeployment()
+    await loginAzureCli()
+    console.log(`${C.green}Azure CLI login successful${C.reset}`)
     return 0
   }
 
-  if (action === "list") {
-    const providers = await listProviders()
-    if (!providers.length) {
-      console.log("No saved provider credentials.")
-      console.log(`${C.dim}run: minicode auth login${C.reset}`)
-      return 0
-    }
-    for (const { provider, type } of providers) console.log(`${provider} (${type})`)
+  if (action === "add") {
+    const deployment = await promptForAzureDeployment(argv[1])
+    console.log(`${C.green}Active auth: ${deployment.name} · ${deployment.model}${C.reset}`)
     console.log(`${C.dim}${authFilePath()}${C.reset}`)
     return 0
   }
 
+  if (action === "use") {
+    if (!argv[1]) throw new Error("Usage: minicode auth use <name>")
+    const deployment = await setActiveAuth(argv[1])
+    console.log(`${C.green}Active auth: ${deployment.name} · ${deployment.model}${C.reset}`)
+    return 0
+  }
+
+  if (action === "ensure") {
+    await ensureAzureDeployment()
+    return 0
+  }
+
+  if (action === "list") {
+    const deployments = await listAuthConfigs()
+    if (!deployments.length) {
+      console.log("No Azure deployments configured.")
+      console.log(`${C.dim}run: minicode auth add${C.reset}`)
+      return 0
+    }
+    for (const deployment of deployments) {
+      console.log(`${deployment.active ? "*" : " "} ${deployment.name} · ${deployment.model} (${deployment.provider})`)
+      if (deployment.endpoint) console.log(`  ${C.dim}${deployment.endpoint}${C.reset}`)
+    }
+    console.log(`${C.dim}${authFilePath()}${C.reset}`)
+    return 0
+  }
+
+  if (action === "clear") {
+    const removed = await clearAuth()
+    console.log(removed ? "Cleared minicode auth configuration." : "Minicode auth configuration is already empty.")
+    console.log(`${C.dim}Azure CLI login was not changed.${C.reset}`)
+    return 0
+  }
+
   if (action === "logout") {
-    const provider = argv[1] || "github-copilot"
-    const removed = await logoutProvider(provider)
-    console.log(removed ? `Logged out ${provider}` : `No saved credential for ${provider}.`)
+    console.log("Azure CLI credentials are managed outside minicode. Run: az logout")
     return 0
   }
 
@@ -119,12 +150,46 @@ async function runAuth(argv) {
   return 1
 }
 
+async function promptForAzureDeployment(initialName) {
+  let name = initialName?.trim()
+  let model = options.model?.trim()
+  const interactive = process.stdin.isTTY && process.stdout.isTTY
+  let prompt
+  try {
+    if ((!name || !model) && interactive) {
+      prompt = readlinePromises.createInterface({ input: process.stdin, output: process.stdout })
+      if (!name) name = (await prompt.question("Azure deployment name: ")).trim()
+      if (!model) {
+        model = (await prompt.question(`Model [${DEFAULT_AZURE_MODEL}]: `)).trim() || DEFAULT_AZURE_MODEL
+      }
+    }
+  } finally {
+    prompt?.close()
+  }
+  if (!name) throw new Error("Azure deployment name is required. Run: minicode auth add <name>")
+  return addAzureDeployment({
+    name,
+    model: model || DEFAULT_AZURE_MODEL,
+    endpoint: options.endpoint,
+  })
+}
+
+async function ensureAzureDeployment() {
+  if (process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY) return
+  const deployments = await listAuthConfigs()
+  if (deployments.length) return
+  console.log(`${C.cyan}First-run Azure setup${C.reset}`)
+  await promptForAzureDeployment()
+}
+
 const AUTH_COMMANDS = new Set(["auth", "providers"])
 if (AUTH_COMMANDS.has(options.positional[0])) {
   process.exit(await runAuth(options.positional.slice(1)))
 }
 
 /* ----------------------------------------------------------------- agent */
+
+await ensureAzureDeployment()
 
 const cwd = path.resolve(options.repoRoot || process.env.MINICODE_REPO_ROOT || process.cwd())
 
@@ -154,11 +219,11 @@ async function runNoTools(prompt) {
 async function runRepl() {
   const config = await resolveModelConfig().catch(() => null)
   if (!config) {
-    console.error(`${C.red}Not signed in.${C.reset} Run: minicode auth login`)
+    console.error(`${C.red}Not signed in.${C.reset} Run: az login`)
     process.exit(1)
   }
 
-  console.log(`${C.green}minicode${C.reset} ${C.dim}${config.model}${C.reset}`)
+  console.log(`${C.green}minicode${C.reset} ${C.dim}${config.deployment} · ${config.model}${C.reset}`)
   console.log(`${C.dim}repo: ${cwd}${C.reset}`)
   console.log(`${C.dim}type 'exit' to quit, '/clear' to reset the conversation${C.reset}\n`)
 
@@ -208,7 +273,8 @@ async function runRepl() {
       continue
     }
     if (value === "/model") {
-      console.log(`${C.dim}${session.config?.model || config.model}${C.reset}`)
+      const active = session.config || config
+      console.log(`${C.dim}${active.deployment} · ${active.model}${C.reset}`)
       rl.prompt()
       continue
     }
@@ -228,10 +294,10 @@ const oneShot = options.positional.join(" ").trim()
 
 if (oneShot) {
   if (options.noTools) await runNoTools(oneShot)
-  else await runTurn(oneShot)
-  session.dispose()
-  process.exit(0)
+  else {
+    await runTurn(oneShot)
+    session.dispose()
+  }
+} else {
+  await runRepl()
 }
-
-await runRepl()
-process.exit(0)

@@ -24,6 +24,17 @@ function extractTextContent(message) {
   return ""
 }
 
+function extractResponsesText(response) {
+  if (typeof response?.output_text === "string" && response.output_text) return response.output_text
+  if (!Array.isArray(response?.output)) return ""
+  return response.output
+    .flatMap((item) => (Array.isArray(item?.content) ? item.content : []))
+    .filter((part) => part?.type === "output_text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("")
+    .trim()
+}
+
 const ACTION_TYPES = new Set(["tool", "edit", "write", "final"])
 
 // Models frequently emit Windows paths (e.g. minicode\server\index.js) inside
@@ -228,26 +239,43 @@ function runShellCommand(command, { cwd, onData, signal }) {
 }
 
 async function callModel(config, messages, systemPrompt, signal) {
-  const response = await fetch(`${config.baseUrl}/chat/completions`, {
-    method: "POST",
-    signal,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: config.model,
-      temperature: 0.2,
-      messages: systemPrompt ? [{ role: "system", content: systemPrompt }, ...messages] : messages,
-    }),
-  })
+  const apiKey = config.getAccessToken ? await config.getAccessToken() : config.apiKey
+  const isResponses = config.api === "responses"
+  let response
+  try {
+    response = await fetch(config.endpoint, {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(
+        isResponses
+          ? {
+              model: config.model,
+              instructions: systemPrompt,
+              input: messages,
+            }
+          : {
+              model: config.model,
+              temperature: 0.2,
+              messages: systemPrompt ? [{ role: "system", content: systemPrompt }, ...messages] : messages,
+            },
+      ),
+    })
+  } catch (error) {
+    if (signal?.aborted) throw error
+    const detail = error?.cause?.code ? `${error.message} (${error.cause.code})` : error?.message || String(error)
+    throw new Error(`Model request could not reach ${config.endpoint}: ${detail}`, { cause: error })
+  }
 
   if (!response.ok) {
     throw new Error(`Model request failed (${response.status}): ${await response.text()}`)
   }
 
   const data = await response.json()
-  const text = extractTextContent(data?.choices?.[0]?.message)
+  const text = isResponses ? extractResponsesText(data) : extractTextContent(data?.choices?.[0]?.message)
   if (!text) throw new Error("Model returned an empty response.")
   return text
 }
@@ -329,7 +357,7 @@ export class AgentSession extends EventEmitter {
     const signal = run.controller.signal
 
     try {
-      if (!this.config) this.config = await resolveModelConfig()
+      this.config = await resolveModelConfig()
       this.#throwIfInactive(run)
       this.messages.push({ role: "user", content: prompt })
 

@@ -27,13 +27,24 @@ Or directly:
 .\minicode.ps1 --model gpt-5.4 "summarise this repo"
 ```
 
-Sign in once with GitHub Copilot:
+Sign in with Azure CLI:
 
 ```powershell
+az login
 .\minicode.ps1 auth login
+.\minicode.ps1 auth add my-resource --model gpt-5.6-sol
 .\minicode.ps1 auth list
-.\minicode.ps1 auth logout
+.\minicode.ps1 auth use my-resource
+.\minicode.ps1 auth clear
 ```
+
+Minicode requests an Entra token for Azure Cognitive Services from the active
+Azure CLI account. Tokens remain managed by Azure CLI and are never written to
+minicode configuration files. On first run, minicode asks for an Azure
+deployment name and default model. Named deployments are stored in
+`auth.json`; add more with `auth add` and switch with `auth use`.
+Use `auth clear` to remove all saved minicode auth options and return to
+first-run setup without signing out of Azure CLI.
 
 REPL commands: `exit`/`quit`/`:q` to leave, `/clear` to reset the conversation,
 `/cwd` for the working directory, `/model` for the active model. `Ctrl+C`
@@ -104,7 +115,10 @@ browser attached.
 | `MINICODE_WEB_PORT` | Listen port (`0`/unset picks a free port). |
 | `MINICODE_WEB_OPEN` | Set to `0` to skip launching the browser. |
 | `MINICODE_WEB_IDLE_MS` | Dispose detached sessions after this long with no client (default 30 min). |
-| `OPENCODE_API_KEY` / `OPENCODE_BASE_URL` / `OPENCODE_MODEL` | Model overrides; otherwise the saved GitHub Copilot credential in `auth.json` is used. |
+| `AZURE_OPENAI_DEPLOYMENT` | Override the active named deployment from `auth.json`. |
+| `AZURE_OPENAI_ENDPOINT` | Override the active deployment's Responses API endpoint. |
+| `AZURE_OPENAI_MODEL` / `OPENCODE_MODEL` | Override the active deployment's model. |
+| `OPENCODE_API_KEY` / `OPENCODE_BASE_URL` | Use an API-key-based OpenAI-compatible provider instead of Azure Entra. |
 
 ## Limitation
 

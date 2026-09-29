@@ -940,6 +940,6 @@ fetch("/api/info")
   .then((res) => res.json())
   .then((info) => {
     repoRoot = info.repoRoot
-    repoEl.textContent = `${info.repoRoot} · ${info.model}`
+    repoEl.textContent = `${info.repoRoot} · ${info.deployment} · ${info.model}`
   })
   .finally(connect)

@@ -4,7 +4,7 @@
   "description": "Pure-Node coding agent with a terminal CLI and a browser terminal portal",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test test/*.test.js",
     "start": "node server/index.js",
     "chat": "node cli.js"
   },

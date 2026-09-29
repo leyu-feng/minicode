@@ -8,6 +8,7 @@ import { WebSocketServer } from "ws"
 import { AgentSession } from "./agent-session.js"
 import { ShellSession } from "./shell-session.js"
 import { PiSession } from "./pi-session.js"
+import { getActiveAuthSummary } from "./auth.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, "..")
@@ -84,8 +85,16 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/api/info") {
+    const deployment = await getActiveAuthSummary().catch(() => null)
     res.writeHead(200, { "Content-Type": "application/json" })
-    res.end(JSON.stringify({ repoRoot, platform: process.platform, model: process.env.OPENCODE_MODEL || "default" }))
+    res.end(
+      JSON.stringify({
+        repoRoot,
+        platform: process.platform,
+        deployment: deployment?.name || "not configured",
+        model: process.env.OPENCODE_MODEL || process.env.AZURE_OPENAI_MODEL || deployment?.model || "default",
+      }),
+    )
     return
   }
 
