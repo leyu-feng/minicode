@@ -1,0 +1,3 @@
+# Keep LF everywhere: the tooling hashes patches and fixtures byte-for-byte.
+* text=auto eol=lf
+patches/*.patch whitespace=-space-before-tab
