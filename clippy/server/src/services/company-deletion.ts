@@ -2,9 +2,12 @@ import type { Db } from "@paperclipai/db";
 import { eq, inArray } from "drizzle-orm";
 import { createAgentLifecycle, scheduleAgentLifecycle } from "./agent-lifecycle.js";
 import { agentLifecycleCompanyDeletion } from "../modules/agent-lifecycle/company-deletion.js";
+import { agentPoolBroker } from "./agent-pool-broker.js";
 import {
   companies,
   agents,
+  agentPools,
+  agentPoolWorkers,
   companyLogos,
   assets,
   agentApiKeys,
@@ -48,13 +51,19 @@ export async function deleteCompany(db: Db, id: string) {
     await lifecycle.terminateAgent(agent.id);
     await scheduleAgentLifecycle(db, agent.id);
   }
-  return db.transaction(async (tx) => {
+  const removedWorkers: Array<{ id: string }> = [];
+  const result = await db.transaction(async (tx) => {
         // Exclude accounting writers before taking child locks. KEY SHARE must
         // remain compatible: native writers can already hold a child row while
         // saving a company-scoped result. FOR UPDATE would deadlock that save.
         const [existing] = await tx.select({ id: companies.id }).from(companies)
           .where(eq(companies.id, id)).for("no key update");
         if (!existing) return null;
+        removedWorkers.push(...await tx.delete(agentPoolWorkers)
+          .where(inArray(agentPoolWorkers.poolId,
+            tx.select({ id: agentPools.id }).from(agentPools).where(eq(agentPools.companyId, id))))
+          .returning({ id: agentPoolWorkers.id }));
+        await tx.delete(agentPools).where(eq(agentPools.companyId, id));
         // Finance can reference costs and both can reference runs. Incidents
         // reference policies and approvals; delete these dependents first.
         await tx.delete(financeEvents).where(eq(financeEvents.companyId, id));
@@ -109,4 +118,6 @@ export async function deleteCompany(db: Db, id: string) {
           .returning();
         return rows[0] ?? null;
       });
+  for (const worker of removedWorkers) agentPoolBroker.revoke(worker.id, "AgentPool company was deleted");
+  return result;
 }

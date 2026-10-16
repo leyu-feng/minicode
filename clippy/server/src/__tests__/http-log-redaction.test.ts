@@ -12,6 +12,22 @@ import { testAdapterEnvironmentSchema } from "@paperclipai/shared";
 import { createHttpLogger } from "../middleware/logger.js";
 
 describe("HTTP logger redaction", () => {
+  it.each([400, 500])("keeps both AgentPool pairing credentials out of %i diagnostics", async (status) => {
+    const chunks: string[] = [];
+    const stream = new Writable({ write(chunk, _encoding, callback) { chunks.push(chunk.toString()); callback(); } });
+    const app = express();
+    app.use(express.json());
+    app.use(createHttpLogger(pino({ redact: [...HTTP_LOG_REDACT_PATHS] }, stream)));
+    app.post("/api/agent-pool/pair", (_req, _res, next) => {
+      next(new HttpError(status, "driver echoed server-token-canary and client-token-canary"));
+    });
+    app.use(errorHandler);
+    const response = await request(app).post("/api/agent-pool/pair").send({
+      workerId: "worker", serverToken: "server-token-canary", clientToken: "client-token-canary",
+    });
+    expect(response.status).toBe(status);
+    expect(JSON.stringify({ chunks, body: response.body })).not.toMatch(/server-token-canary|client-token-canary/);
+  });
   it.each([200, 400, 500])("keeps Slack setup credentials and provider echoes out of %i logs", async status => {
     const canaries = ["configuration-canary", "signing-canary", "client-canary", "bot-canary", "oauth-code-canary", "provider-echo-canary"];
     const chunks: string[] = [];

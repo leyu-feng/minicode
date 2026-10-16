@@ -2315,6 +2315,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         monitorNextCheckAt !== undefined &&
         (!monitorNextCheckAt || monitorNextCheckAt.getTime() <= now.getTime());
       const shouldRetry =
+        adapterType !== "agent_pool" &&
         (run.processLossRetryCount ?? 0) < 1 &&
         ((tracksLegacyLocalChild &&
           (!!run.processPid || !!run.processGroupId)) ||

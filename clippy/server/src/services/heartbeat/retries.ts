@@ -395,6 +395,11 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       delayMs?: number;
     },
   ) {
+    if (agent.adapterType === "agent_pool") {
+      return { outcome: "not_scheduled" as const,
+        reason: "AgentPool assignments require an explicit retry and must never be automatically replayed.",
+        issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
+    }
     if (parseObject(agent.adapterConfig).provider === "openai_dot"
         || parseObject(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput).provider).kind === "openai_dot") {
       return { outcome: "not_scheduled" as const, reason: "Dot external execution must be reconciled before a new assignment; Paperclip cannot confirm its external stop.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };

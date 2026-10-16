@@ -983,6 +983,7 @@ async function startServerWithDatabaseTeardown(
   process.env.PAPERCLIP_API_URL = configuredApiUrl;
 
   let startupListenerBound = false;
+  const closeAgentPool = setupAgentPoolWebSocketServer(server, db);
   try {
   setupEnvironmentCustomImageTerminalWebSocketServer(server, db as any, {
     pluginWorkerManager,
@@ -1972,6 +1973,7 @@ async function startServerWithDatabaseTeardown(
   ) => {
     await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
     heartbeatSchedulerStopped = true;
+    closeAgentPool();
     clearInterval(skillSourceSyncInterval);
     await skillSourceSync.stop();
     unsubscribeChatCompletions();
@@ -2146,3 +2148,4 @@ if (isMainModule(import.meta.url)) {
     process.exit(1);
   });
 }
+import { setupAgentPoolWebSocketServer } from "./realtime/agent-pool-ws.js";

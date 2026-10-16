@@ -108,6 +108,18 @@ describe("heartbeat retry module callbacks", () => {
     expect(database.access).not.toHaveBeenCalled();
   });
 
+  it("never automatically replays an AgentPool assignment after process loss or infrastructure failure", async () => {
+    const database = guardedDatabase();
+    const deps = callbacks();
+    const run = unitRun();
+    const agent = { adapterType: "agent_pool" } as Agent;
+    const result = await extracted.createHeartbeatRetries(database.db, deps).scheduleBoundedRetryForRun(run, agent);
+    expect(result).toMatchObject({ outcome: "not_scheduled", reason: expect.stringContaining("explicit retry") });
+    expect(database.access).not.toHaveBeenCalled();
+    expect(deps.appendRunEvent).not.toHaveBeenCalled();
+    expect(deps.runDispatch.evaluateScheduledRetryGate).not.toHaveBeenCalled();
+  });
+
   it("passes the service's worktree cutoff and publishes only returned effects", async () => {
     const database = guardedDatabase();
     const deps = callbacks();

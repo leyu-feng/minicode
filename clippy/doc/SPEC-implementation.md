@@ -13,6 +13,22 @@ When there is a conflict, `SPEC-implementation.md` controls V1 behavior.
 
 ## 2. V1 Outcomes
 
+AgentPool is an additive execution adapter (`agent_pool`, config `{ "name": "default" }`).
+Each company gets a default named pool on first access; other pool names are
+company-unique. Board-authorized company settings manages pools, expiring
+one-time worker pairing, and revocation. A worker generates its own client
+credential, which the server hashes and validates on WebSocket connection.
+One idle Minicode worker receives each admitted assignment. No available worker
+fails the run; it does not create an indefinite queue. A network drop may resume
+the same live execution for 60 seconds without replay, but process loss requires
+an explicit retry. Normal assignment, approval, budget and cancellation gates
+remain in force. Each worker retains an independent Git checkout per agent,
+outside its source repository (an explicit `--repo-root` or the launcher's
+working directory), initialized from committed
+files only. Runs execute there rather than in the source or a server-side
+workspace path. Worker model billing is unreported, and files remain worker-local.
+See the [worker setup and limits](../../minicode/README.md#connect-as-an-agentpool-worker).
+
 Paperclip V1 must provide a full control-plane loop for autonomous agents:
 
 1. A human board creates a company and defines goals.

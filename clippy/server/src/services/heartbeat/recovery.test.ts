@@ -186,6 +186,29 @@ describePostgres("heartbeat recovery module ownership", () => {
     return (await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, issueId, invocationSource: "automation", status: "running", runtimeMode: "legacy" }).returning())[0];
   }
 
+  it("fails a lost AgentPool monitor run instead of scheduling a process-loss replay", async () => {
+    const run = await seedRun();
+    await db.update(agents).set({ adapterType: "agent_pool" }).where(eq(agents.id, run.agentId));
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: run.issueId, wakeReason: "issue_monitor_due" } })
+      .where(eq(heartbeatRuns.id, run.id));
+    const deps = callbacks(db);
+    deps.getAgent.mockImplementation(async (id) => (await db.select().from(agents).where(eq(agents.id, id)))[0] ?? null);
+    deps.setRunStatusFromLive.mockImplementation(async (id, status, _allowed, patch) => {
+      const [updated] = await db.update(heartbeatRuns).set({ ...patch, status }).where(eq(heartbeatRuns.id, id)).returning();
+      return { updated: true, run: updated };
+    });
+    try {
+      await createHeartbeatRecovery(db, deps).reapOrphanedRuns();
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0])
+        .toMatchObject({ status: "failed", errorCode: "process_lost" });
+      expect(deps.scheduleBoundedRetryForRun).not.toHaveBeenCalled();
+      expect(deps.executeRun).not.toHaveBeenCalled();
+      expect(deps.releaseIssueExecutionAndPromote).toHaveBeenCalled();
+    } finally {
+      await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+    }
+  });
+
   it.each(["restored", "restore_failed"])("keeps the sandbox available until adapter workspace settlement: %s", async outcome => {
     const run = await seedRun();
     const deps = callbacks(db);

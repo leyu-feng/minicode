@@ -636,7 +636,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const showAdapterTestEnvironmentButton = !isGrokBotRunner && (props.showAdapterTestEnvironmentButton ?? true);
   const showInlineAdapterTestEnvironmentButton =
     showAdapterTestEnvironmentButton && !props.onTestActionChange && !props.compactTestFeedback;
-  const isLocal = !isExternalBotRunner && (adapterCaps.supportsInstructionsBundle || adapterCaps.supportsSkills || adapterCaps.supportsLocalAgentJwt);
+  const isLocal = !isExternalBotRunner && adapterType !== "agent_pool"
+    && (adapterCaps.supportsInstructionsBundle || adapterCaps.supportsSkills || adapterCaps.supportsLocalAgentJwt);
   
   // The legacy working directory is an absolute path on the host, so the
   // managed-sandbox-only policy hides it. A stored value stays untouched; it is

@@ -3,6 +3,7 @@ import path from "node:path"
 import readline from "node:readline"
 import readlinePromises from "node:readline/promises"
 import { AgentSession, callModelOnce } from "./server/agent-session.js"
+import { runAgentPoolWorkerCli } from "./server/agent-pool-worker.js"
 import {
   DEFAULT_AZURE_MODEL,
   addAzureDeployment,
@@ -36,6 +37,8 @@ Usage:
   minicode auth use <name>       Select the active auth
   minicode auth list             List configured auth options
   minicode auth clear            Clear deployment configuration
+  minicode worker --server <url> --worker-id <id> --repo-root <dir>
+                                Connect to an AgentPool as a worker
   minicode --help
 
 Options:
@@ -186,6 +189,14 @@ const AUTH_COMMANDS = new Set(["auth", "providers"])
 if (AUTH_COMMANDS.has(options.positional[0])) {
   process.exit(await runAuth(options.positional.slice(1)))
 }
+if (options.positional[0] === "worker") {
+  try {
+    await runAgentPoolWorkerCli(options.positional.slice(1), options.repoRoot)
+  } catch (error) {
+    console.error(`AgentPool worker: ${error.message}`)
+    process.exitCode = 1
+  }
+} else {
 
 /* ----------------------------------------------------------------- agent */
 
@@ -300,4 +311,5 @@ if (oneShot) {
   }
 } else {
   await runRepl()
+}
 }

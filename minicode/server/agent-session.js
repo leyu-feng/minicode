@@ -168,14 +168,14 @@ async function editFileAction(cwd, action) {
   return `edited ${path.relative(cwd, file)} (${applied} replacement${applied === 1 ? "" : "s"})`
 }
 
-function runShellCommand(command, { cwd, onData, signal }) {
+function runShellCommand(command, { cwd, onData, signal, env }) {
   return new Promise((resolve) => {
     const isWindows = process.platform === "win32"
     const file = isWindows ? "powershell.exe" : "bash"
     const args = isWindows ? ["-NoProfile", "-NonInteractive", "-Command", command] : ["-lc", command]
     const proc = childProcess.spawn(file, args, {
       cwd,
-      env: process.env,
+      env: env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       detached: !isWindows, // own process group on POSIX so we can signal the tree
@@ -290,11 +290,12 @@ export function callModelOnce(config, messages) {
  * for the lifetime of the session.
  */
 export class AgentSession extends EventEmitter {
-  constructor({ id, cwd }) {
+  constructor({ id, cwd, env }) {
     super()
     this.id = id
     this.kind = "agent"
     this.cwd = cwd
+    this.env = env
     this.busy = false
     this.closed = false
     this.messages = []
@@ -355,6 +356,7 @@ export class AgentSession extends EventEmitter {
     this.busy = true
     this.controller = run.controller
     const signal = run.controller.signal
+    const result = { exitCode: 0 }
 
     try {
       this.config = await resolveModelConfig()
@@ -388,6 +390,8 @@ export class AgentSession extends EventEmitter {
               },
             )
             if (turn === MAX_TOOL_TURNS - 1) {
+              result.exitCode = 1
+              result.error = "Stopped after max tool turns"
               this.#emitOutput("\u001b[31mStopped after max tool turns.\u001b[0m\r\n", "stderr")
             }
             continue
@@ -429,6 +433,8 @@ export class AgentSession extends EventEmitter {
             },
           )
           if (turn === MAX_TOOL_TURNS - 1) {
+            result.exitCode = 1
+            result.error = "Stopped after max tool turns"
             this.#emitOutput("\u001b[31mStopped after max tool turns.\u001b[0m\r\n", "stderr")
           }
           continue
@@ -441,8 +447,9 @@ export class AgentSession extends EventEmitter {
 
         const command = action.command.trim()
         this.#emitOutput(`\u001b[33m$ ${command}\u001b[0m\r\n`)
-        const result = await runShellCommand(command, {
+        const shellResult = await runShellCommand(command, {
           cwd: this.cwd,
+          env: this.env,
           signal,
           // A killed process can flush buffered output after Ctrl+C. Do not
           // let output from an invalidated run appear in the next prompt.
@@ -453,7 +460,7 @@ export class AgentSession extends EventEmitter {
           },
         })
         this.#throwIfInactive(run)
-        this.#emitOutput(`\u001b[90mexit code: ${result.code}\u001b[0m\r\n`)
+        this.#emitOutput(`\u001b[90mexit code: ${shellResult.code}\u001b[0m\r\n`)
 
         this.messages.push(
           { role: "assistant", content: raw },
@@ -462,17 +469,21 @@ export class AgentSession extends EventEmitter {
             content: [
               "TOOL_RESULT",
               `command: ${command}`,
-              `exitCode: ${result.code}`,
-              `output:\n${truncate(result.output) || "<empty>"}`,
+              `exitCode: ${shellResult.code}`,
+              `output:\n${truncate(shellResult.output) || "<empty>"}`,
             ].join("\n"),
           },
         )
 
         if (turn === MAX_TOOL_TURNS - 1) {
+          result.exitCode = 1
+          result.error = "Stopped after max tool turns"
           this.#emitOutput("\u001b[31mStopped after max tool turns.\u001b[0m\r\n", "stderr")
         }
       }
     } catch (error) {
+      result.exitCode = signal.aborted ? 130 : 1
+      result.error = signal.aborted ? "cancelled" : error.message
       // Ctrl+C already restored the prompt. Suppress delayed cancellation
       // output from the abandoned run so it cannot corrupt the next turn.
       if (this.#isActive(run)) {
@@ -486,9 +497,10 @@ export class AgentSession extends EventEmitter {
         this.busy = false
         this.controller = null
         this.activeRun = null
-        this.emit("done", { exitCode: 0 })
+        this.emit("done", result)
       }
     }
+    return result
   }
 
   // Forget the conversation so far so the model context stops growing without

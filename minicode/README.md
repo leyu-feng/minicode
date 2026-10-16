@@ -55,6 +55,104 @@ work.
 This runs entirely in your terminal — no server is started and no browser is
 opened.
 
+## Connect as an AgentPool worker
+
+Clippy keeps every existing adapter and adds **AgentPool** (`agent_pool`). Its
+only adapter setting is the company pool name:
+
+```json
+{ "name": "default" }
+```
+
+In Clippy's **Company settings → AgentPool workers**, select the automatic
+`default` pool or create a distinct pool (lowercase letters, numbers, hyphens,
+underscores; at most 64 characters). Choose **Pair worker**, give it a display
+name, and copy the one-time server token. Each worker needs its own pairing.
+Choose AgentPool when hiring an agent and enter that pool's name.
+The agent's setup check requires a connected worker in that company's selected
+pool; a busy worker still passes setup, but dispatch requires an idle worker.
+Model access is checked when a task runs, not by the pool connection check.
+
+Configure Minicode's model/auth on the worker first using the normal `auth`
+commands. Command-line entry points retain their current-directory behavior.
+For worker testing, use the `clippy-worker` submodule
+(`https://github.com/leyu-feng/clippy-worker.git`) as an explicitly selected source
+repository. Initialize it from the top-level minicode repository:
+
+```powershell
+git submodule update --init clippy-worker
+```
+
+Set the pairing token in the worker shell, resolve the submodule's full path,
+then pass it to the worker:
+
+```powershell
+$env:MINICODE_AGENT_POOL_PAIRING_TOKEN = "<one-time token from Clippy>"
+$workerRepo = (Resolve-Path .\clippy-worker).Path
+node .\minicode\cli.js worker --server https://clippy.example.com --worker-id <worker-id> --repo-root $workerRepo
+```
+
+The same full `--repo-root` path can be passed to `bootstrap\minicode.cmd` or
+`minicode.ps1`; `-repo_root` is also supported. The source must be a Git repository
+root with at least one commit. Without an explicit source, the worker follows
+the launcher's working directory (`MINICODE_REPO_ROOT`) or the current directory,
+not the sibling submodule. Existing paired workers remain bound to their saved
+source repository; changing it requires a newly paired worker.
+
+HTTP is allowed only for loopback development, for example
+`--server http://127.0.0.1:3100`. The server origin must be reachable from the
+worker, and its reverse proxy must forward WebSocket upgrades for
+`/api/agent-pool/worker`. No inbound port is opened on the worker.
+
+Minicode generates a random client token locally and persists it under
+`agent-pool\<worker-id>.json` in its existing configuration directory
+(`MINICODE_CONFIG_HOME` overrides it). Clippy stores only credential hashes.
+The server token expires after ten minutes and can be consumed once. It is
+removed from Minicode's process environment before tools run. Unset it in the
+parent shell after pairing; later starts use the same command without a pairing
+token. The saved client credential is bound to the server and source repository;
+pair a new worker to change either. Protect this file with your user account's
+filesystem permissions, especially on Windows.
+
+Multiple workers can join a pool. Each assignment goes to one idle worker, with
+a fresh AgentSession and the worker's model configuration. Its actual tool
+working directory is a persistent, independent Git clone for that agent, under
+`agent-pool\workspaces\<worker-id>\<agent-id>` in Minicode's configuration
+directory. Workspaces must be outside the source checkout. The first assignment
+clones committed files from the source's current `HEAD`; uncommitted changes,
+untracked files and installed dependencies are not copied. Later runs on that
+worker retain the agent's edits without resetting or pulling. Different agents
+and workers do not share these checkouts. Repositories listed as submodules are
+not initialized automatically.
+
+The actual local workspace path is recorded in the run log. Workspace paths
+from Clippy's server-side context are metadata, not worker filesystem paths.
+Existing files left in the old shared worker root are not migrated. Agent
+workspaces remain on disk after a run, worker restart or revocation so their
+results can be inspected; no automatic cleanup or cross-worker migration occurs.
+Workspace preparation failures fail the run without falling back to the source
+checkout. These are trusted coding agents, **not sandboxes**: assignments can execute shell
+commands with the worker account's privileges. Run-scoped Paperclip credentials
+are delivered to that session's tool environment, not its model prompt.
+The model receives only allowlisted task, wake, handoff and workspace context;
+runtime configuration is excluded even when nested in the server context.
+
+An offline or fully busy pool fails the run visibly rather than waiting forever.
+An interrupted network connection can resume the **same live execution** for up
+to 60 seconds while both processes survive. Sequenced logs and results are
+acknowledged; the assignment prompt is never replayed. Process restarts, an
+expired reconnect lease, or revocation fail affected work and require an explicit
+retry. Stop/ Ctrl+C cancels the active operation; server cancellation waits for
+the worker's operation to unwind before accepting its result. Output is limited
+to 2 MiB per run and task frames to 256 KiB; overflow fails explicitly.
+
+Worker-side file changes stay on the worker; this transport does not synchronize
+workspaces. Provider usage/cost is not reported by this worker. Existing known
+budget/admission gates still apply, but they cannot cap unreported model spend.
+Revoke a worker in company settings to invalidate its credential and disconnect
+it. Automatic execution-restart recovery and horizontal broker failover are not
+supported; all workers and runs for an instance must reach the same Clippy process.
+
 ## Run the web portal
 
 From any git repository:
@@ -119,6 +217,7 @@ browser attached.
 | `AZURE_OPENAI_ENDPOINT` | Override the active deployment's Responses API endpoint. |
 | `AZURE_OPENAI_MODEL` / `OPENCODE_MODEL` | Override the active deployment's model. |
 | `OPENCODE_API_KEY` / `OPENCODE_BASE_URL` | Use an API-key-based OpenAI-compatible provider instead of Azure Entra. |
+| `MINICODE_AGENT_POOL_PAIRING_TOKEN` | One-time AgentPool pairing token; omit after the initial pairing. |
 
 ## Limitation
 

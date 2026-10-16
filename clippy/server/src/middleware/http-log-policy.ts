@@ -38,6 +38,8 @@ function normalizePath(url: string): string {
 }
 
 const SECRET_SENSITIVE_HTTP_PATHS = [
+  /^\/api\/agent-pool\/pair(?:\/|$)/i,
+  /^\/api\/companies\/[^/]+\/agent-pools\/[^/]+\/workers(?:\/|$)/i,
   /^\/api\/companies\/[^/]+\/voice-sessions(?:\/|$)/,
   /^\/mcp\/(?:oauth|paperclip)(?:\/|$)/,
   /^\/api\/mcp(?:\/|$)/,

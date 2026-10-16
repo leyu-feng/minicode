@@ -143,7 +143,8 @@ function Setup({
   const chooseProvider = multiProvider || brandType === "hermes_local";
   const hasCredentialField =
     chooseProvider || Boolean(SETUP_CREDENTIAL_KEYS[adapterType]);
-  const showModel = !isDot && !["cursor_cloud", "hermes_gateway"].includes(adapterType);
+  const showModel = !isDot && !["cursor_cloud", "hermes_gateway", "agent_pool"].includes(adapterType);
+  const [poolName, setPoolName] = useState("default");
   const [allowUnmeteredProvider, setAllowUnmeteredProvider] = useState(false);
   const [gatewayUrl, setGatewayUrl] = useState("");
   const [kimiModel, setKimiModel] = useState("");
@@ -384,6 +385,7 @@ function Setup({
         : {}),
     };
     const config = getUIAdapter(adapterType).buildAdapterConfig(values);
+    if (adapterType === "agent_pool") config.name = poolName.trim();
     if (preserveNativeCodex && runner === "paperclip") {
       Object.assign(config, { provider: "codex", codexPermissionMode: "never", lifecycleMode: "per_turn" });
     }
@@ -421,6 +423,9 @@ function Setup({
     return config;
   }
   function preparedConfig(nextConnection = connection) {
+    if (adapterType === "agent_pool" && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(poolName.trim())) {
+      throw new Error("Enter a pool name using lowercase letters, numbers, hyphens, or underscores.");
+    }
     if (isDot && !allowUnmeteredProvider) throw new Error("Acknowledge external provider billing before creating your Dot agent.");
     if (multiProvider && (!model.trim() || !model.includes("/")))
       throw new Error("Choose or enter a model in provider/model format.");
@@ -653,7 +658,9 @@ function Setup({
     model ||
     "Default";
   const environmentLabel =
-    adapterType === "cursor_cloud"
+    adapterType === "agent_pool"
+      ? `AgentPool: ${String(created?.adapterConfig.name ?? poolName)}`
+      : adapterType === "cursor_cloud"
       ? "Cursor Cloud"
       : adapterType === "hermes_gateway"
         ? "Hermes Gateway"
@@ -885,6 +892,11 @@ function Setup({
                     </h2>
                     <fieldset disabled={busy} className="space-y-8">
                       <section className="space-y-5">
+                        {adapterType === "agent_pool" && (
+                          <Field label="Pool name" hint="Create pools and pair Minicode workers in company settings. The worker chooses its model and local working directory.">
+                            <Input value={poolName} onChange={(event) => { setPoolName(event.target.value); resetTest(); }} />
+                          </Field>
+                        )}
                         {isDot && <>
                           <p className="text-sm text-muted-foreground">Create this agent, then copy its pairing prompt to your Dot.</p>
                           {experimental.data?.enablePublicMcp !== true && <p className="text-sm text-muted-foreground">Enable Assistant connections (MCP) in Experimental settings before pairing.</p>}
@@ -1174,7 +1186,7 @@ function Setup({
                             onChange={value => { setRunner(value); resetTest(); }} />
                         </details>}
                       </section>
-                      {!["cursor_cloud", "hermes_gateway"].includes(
+                      {!["cursor_cloud", "hermes_gateway", "agent_pool"].includes(
                         adapterType,
                       ) && (
                         <section className="space-y-5">

@@ -7,3 +7,6 @@
 [submodule "paperclip"]
 	path = paperclip
 	url = https://github.com/paperclipai/paperclip.git
+[submodule "clippy-worker"]
+	path = clippy-worker
+	url = https://github.com/leyu-feng/clippy-worker.git

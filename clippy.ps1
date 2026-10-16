@@ -36,12 +36,11 @@ if ($nodeVersion -lt [version]"24.11.0") {
   throw "Clippy requires Node.js 24.11 or newer (found $nodeVersion)."
 }
 
-# pnpm is pinned by the packageManager field. It is fetched through npm rather
-# than corepack, because corepack ignores .npmrc and so bypasses the configured
-# registry and its auth.
+# npm resolves the pinned pnpm using the configured registry and auth. Run its
+# JavaScript entry point directly so npm.cmd does not wrap the live server.
 $pnpmVersion = ((Get-Content -Raw (Join-Path $appPath "package.json") | ConvertFrom-Json).packageManager -split "@")[1]
 function Invoke-Pnpm([string[]]$PnpmArgs) {
-  & npm.cmd exec --yes "pnpm@$pnpmVersion" -- @PnpmArgs
+  & node.exe $pnpmCli @PnpmArgs
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
@@ -64,6 +63,25 @@ $env:npm_config_script_shell = $bash
 
 Push-Location $appPath
 try {
+  $pnpmCommands = @(& npm.cmd exec --yes --package="pnpm@$pnpmVersion" -- where.exe pnpm)
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  $pnpmCli = $null
+  foreach ($command in $pnpmCommands) {
+    $packagePath = Join-Path (Split-Path -Parent $command) "..\pnpm"
+    $manifest = Join-Path $packagePath "package.json"
+    $candidate = Join-Path $packagePath "bin\pnpm.cjs"
+    if ((Test-Path -LiteralPath $manifest -PathType Leaf) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+      $version = (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).version
+      if ($version -eq $pnpmVersion) {
+        $pnpmCli = (Resolve-Path -LiteralPath $candidate).Path
+        # Nested package scripts must resolve the same pinned pnpm.
+        $env:PATH = "$(Split-Path -Parent $command)$([IO.Path]::PathSeparator)$env:PATH"
+        break
+      }
+    }
+  }
+  if (-not $pnpmCli) { throw "Could not resolve the pinned pnpm@$pnpmVersion JavaScript entry point." }
+
   if (-not (Test-Path -LiteralPath (Join-Path $appPath "node_modules"))) {
     Invoke-Pnpm @("install")
   }

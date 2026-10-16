@@ -221,3 +221,54 @@ release. Unconfirmed termination stays blocked. Existing fake-peer and delayed
 read controls are source evidence; this changes no actor, company, account or
 session-reset permission. Operation-level verification remains `not-run` and
 the failed Test setup does not qualify successful live cleanup.
+
+## `agent-pools`
+
+Review: `baseline`.
+
+API: `present` — GET/POST /api/companies/{companyId}/agent-pools;
+GET/POST /api/companies/{companyId}/agent-pools/{poolId}/workers;
+DELETE /api/companies/{companyId}/agent-pools/{poolId}/workers/{workerId}.
+POST /api/agent-pool/pair consumes a ten-minute, single-use server token and binds
+a worker-generated client credential. WebSocket /api/agent-pool/worker requires
+that worker's client credential, including in local-trusted mode.
+
+Agent access: `operator-only` for pool/worker administration; normal agent keys
+are denied. Minicode's `worker` CLI is the worker entry point. It receives only
+its assigned run context and transient run-scoped tool credentials, not board
+authority or the credentials of another pool.
+Its actual tools run in a persistent, independent per-agent Git clone on that
+worker, initialized from committed source files outside the source checkout.
+The source comes from an explicit `--repo-root` or the launcher's working
+directory. Worker tests pass the full `clippy-worker` submodule path explicitly.
+Server workspace paths remain context metadata, not worker filesystem bindings.
+This working-directory separation does not sandbox shell access.
+
+Policy: board and company access for management, pool ownership for worker
+creation/revocation; company and pool binding for dispatch. Tokens are hashed at
+rest, pairing is atomic and one-time, credentials are excluded from inventories
+and diagnostics. Existing heartbeat admission, assignment, approval, known-budget
+and cancellation gates remain authoritative. Offline/busy pools and process loss
+fail visibly with explicit retry; network resumption never replays the task.
+
+Evidence: `source-only` — [routes](../../server/src/routes/agent-pools.ts),
+[credential service](../../server/src/services/agent-pools.ts),
+[broker](../../server/src/services/agent-pool-broker.ts),
+[worker](../../../minicode/server/agent-pool-worker.js), and
+[integration tests](../../server/src/__tests__/agent-pools.test.ts).
+Fixture tests cover persistence, denied company/agent management, credential
+lifecycle, WebSocket authentication and a real Minicode CLI with a mock model.
+The CLI fixture checks that its artifact and model working directory belong to
+the agent checkout and leave the source untouched. [Worker tests](../../../minicode/test/agent-pool-worker.test.js)
+also cover real shell execution, retained edits, restart, agent separation and
+explicit workspace preparation failure.
+
+Verification: `not-run` for deployed human/agent access. With disposable company
+identities, assert allowed board operations, foreign-company and agent-key
+denials, single-use/expired pairing, credential revocation, and single-worker
+dispatch. Prove a useful provider result separately from connection readiness;
+exercise network reconnect, process loss and cancellation without replay.
+
+Gaps: provider usage accounting, workspace synchronization, durable
+execution-restart recovery and horizontal broker failover are not supported.
+Live provider and deployed reverse-proxy qualification remain separate gates.

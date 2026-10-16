@@ -17,6 +17,7 @@ import { buildNewAgentHirePayload } from "../lib/new-agent-hire-payload";
 import { ApiError } from "../api/client";
 import { aiConnectionsApi } from "../api/ai-connections";
 import { CodexLocalConfigFields } from "../adapters/codex-local/config-fields";
+import { agentPoolUIAdapter } from "../adapters/agent-pool";
 import type { AdapterConfigFieldsProps } from "../adapters/types";
 import { DEFAULT_CODEX_LOCAL_MODEL } from "@paperclipai/adapter-codex-local";
 
@@ -114,7 +115,7 @@ vi.mock("../context/CompanyContext", () => ({
 }));
 
 vi.mock("../adapters", () => ({
-  getUIAdapter: (type: string) => ({
+  getUIAdapter: (type: string) => type === "agent_pool" ? agentPoolUIAdapter : ({
     type,
     label: type === "hermes_gateway" ? "Hermes Gateway" : "Codex",
     // The stand-in also records the two gates the form resolves for every
@@ -671,6 +672,18 @@ describe("AgentConfigForm environment selector", () => {
       await act(async () => root.unmount());
       container.remove();
     }
+  });
+
+  it("edits AgentPool by name without exposing local model, path, or credential fields", async () => {
+    const result = await renderForm([], { adapterType: "agent_pool", adapterConfig: { name: "default" } });
+    roots.push(result.root);
+    const field = result.container.querySelector<HTMLInputElement>('input[placeholder="default"]');
+    expect(field?.value).toBe("default");
+    expect(result.container.textContent).not.toMatch(/Working directory|Instructions file path|Environment variables|Thinking effort/);
+    await act(async () => setInputValue(field!, "coding"));
+    await flushReact();
+    await clickByText(result.container, "Save");
+    expect(result.onSave).toHaveBeenCalledWith({ adapterConfig: { name: "coding" }, replaceAdapterConfig: true });
   });
 
   it.each(["codex_local", "paperclip_runner"])("keeps a saved %s runner during unrelated edits", async adapterType => {

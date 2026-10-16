@@ -111,6 +111,7 @@ import { onboardingSeedRoutes } from "./routes/onboarding-seed.js";
 import { boardChatRoutes } from "./routes/board-chat.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { secretRoutes } from "./routes/secrets.js";
+import { agentPoolRoutes, agentPoolPairingRoutes } from "./routes/agent-pools.js";
 import { toolAccessRoutes } from "./routes/tool-access.js";
 import {
   chatChannelRoutes,
@@ -649,6 +650,7 @@ export async function createApp(
   // board/agent bearer authentication. Mount before actorMiddleware so its
   // per-session Bearer cannot be mistaken for an agent API key.
   app.use(voiceWebhookRoutes(db, chatChannels.voice));
+  app.use(agentPoolPairingRoutes(db));
   app.use(
     actorMiddleware(db, {
       deploymentMode: opts.deploymentMode,
@@ -869,6 +871,7 @@ export async function createApp(
   api.use(voiceSessionRoutes(db, chatChannels.voice));
   api.use(approvalRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(secretRoutes(db));
+  api.use(agentPoolRoutes(db));
   api.use(managedAgentProfileRoutes(db));
   api.use(remoteAgentProfileRoutes(db));
   api.use(

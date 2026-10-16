@@ -16,6 +16,7 @@ Agent access: [companion](../agent-access-map/runs-adapters.md).
 - `validation`: test an adapter in the selected execution environment and surface authentication failures.
 - `runs`: inspect run status, events, output, costs, and the source task.
 - `session`: preserve or reset execution context through supported lifecycle actions.
+- `agent-pools`: create named worker pools, pair/revoke Minicode workers, and select a pool for an agent.
 
 ## How to get to it (user POV)
 
@@ -36,6 +37,14 @@ These source-level diagnostics do not establish a live response-time budget.
 Inspect `native.controller.<phase>` for backend construction, assigned-tool
 discovery and post-turn cleanup. Compare those intervals with the actual model
 turn; do not count a nested discovery interval twice.
+
+### `agent-pool-setup`
+
+Open Company settings and its AgentPool workers section. The `default` pool is
+automatic; create distinct named pools there, generate one-time pairing tokens
+for workers, and inspect or revoke them. Hire an agent with AgentPool and select
+the pool name. Follow [worker setup](../../../minicode/README.md#connect-as-an-agentpool-worker)
+on the worker machine.
 
 ## Driving it with Playwright and the Paperclip CLI
 
@@ -117,6 +126,23 @@ checks remain active. Its PostgreSQL controls are separate from the required
 revised-source live onboarding and follow-up proof.
 
 ## Gotchas
+
+For AgentPool, pair two disposable Minicode workers with committed source Git
+repositories. Pass the full `clippy-worker` submodule path as `--repo-root` to
+the worker CLI or CMD launcher; entry points retain their current-directory
+behavior rather than selecting this submodule automatically.
+Assign a task and verify that exactly one worker writes its useful
+output in an independent per-agent checkout, not the source repository, and
+Clippy records the result and actual worker workspace path. Source dirty files
+must not be copied. Run the same agent again and after a worker restart to verify
+its edits persist; another agent must receive a separate checkout.
+Disconnect only the network during a live run and
+verify the same execution resumes without replay. Restart a worker/server or
+exceed the 60-second lease: verify visible failure and no automatic retry. Revoke
+the worker and verify its credential can no longer connect. An offline or fully
+busy pool must fail visibly. The focused broker, persistence, CLI and component
+tests are automated fixture evidence; they do not qualify a deployed provider.
+Files remain worker-local and model usage is not reported.
 
 - Model accounts are managed in Apps and inline agent account controls.
   `/company/settings/connections` configures decision/fast-response models,
