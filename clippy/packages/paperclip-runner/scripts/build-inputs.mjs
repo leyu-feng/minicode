@@ -112,14 +112,15 @@ export const PENDING_RECORD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * chain in, so the chain is named after its pid, which `--begin` sees as its
  * parent. A shell that execs the last command of a `-c` string (bash can)
  * turns `--finish` into the shell itself, so `--finish` also accepts a record
- * named after its own pid.
+ * named after its own pid. Git Bash's native child parent IDs can change
+ * between commands, so the build exports its stable shell ID explicitly.
  */
 export function currentBuildId() {
-  return String(process.ppid);
+  return process.env.PAPERCLIP_RUNNER_BUILD_ID || String(process.ppid);
 }
 
 function finishingBuildIds() {
-  return [String(process.ppid), String(process.pid)];
+  return [currentBuildId(), String(process.pid)];
 }
 
 function readPendingRecord(pendingPath) {

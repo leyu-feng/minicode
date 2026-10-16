@@ -397,6 +397,30 @@ test("record-build-inputs.mjs brackets the build for the package it is pointed a
   });
 });
 
+test("an explicit shell build ID correlates phases independently of native parent IDs", async () => {
+  await withRepo(async ({ repoRoot, packageRoot }) => {
+    await writeFile(expectedBuildOutputs(packageRoot).at(-1), "binary\n");
+    const run = (phase, buildId) => execFileAsync(
+      process.execPath,
+      [recordScript, phase, "--package-root", packageRoot],
+      { env: { ...process.env, PAPERCLIP_RUNNER_BUILD_ID: buildId } },
+    );
+
+    await run("--begin", "shell-one");
+    await run("--begin", "shell-two");
+    const pending = () => readdirSync(buildInputsPendingDirectory(packageRoot)).sort();
+    assert.deepEqual(pending(), ["shell-one.json", "shell-two.json"]);
+    await assert.rejects(run("--finish", "other-shell"), /no pending build inputs/);
+    assert.deepEqual(pending(), ["shell-one.json", "shell-two.json"]);
+
+    await run("--finish", "shell-two");
+    assert.deepEqual(pending(), ["shell-one.json"]);
+    await run("--finish", "shell-one");
+    assert.deepEqual(pending(), []);
+    assert.equal(assessRunnerBuild({ repoRoot, packageRoot }).current, true);
+  });
+});
+
 test("two builds running at once in one checkout each keep their own pending record", async () => {
   await withRepo(async ({ repoRoot, packageRoot }) => {
     const stampPath = buildInputsStampPath(packageRoot);

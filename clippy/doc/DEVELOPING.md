@@ -18,6 +18,30 @@ Current implementation status:
 - Node.js 24.11+
 - pnpm 9+
 
+### Windows builds
+
+Install Git for Windows, the Rust MSVC toolchain, and Visual Studio 2022 C++ Build
+Tools with a Windows SDK. Package build scripts use POSIX shell commands, so run
+them with Git Bash as the script shell. Select the MSVC linker explicitly so
+Git's unrelated `link.exe` cannot shadow it:
+
+```powershell
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+$vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+$msvc = (Get-Content "$vs\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt" -Raw).Trim()
+$env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = "$vs\VC\Tools\MSVC\$msvc\bin\Hostx64\x64\link.exe"
+$env:npm_config_script_shell = "C:\Program Files\Git\bin\bash.exe"
+$env:PATH = "C:\Program Files\Git\usr\bin;$HOME\.cargo\bin;$env:PATH"
+pnpm install --frozen-lockfile
+& $env:ComSpec /d /c "call `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && pnpm build"
+```
+
+Workspace dependency repair uses directory junctions on Windows and does not
+require Developer Mode or administrator privileges.
+
+Building the Windows runner does not add support for provider execution paths
+that explicitly require Linux or macOS.
+
 ## Dependency Lockfile Policy
 
 GitHub Actions owns `pnpm-lock.yaml`.
