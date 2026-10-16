@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { parseProviderPackArguments, materializeCandidateProviderPack, providerPackProviders, providerPackManifestFields } from "./candidate-provider-pack.mjs";
 
 test("candidate options stay explicit and supported native assets are included by default", () => {
-  assert.deepEqual(parseProviderPackArguments(["--", "/pack"]), { output: "/pack", candidates: [] });
-  assert.deepEqual(parseProviderPackArguments(["/pack", "--candidate-providers=pi,cursor"]), { output: "/pack", candidates: ["pi", "cursor"] });
+  assert.deepEqual(parseProviderPackArguments(["--", "/pack"]), { output: "/pack", candidates: [], excluded: [] });
+  assert.deepEqual(parseProviderPackArguments(["/pack", "--candidate-providers=pi,cursor"]), { output: "/pack", candidates: ["pi", "cursor"], excluded: [] });
   for (const [platform, architecture] of [["darwin", "arm64"], ["darwin", "x64"], ["linux", "x64"]]) {
     assert.deepEqual(providerPackProviders(platform, architecture, []), ["pi", "cursor"]);
     assert.deepEqual(providerPackProviders(platform, architecture, ["cursor", "pi", "copilot"]), ["pi", "cursor", "copilot"]);
@@ -12,6 +12,18 @@ test("candidate options stay explicit and supported native assets are included b
   assert.deepEqual(providerPackProviders("linux", "arm64", []), []);
   assert.deepEqual(providerPackProviders("win32", "x64", []), []);
   assert.deepEqual(providerPackProviders("linux", "arm64", ["cursor"]), ["cursor"]);
+});
+test("image builds can exclude Pi and Cursor without changing default or other providers", () => {
+  const options = parseProviderPackArguments(["/pack", "--exclude-providers=pi,cursor"]);
+  assert.deepEqual(options.excluded, ["pi", "cursor"]);
+  assert.deepEqual(providerPackProviders("linux", "x64", options.candidates, options.excluded), []);
+  assert.deepEqual(providerPackProviders("linux", "x64", ["copilot"], options.excluded), ["copilot"]);
+  assert.deepEqual(providerPackProviders("linux", "x64", [], ["pi"]), ["cursor"]);
+  for (const args of [
+    ["--exclude-providers=unknown"],
+    ["--exclude-providers=pi,pi"],
+    ["--candidate-providers=pi", "--exclude-providers=pi"],
+  ]) assert.throws(() => parseProviderPackArguments(args));
 });
 test("serialized manifests include every materialized qualified provider", () => {
   const pi = { qualification: "qualified", profileDigest: "pi-digest" };

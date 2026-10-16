@@ -7,6 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
+import { resolvePostgresAuthOptions, resolvePostgresCliConnection } from "./postgres-auth.js";
 
 export type BackupRetentionPolicy = {
   dailyDays: number;
@@ -327,10 +328,11 @@ async function runPgDumpBackup(opts: {
   connectTimeout: number;
 }): Promise<void> {
   const pgDumpBin = process.env.PAPERCLIP_PG_DUMP_PATH || "pg_dump";
+  const connection = await resolvePostgresCliConnection(opts.connectionString);
   const child = spawn(
     pgDumpBin,
     [
-      `--dbname=${opts.connectionString}`,
+      `--dbname=${connection.connectionString}`,
       "--format=plain",
       "--clean",
       "--if-exists",
@@ -340,7 +342,7 @@ async function runPgDumpBackup(opts: {
     {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
-        ...process.env,
+        ...connection.env,
         PGCONNECT_TIMEOUT: String(opts.connectTimeout),
       },
     },
@@ -358,10 +360,11 @@ async function runPgDumpBackup(opts: {
 
 async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: number): Promise<void> {
   const psqlBin = process.env.PAPERCLIP_PSQL_PATH || "psql";
+  const connection = await resolvePostgresCliConnection(opts.connectionString);
   const child = spawn(
     psqlBin,
     [
-      `--dbname=${opts.connectionString}`,
+      `--dbname=${connection.connectionString}`,
       "--set=ON_ERROR_STOP=1",
       "--quiet",
       "--no-psqlrc",
@@ -369,7 +372,7 @@ async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: 
     {
       stdio: ["pipe", "ignore", "pipe"],
       env: {
-        ...process.env,
+        ...connection.env,
         PGCONNECT_TIMEOUT: String(connectTimeout),
       },
     },
@@ -537,7 +540,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const canUsePgDump = !hasBackupTransforms(opts);
   const excludedTableNames = normalizeTableNameSet(opts.excludeTables);
   const nullifiedColumnsByTable = normalizeNullifyColumnMap(opts.nullifyColumns);
-  let sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+  let sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout, ...resolvePostgresAuthOptions(opts.connectionString) });
   let sqlClosed = false;
   const closeSql = async () => {
     if (sqlClosed) return;
@@ -572,7 +575,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
           throw error;
         }
         effectiveBackupEngine = "javascript";
-        sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+        sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout, ...resolvePostgresAuthOptions(opts.connectionString) });
         sqlClosed = false;
       }
       if (dumped) {
@@ -976,7 +979,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       if (effectiveBackupEngine !== "javascript" && nullifiedColumns.size === 0) {
         emit(`COPY ${qualifiedTableName} (${colNames}) FROM stdin;`);
         await writer.writeRaw("\n");
-        const copySql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+        const copySql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout, ...resolvePostgresAuthOptions(opts.connectionString) });
         try {
           const copyStream = await copySql
             .unsafe(`COPY ${qualifiedTableName} (${colNames}) TO STDOUT`)
@@ -1103,7 +1106,7 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
     }
   }
 
-  const sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+  const sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout, ...resolvePostgresAuthOptions(opts.connectionString) });
 
   try {
     await sql`SELECT 1`;

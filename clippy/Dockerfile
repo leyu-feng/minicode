@@ -4,8 +4,15 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 tini \
-  && rm -rf /var/lib/apt/lists/* \
-  && corepack enable
+  && rm -rf /var/lib/apt/lists/*
+
+# npm honors the registry and authentication in the optional BuildKit secret.
+# Corepack's bootstrap download bypasses that npm configuration.
+COPY package.json /tmp/paperclip-package.json
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+  --mount=type=cache,target=/root/.npm \
+  npm install --global "$(node -p "require('/tmp/paperclip-package.json').packageManager")" \
+  && rm /tmp/paperclip-package.json
 
 # Modify the existing node user/group to have the specified UID/GID to match host user
 RUN usermod -u $USER_UID --non-unique node \
@@ -51,7 +58,8 @@ COPY scripts/link-plugin-dev-sdk.mjs scripts/
 
 # CI owns repository lock updates. Resolve manifest changes in the image's
 # private build tree, then install from that exact generated lock.
-RUN pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile && pnpm install --frozen-lockfile
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+  pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile && pnpm install --frozen-lockfile
 
 FROM base AS rust-toolchain
 WORKDIR /app
@@ -133,8 +141,10 @@ RUN find packages/paperclip-runner/runner packages/paperclip-runner/protocol -ty
 # Both the browser bundle and server stamp need the source commit. Declare it
 # after the stable dependency layers, before either application build.
 ARG PAPERCLIP_BUILD_COMMIT=""
-RUN pnpm --filter @paperclipai/ui build
-RUN pnpm --filter @paperclipai/plugin-sdk build
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+  pnpm --filter @paperclipai/ui build
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+  pnpm --filter @paperclipai/plugin-sdk build
 # The server build runs scripts/write-build-stamp.mjs, which stamps the built
 # commit into dist/build-info.json. The build context has no .git, so the
 # script reads PAPERCLIP_BUILD_COMMIT instead. Docker exposes an ARG to the
@@ -142,9 +152,11 @@ RUN pnpm --filter @paperclipai/plugin-sdk build
 # same ARG again for the runtime fallback; an ARG goes out of scope at the
 # end of its stage. Empty for local `docker build`, which then writes no stamp.
 ENV NODE_OPTIONS=--max-old-space-size=4096
-RUN pnpm --filter @paperclipai/server build
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+  pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
-RUN rm -rf packages/paperclip-runner/runner/target
+RUN rm -rf packages/paperclip-runner/runner/target \
+  && node scripts/sanitize-image-package-metadata.mjs /app
 
 # Remote OpenCode and ACPX runs require a controller-owned provider pack to
 # verify the sandbox installation or stage matching assets. Ship it in the
@@ -152,11 +164,13 @@ RUN rm -rf packages/paperclip-runner/runner/target
 # Grok's native executable stays an external sandbox prerequisite; this pack
 # contains only its launcher.
 FROM build AS runner-provider-pack
+ARG PROVIDER_PACK_EXCLUDE=""
 # Unstamped local builds remain usable, but cannot qualify a remote pack.
 # Never invent a source revision to make an unqualified pack look verified.
-RUN mkdir -p /provider-pack \
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+  mkdir -p /provider-pack \
   && if [ -n "${PAPERCLIP_BUILD_COMMIT}" ]; then \
-    PAPERCLIP_RUNNER_SOURCE_REVISION="${PAPERCLIP_BUILD_COMMIT}" node packages/paperclip-runner/scripts/build-provider-pack.mjs /provider-pack; \
+    PAPERCLIP_RUNNER_SOURCE_REVISION="${PAPERCLIP_BUILD_COMMIT}" node packages/paperclip-runner/scripts/build-provider-pack.mjs /provider-pack "--exclude-providers=${PROVIDER_PACK_EXCLUDE}"; \
   else \
     echo "Skipping remote provider pack: supply a full PAPERCLIP_BUILD_COMMIT to enable remote OpenCode/ACPX execution"; \
   fi
@@ -168,13 +182,17 @@ ARG USER_GID=1000
 # the @latest CLI tools advance weekly). Without it the cached layer would
 # freeze the tools until an unrelated cache bust.
 ARG CLI_TOOLS_CACHE_EPOCH=""
+ARG CODEX_VERSION=0.162.0
 WORKDIR /app
 # Tool and OS layer BEFORE the app copy: it references nothing from /app, and
 # the app copy changes on every commit — ordered the other way around, this
 # (the single most expensive layer: four CLI toolchains + apt, per arch) can
 # never hit the layer cache and rebuilds on every build.
-RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
-  && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest @moonshot-ai/kimi-code@latest \
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+  --mount=type=cache,target=/root/.npm \
+  echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
+  && npm install --global --omit=dev @anthropic-ai/claude-code@latest "@openai/codex@${CODEX_VERSION}" opencode-ai @google/gemini-cli@latest @moonshot-ai/kimi-code@latest \
+  && find /usr/local/lib/node_modules -path '*/build/config.gypi' -type f -delete \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \
   && rm -rf /var/lib/apt/lists/* \
@@ -256,7 +274,8 @@ CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/di
 # to the image. Growing the list is a one-line workflow change.
 FROM build AS cloud-plugins
 ARG CLOUD_BUNDLED_PLUGINS="daytona"
-RUN set -eu; \
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+  set -eu; \
   for name in $CLOUD_BUNDLED_PLUGINS; do \
     dir="packages/plugins/sandbox-providers/$name"; \
     test -d "$dir" || { echo "ERROR: unknown sandbox provider '$name'" >&2; exit 1; }; \
@@ -309,7 +328,8 @@ RUN set -eu; \
 FROM build AS cloud-server-deps
 WORKDIR /app/.cloud-server-deps
 ARG CLOUD_BUNDLED_SERVER_DEPS="@sentry/node"
-RUN set -eu; \
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+  set -eu; \
   test -n "$CLOUD_BUNDLED_SERVER_DEPS" || { echo "ERROR: CLOUD_BUNDLED_SERVER_DEPS is empty; name at least one optional peer package to install" >&2; exit 1; }; \
   echo '{"name":"paperclip-cloud-server-deps","private":true}' > package.json; \
   specifiers=""; \

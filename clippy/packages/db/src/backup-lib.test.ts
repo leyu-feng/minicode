@@ -2,7 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { afterEach, describe, expect, it } from "vitest";
+import { spawn } from "node:child_process";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import postgres from "postgres";
 import { createBufferedTextFileWriter, runDatabaseBackup, runDatabaseRestore } from "./backup-lib.js";
 import { ensurePostgresDatabase } from "./client.js";
@@ -11,6 +12,11 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./test-embedded-postgres.js";
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 
 const cleanups: Array<() => Promise<void> | void> = [];
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -79,14 +85,15 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
   it("preserves a post-pg_dump verification error without falling back or pruning", async () => {
     const connectionString = await createTempDatabase();
     const backupDir = createTempDir("checkpoint-pg-dump-");
-    const executable = path.join(backupDir, "pg-dump-fixture");
-    fs.writeFileSync(executable, "#!/bin/sh\nprintf 'SELECT 1;\\n'\n", { mode: 0o700 });
     const history = path.join(backupDir, "paperclip-history.sql.gz");
     const historyBytes = gzipSync("SELECT 'history';");
     fs.writeFileSync(history, historyBytes);
     fs.utimesSync(history, new Date(0), new Date(0));
-    const previous = process.env.PAPERCLIP_PG_DUMP_PATH;
-    process.env.PAPERCLIP_PG_DUMP_PATH = executable;
+    const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    vi.mocked(spawn).mockImplementationOnce(() => actual.spawn(
+      process.execPath, ["-e", "process.stdout.write('SELECT 1;\\n')"],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    ));
     const failure = new Error("fixture archive fsync failed");
     let verified = 0;
     try {
@@ -103,8 +110,7 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
       expect(fs.readFileSync(history)).toEqual(historyBytes);
       expect(fs.readdirSync(backupDir).filter(name => name.endsWith(".sql.gz"))).toEqual(["paperclip-history.sql.gz"]);
     } finally {
-      if (previous === undefined) delete process.env.PAPERCLIP_PG_DUMP_PATH;
-      else process.env.PAPERCLIP_PG_DUMP_PATH = previous;
+      vi.mocked(spawn).mockImplementation(actual.spawn);
     }
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 

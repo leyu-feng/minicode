@@ -21,6 +21,19 @@ Build arguments:
 | `CLI_TOOLS_CACHE_EPOCH` | empty | Refresh the CLI-install layer; CI supplies the current ISO week |
 | `PAPERCLIP_BUILD_VERSION` | empty | Runtime version when Git metadata is unavailable |
 | `PAPERCLIP_BUILD_COMMIT` | empty | Source commit written into the server build stamp and runtime environment |
+| `CODEX_VERSION` | `0.162.0` | Cross-platform Codex CLI package version |
+| `PROVIDER_PACK_EXCLUDE` | empty | Comma-separated optional providers to omit from the remote pack (`pi`, `cursor`, `copilot`) |
+
+For builds using an internal npm mirror, pass its npmrc with
+`--secret id=npmrc,src=/path/to/.npmrc`. Package installation stages mount it
+temporarily; it is not copied into the image. The image also keeps npm logs/cache in BuildKit cache mounts and
+removes mirror locations from generated pnpm metadata before copying runtime
+files or hashing the remote provider pack. Package integrity pins remain intact.
+Native build configuration snapshots are removed without removing compiled addons.
+The repository's
+`publish-clippy.ps1` helper uses the devbox user npmrc and sets
+`PROVIDER_PACK_EXCLUDE=pi,cursor`. This only excludes their bundled remote
+assets, not their adapters or UI entries.
 
 Changing the build version or commit preserves the CLI-install cache. The
 tool layer refreshes when its weekly epoch, base image, installation command,

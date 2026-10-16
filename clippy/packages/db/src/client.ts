@@ -3,6 +3,7 @@ import { drizzle as drizzlePg } from "drizzle-orm/postgres-js";
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { resolvePostgresAuthOptions } from "./postgres-auth.js";
 import { installDatabaseWorkSignals } from "./work-signals.js";
 import * as schema from "./schema/index.js";
 
@@ -11,7 +12,7 @@ const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
 const MIGRATIONS_JOURNAL_JSON = fileURLToPath(new URL("./migrations/meta/_journal.json", import.meta.url));
 
 function createUtilitySql(url: string) {
-  return postgres(url, { max: 1, onnotice: () => {} });
+  return postgres(url, { max: 1, onnotice: () => {}, ...resolvePostgresAuthOptions(url) });
 }
 
 type RegisteredPostgresClient = ReturnType<typeof postgres>;
@@ -273,7 +274,7 @@ export function createDb(url: string, options?: DatabaseClientOptions) {
 }
 
 function createDbClient(url: string, resolved: DatabaseClientOptions, owner?: object) {
-  const sql = postgres(url, postgresJsOptions(resolved));
+  const sql = postgres(url, { ...postgresJsOptions(resolved), ...resolvePostgresAuthOptions(url) });
   const key = hostPortKeyOrNull(url);
   if (key) registerClient(key, sql);
   // A disconnect can lose the response after a statement has committed.

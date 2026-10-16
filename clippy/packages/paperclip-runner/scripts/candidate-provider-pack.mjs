@@ -11,24 +11,32 @@ export function providerPackManifestFields(providers, candidates) {
   };
 }
 
-export function providerPackProviders(platform, architecture, candidates) {
+export function providerPackProviders(platform, architecture, candidates, excluded = []) {
   const nativeSupported = ["darwin-arm64", "darwin-x64", "linux-x64"].includes(`${platform}-${architecture}`);
-  return [...new Set([...(nativeSupported ? ["pi", "cursor"] : []), ...candidates])];
+  return [...new Set([...(nativeSupported ? ["pi", "cursor"] : []), ...candidates])]
+    .filter(provider => !excluded.includes(provider));
 }
 
 export function parseProviderPackArguments(args) {
   let output;
   const candidates = [];
+  const excluded = [];
   for (const value of args.filter(value => value !== "--")) {
     if (value.startsWith("--candidate-providers=")) {
       for (const provider of value.slice("--candidate-providers=".length).split(",").filter(Boolean)) {
         if (!CANDIDATES.has(provider) || candidates.includes(provider)) throw new Error("Unknown or duplicate candidate provider");
         candidates.push(provider);
       }
+    } else if (value.startsWith("--exclude-providers=")) {
+      for (const provider of value.slice("--exclude-providers=".length).split(",").filter(Boolean)) {
+        if (!CANDIDATES.has(provider) || excluded.includes(provider)) throw new Error("Unknown or duplicate excluded provider");
+        excluded.push(provider);
+      }
     } else if (value.startsWith("--") || output !== undefined) throw new Error("Invalid provider-pack arguments");
     else output = value;
   }
-  return { output, candidates };
+  if (candidates.some(provider => excluded.includes(provider))) throw new Error("Provider cannot be both selected and excluded");
+  return { output, candidates, excluded };
 }
 
 /** Closed source-owned builder registry; provider branches add their exact pins. */

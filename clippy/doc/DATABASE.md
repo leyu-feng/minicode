@@ -187,6 +187,37 @@ DATABASE_MIGRATION_URL=postgres://postgres.[PROJECT-REF]:[PASSWORD]@aws-0-[REGIO
 
 If your hosted database requires transaction-pooling-only connections (pgbouncer transaction mode, Supavisor port 6543, Neon `-pooler` endpoints), set `DATABASE_PREPARED_STATEMENTS=false` so the client does not rely on session-scoped prepared statements, and keep `DATABASE_MIGRATION_URL` on a direct connection. Do not edit database client source files as part of deployment setup.
 
+### Azure PostgreSQL with Microsoft Entra authentication
+
+Passwordless URLs whose hostname ends in `.postgres.database.azure.com`
+automatically authenticate using `DefaultAzureCredential`. Configure these as
+runtime environment variables, not image build arguments:
+
+```sh
+DATABASE_URL=postgres://app-identity@my-server.postgres.database.azure.com:5432/paperclip?sslmode=verify-full
+AZURE_CLIENT_ID=<user-assigned-managed-identity-client-id>
+```
+
+Attach the identity to the Azure Container App and provision its PostgreSQL
+role with permissions for application queries and schema migrations. Set
+`DATABASE_MIGRATION_URL` similarly if migrations use a separate connection.
+On a development machine, the default credential chain also supports `az login`.
+No static database password or additional authentication opt-in is required.
+URLs with passwords and non-Azure databases keep their existing behavior.
+
+The pool, migration utilities, and JavaScript backup/restore clients request a
+token for each new connection, sharing the credential's token cache. Existing
+connections do not need to be restarted when a token expires. Azure token
+connections always verify the server's TLS certificate, even if the supplied
+URL uses `sslmode=require`.
+
+`pg_dump` and `psql` receive a fresh token only through their child-process
+`PGPASSWORD`; the token is not inserted into the URL or the parent environment.
+These connections also enforce `sslmode=verify-full`. By default they use
+`sslrootcert=system` (libpq 17 or newer); for older tools, configure
+`PGSSLROOTCERT` or the URL's `sslrootcert` with a trusted CA bundle path.
+The JavaScript driver uses Node's trusted certificate authorities.
+
 ### Client tuning (optional)
 
 All of these are optional; when unset, the driver defaults apply and behavior is unchanged — typical self-hosted setups need none of them:

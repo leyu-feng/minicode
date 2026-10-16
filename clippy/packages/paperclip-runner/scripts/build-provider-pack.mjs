@@ -22,10 +22,11 @@ import { fileURLToPath } from "node:url";
 import { parseProviderPackArguments, materializeCandidateProviderPack, providerPackProviders, providerPackManifestFields } from "./candidate-provider-pack.mjs";
 import { buildNodeStartupTimeout } from "./build-node-startup-timeout.mjs";
 import { writePortableExecutableShim, writePortableCopilotShims } from "./provider-pack-executable-shims.mjs";
+import { sanitizeImagePackageMetadata } from "../../../scripts/sanitize-image-package-metadata.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const workspaceRoot = resolve(packageRoot, "../..");
-const { output: outputArgument, candidates } = parseProviderPackArguments(process.argv.slice(2));
+const { output: outputArgument, candidates, excluded } = parseProviderPackArguments(process.argv.slice(2));
 const outputRoot = resolve(
   process.cwd(),
   outputArgument ?? join(packageRoot, "provider-pack"),
@@ -160,7 +161,7 @@ try {
   }
 
   const candidateProviders = {};
-  for (const provider of providerPackProviders(process.platform, process.arch, candidates)) {
+  for (const provider of providerPackProviders(process.platform, process.arch, candidates, excluded)) {
     const assetPath = `provider-assets/${provider}/${process.platform}-${process.arch}`;
     const metadata = await materializeCandidateProviderPack({ provider, outputRoot: join(temporaryRoot, assetPath) });
     if (typeof metadata?.version !== "string" || !metadata.version || metadata.version.length > 120
@@ -264,6 +265,7 @@ try {
     join(workspaceRoot, "pnpm-lock.yaml"),
     join(temporaryRoot, productionLock),
   );
+  sanitizeImagePackageMetadata(temporaryRoot);
   for (const relativePath of [
     nodeCommand,
     productionLock,
