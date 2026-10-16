@@ -51,6 +51,11 @@ vi.mock("@/api/instanceSettings", () => ({ instanceSettingsApi: settings }));
 vi.mock("@/api/secrets", () => ({ secretsApi: secrets }));
 const adapterApi = vi.hoisted(() => ({ list: vi.fn() }));
 vi.mock("@/api/adapters", () => ({ adaptersApi: adapterApi }));
+const poolsApi = vi.hoisted(() => ({
+  list: vi.fn(),
+  create: vi.fn(),
+}));
+vi.mock("@/api/agent-pools", () => ({ agentPoolsApi: poolsApi }));
 vi.mock("@/context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "company-1" }),
 }));
@@ -127,6 +132,15 @@ async function fill(label: string, value: string) {
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
+async function selectPool(value: string) {
+  const select = container.querySelector('select[aria-label="Agent pool"]') as HTMLSelectElement;
+  expect(select).toBeTruthy();
+  await act(async () => {
+    select.value = value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await settle();
+}
 async function render(adapter = "pi_local", runnerProvider = "codex") {
   state.params = new URLSearchParams({
     name: "Atlas",
@@ -156,6 +170,13 @@ const pass = {
 };
 beforeEach(() => {
   vi.clearAllMocks();
+  poolsApi.list.mockReset().mockResolvedValue([
+    { id: "pool-default", companyId: "company-1", name: "default" },
+    { id: "pool-existing", companyId: "company-1", name: "existing-pool" },
+  ]);
+  poolsApi.create.mockReset().mockImplementation(async (companyId: string, name: string) => ({
+    id: `pool-${name}`, companyId, name,
+  }));
   adapterApi.list.mockImplementation(async () => state.adapters);
   managedApi.list.mockResolvedValue({ currentUserId: "user-1", canManageConnections: true, connections: [] });
   container = document.createElement("div");
@@ -169,7 +190,7 @@ beforeEach(() => {
     "codex_local",
     "opencode_local",
     "pi_local",
-    "paperclip_runner", "cursor_cloud", "cursor", "gemini_local", "kimi_local", "grok_local", "hermes_local", "hermes_gateway",
+    "paperclip_runner", "cursor_cloud", "cursor", "gemini_local", "kimi_local", "grok_local", "hermes_local", "hermes_gateway", "agent_pool",
   ].map((type) => ({ type, loaded: true, disabled: false }));
   api.adapterModels.mockResolvedValue([]);
   api.list.mockResolvedValue([{ id: "ceo", role: "ceo", status: "idle" }]);
@@ -200,6 +221,91 @@ afterEach(async () => {
   container.remove();
 });
 describe("New agent setup", () => {
+  describe("AgentPool", () => {
+    it("reuses an existing pool and saves without a connected worker", async () => {
+      api.testEnvironment.mockResolvedValue({ ...pass, status: "fail", checks: [{ code: "agent_pool_worker", level: "error", message: "No connected worker" }] });
+      await render("agent_pool");
+      await selectPool("existing-pool");
+      await click("Finish setup");
+      expect(poolsApi.create).not.toHaveBeenCalled();
+      expect(api.testEnvironment).not.toHaveBeenCalled();
+      expect(api.hire).toHaveBeenCalledWith("company-1", expect.objectContaining({
+        adapterType: "agent_pool", adapterConfig: { name: "existing-pool" },
+      }));
+      expect(container.textContent).toContain("Your agent has been created");
+    });
+
+    it("creates a distinct named pool before saving an agent without probing workers", async () => {
+      await render("agent_pool");
+      await selectPool("__new__");
+      await fill("Pool name", "  build-pool  ");
+      await settle();
+      await click("Finish setup");
+      expect(poolsApi.create).toHaveBeenCalledWith("company-1", "build-pool");
+      expect(api.hire).toHaveBeenCalledWith("company-1", expect.objectContaining({
+        adapterType: "agent_pool", adapterConfig: { name: "build-pool" },
+      }));
+      expect(api.testEnvironment).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("AgentPool: build-pool");
+    });
+
+    it("blocks a duplicate pool name and permits selecting that pool to reuse it", async () => {
+      await render("agent_pool");
+      await selectPool("__new__");
+      await fill("Pool name", "existing-pool");
+      await settle();
+      expect(container.textContent).toContain("A pool with that name already exists");
+      const finish = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Finish setup")!;
+      expect(finish.disabled).toBe(true);
+      await click("Finish setup");
+      expect(poolsApi.create).not.toHaveBeenCalled();
+      expect(api.hire).not.toHaveBeenCalled();
+      await selectPool("existing-pool");
+      await click("Finish setup");
+      expect(api.hire).toHaveBeenCalledTimes(1);
+      expect(poolsApi.create).not.toHaveBeenCalled();
+    });
+
+    it("retains a newly created pool after a failed hire and reuses it on retry", async () => {
+      api.hire.mockRejectedValueOnce(new Error("Agent quota exceeded"));
+      await render("agent_pool");
+      await selectPool("__new__");
+      await fill("Pool name", "new-pool");
+      await settle();
+      await click("Finish setup");
+      expect(container.textContent).toContain("Agent quota exceeded");
+      expect((container.querySelector('select[aria-label="Agent pool"]') as HTMLSelectElement).value).toBe("new-pool");
+      await click("Finish setup");
+      expect(poolsApi.create).toHaveBeenCalledTimes(1);
+      expect(api.hire).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toContain("Your agent has been created");
+    });
+
+    it("surfaces pool creation conflicts without silently reusing the name", async () => {
+      poolsApi.create.mockRejectedValueOnce(new ApiError("An agent pool with that name already exists", 409, null));
+      await render("agent_pool");
+      await selectPool("__new__");
+      await fill("Pool name", "racing-pool");
+      await settle();
+      await click("Finish setup");
+      expect(container.textContent).toContain("An agent pool with that name already exists");
+      expect(api.hire).not.toHaveBeenCalled();
+      expect(poolsApi.list).toHaveBeenCalledTimes(2);
+    });
+
+    it("surfaces pool-list errors and retries before allowing a save", async () => {
+      poolsApi.list.mockRejectedValueOnce(new Error("Could not load company pools"));
+      await render("agent_pool");
+      expect(container.textContent).toContain("Could not load company pools");
+      await click("Finish setup");
+      expect(api.hire).not.toHaveBeenCalled();
+      await click("Retry loading pools");
+      await click("Finish setup");
+      expect(api.hire).toHaveBeenCalledTimes(1);
+      expect(api.testEnvironment).not.toHaveBeenCalled();
+    });
+  });
+
   it("records an explicit legacy choice when it matches the Windows default, then preserves it on Linux", async () => {
     settings.get.mockResolvedValue({ defaultEnvironmentId: "local-1" });
     envApi.list.mockResolvedValue([

@@ -70,6 +70,7 @@ import {
   type ProviderConnection,
 } from "./AgentProviderConnection";
 import { adapterCuratesModelOrder } from "../../lib/model-utils";
+import { AgentPoolSelect, useAgentPoolSelection } from "../AgentPoolSelect";
 
 const controlClass = nativeSelectClassName;
 const blocking = (result: AdapterEnvironmentTestResult) =>
@@ -145,6 +146,7 @@ function Setup({
     chooseProvider || Boolean(SETUP_CREDENTIAL_KEYS[adapterType]);
   const showModel = !isDot && !["cursor_cloud", "hermes_gateway", "agent_pool"].includes(adapterType);
   const [poolName, setPoolName] = useState("default");
+  const isAgentPool = adapterType === "agent_pool";
   const [allowUnmeteredProvider, setAllowUnmeteredProvider] = useState(false);
   const [gatewayUrl, setGatewayUrl] = useState("");
   const [kimiModel, setKimiModel] = useState("");
@@ -203,6 +205,12 @@ function Setup({
     setTestState("idle");
     setError(null);
   };
+  const poolSelection = useAgentPoolSelection({
+    companyId,
+    name: poolName,
+    onNameChange: (value) => { setPoolName(value); resetTest(); },
+    enabled: isAgentPool && !created,
+  });
   const editConnection = () => {
     setConnection(null);
     setRuntimeAiBinding(undefined);
@@ -343,6 +351,7 @@ function Setup({
     ) && (requestAdapterType !== "paperclip_runner" || adapterType === "paperclip_runner" || adapterInventory.data?.some(adapter => adapter.type === "paperclip_runner" && adapter.loaded && !adapter.disabled));
   const ready = Boolean(
     available &&
+    (!isAgentPool || poolSelection.ready) &&
     (adapterType !== "codex_local" || runner !== "auto" || Boolean(adapters.data)) &&
     !environmentError &&
     !envs.isPending &&
@@ -423,9 +432,6 @@ function Setup({
     return config;
   }
   function preparedConfig(nextConnection = connection) {
-    if (adapterType === "agent_pool" && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(poolName.trim())) {
-      throw new Error("Enter a pool name using lowercase letters, numbers, hyphens, or underscores.");
-    }
     if (isDot && !allowUnmeteredProvider) throw new Error("Acknowledge external provider billing before creating your Dot agent.");
     if (multiProvider && (!model.trim() || !model.includes("/")))
       throw new Error("Choose or enter a model in provider/model format.");
@@ -522,6 +528,12 @@ function Setup({
     const staged: Array<{ remove: () => Promise<unknown> }> = [];
     let hired = false;
     try {
+      if (isAgentPool) {
+        const run = generation.current;
+        const pool = await poolSelection.ensurePool();
+        if (run !== generation.current) return;
+        poolSelection.select(pool.name);
+      }
       if (connectionAdapter && testState === "idle" && !(await runTest())) return;
       const config = preparedConfig();
       const credentials = pendingCredentials();
@@ -837,7 +849,7 @@ function Setup({
                         <Check className="size-5" />
                         {created.status === "pending_approval"
                           ? "Agent submitted for approval"
-                          : isDot ? "Your Dot agent has been created" : "Your agent is ready"}
+                          : isDot ? "Your Dot agent has been created" : isAgentPool ? "Your agent has been created" : "Your agent is ready"}
                       </h2>
                       <dl className="grid grid-cols-2 gap-4 text-sm">
                         <dt className="text-muted-foreground">Adapter</dt>
@@ -856,7 +868,9 @@ function Setup({
                       <p className="text-sm text-muted-foreground">
                         {created.status === "pending_approval"
                           ? "An organization administrator must approve this agent before it can work."
-                          : isDot ? "Pair your Dot and test event delivery in configuration before assigning work." : "Assign a task when you’re ready for this agent to work."}
+                          : isDot ? "Pair your Dot and test event delivery in configuration before assigning work."
+                            : isAgentPool ? "Pair/connect a Minicode worker in this pool through company settings before assigning work."
+                            : "Assign a task when you’re ready for this agent to work."}
                       </p>
                     </div>
                     <div className="flex flex-wrap justify-between gap-3">
@@ -892,11 +906,7 @@ function Setup({
                     </h2>
                     <fieldset disabled={busy} className="space-y-8">
                       <section className="space-y-5">
-                        {adapterType === "agent_pool" && (
-                          <Field label="Pool name" hint="Create pools and pair Minicode workers in company settings. The worker chooses its model and local working directory.">
-                            <Input value={poolName} onChange={(event) => { setPoolName(event.target.value); resetTest(); }} />
-                          </Field>
-                        )}
+                        {isAgentPool && <AgentPoolSelect selection={poolSelection} />}
                         {isDot && <>
                           <p className="text-sm text-muted-foreground">Create this agent, then copy its pairing prompt to your Dot.</p>
                           {experimental.data?.enablePublicMcp !== true && <p className="text-sm text-muted-foreground">Enable Assistant connections (MCP) in Experimental settings before pairing.</p>}
@@ -1217,14 +1227,14 @@ function Setup({
                         </section>
                       )}
                     </fieldset>
-                    <RuntimeTestCard
+                    {!isAgentPool && <RuntimeTestCard
                       variant={isDot ? "prerequisites" : "connection"}
                       state={testState}
                       result={result}
                       error={error}
                       disabled={!ready || busy || Boolean(connectionAdapter && !connection)}
                       onTest={() => void runTest()}
-                    />
+                    />}
                     {error && testState !== "fail" && (
                       <p role="alert" className="text-sm text-destructive">
                         {error}

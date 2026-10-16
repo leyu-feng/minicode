@@ -14,6 +14,18 @@ can pair Minicode workers, organize them into named pools, and assign an agent
 to a pool. Workers connect outbound over HTTPS/WebSocket, so the Clippy server
 does not need inbound access to the worker machine.
 
+Onboarding offers **AgentPool** alongside Claude and OpenAI. Both onboarding and
+**New agent** let you reuse an existing company pool (`default` initially) or
+create a new one while saving the agent. A company can have multiple pools;
+names must be unique within that company. Duplicate names prompt you to reuse
+the existing pool instead. If saving the agent fails after creating a pool,
+that pool remains available for reuse on retry.
+
+Provider sign-in and API-key fields are not used for this adapter. Saving an
+agent does not test or wait for a connected worker. Before running tasks,
+pair/connect a Minicode worker through company settings. Provider/model access
+is verified when a task runs.
+
 Each agent gets a persistent, independent Git clone on its assigned worker.
 The initial clone contains committed source only; uncommitted changes,
 untracked files, installed dependencies, and initialized submodules are not
@@ -99,6 +111,13 @@ for the command, source-cleanliness requirements, and runtime configuration.
 The repository adds `clippy.ps1` and `bootstrap\clippy.cmd` for Windows launch,
 using the project's pinned pnpm version, and includes Windows workspace-build
 compatibility changes.
+
+Local launches default to `<current folder>\.clippy` (or the `-repo_root`
+workspace), keeping test databases separate between workspaces and from Azure.
+The existing embedded PostgreSQL data directory is reused on subsequent
+launches. Instance configuration, secrets, and storage stay beside that
+database. Explicit home/config/database overrides are preserved; leave
+`DATABASE_URL` unset to use embedded PostgreSQL.
 
 For the container deployment, persist `PAPERCLIP_HOME=/paperclip`, route traffic
 to port `3100`, and set `PAPERCLIP_PUBLIC_URL` to the instance's HTTPS URL.

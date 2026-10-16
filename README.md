@@ -22,6 +22,16 @@ pinned in `clippy\package.json`. npm resolves or fetches that version using the
 configured registry and authentication; Node then runs pnpm directly, without a
 long-lived `npm.cmd` wrapper around the server.
 
+For local testing, leave `DATABASE_URL` unset. The launcher keeps a separate
+embedded PostgreSQL database and instance data under
+`<current folder>\.clippy\instances\default\`, automatically reusing the existing
+`db` directory on later starts. `-repo_root` selects a different workspace.
+PostgreSQL uses a data directory, not a single database file. `.clippy` is
+Git-ignored; do not delete it unless you intend to discard that local instance.
+Explicit `PAPERCLIP_HOME`, `PAPERCLIP_CONFIG`, and `DATABASE_URL` settings still
+take precedence; the launcher warns when `DATABASE_URL` selects an external
+database. Azure container configuration is unchanged.
+
 ## Build and publish Clippy to Azure Container Registry
 
 Install Docker Desktop with its Linux engine running, Git (including `tar`),

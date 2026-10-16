@@ -14,6 +14,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // never runs.
 const mockAdaptersApi = vi.hoisted(() => ({ list: vi.fn(async (_context?: { companyId: string; environmentId?: string | null }) => [] as import("../api/adapters").AdapterInfo[]) }));
 vi.mock("../api/adapters", () => ({ adaptersApi: mockAdaptersApi }));
+const mockAgentPoolsApi = vi.hoisted(() => ({
+  list: vi.fn<() => Promise<import("@paperclipai/shared").AgentPool[]>>(),
+  create: vi.fn(async (companyId: string, name: string) => ({ id: `pool-${name}`, companyId, name })),
+}));
+vi.mock("../api/agent-pools", () => ({ agentPoolsApi: mockAgentPoolsApi }));
 
 const mockAuthApi = vi.hoisted(() => ({ getSession: vi.fn() }));
 const localHealth = vi.hoisted(() => ({ get: vi.fn() }));
@@ -75,7 +80,7 @@ const mockAgentsApi = vi.hoisted(() => ({
   // The hire step lists the company's agents first and adopts one that already
   // carries the typed name on the same source, so a wizard that reopens on the
   // agent step cannot hire "Ada 2". Empty by default: the company is new.
-  list: vi.fn(async () => [] as Array<{ id: string; name: string; adapterType: string }>),
+  list: vi.fn(async () => [] as Array<{ id: string; name: string; adapterType: string; adapterConfig?: Record<string, unknown> }>),
   instructionsBundle: vi.fn(async () => ({ entryFile: "AGENTS.md" })),
   saveInstructionsFile: vi.fn(async () => ({})),
   // No default implementation: the top-level `beforeEach` sets the "no
@@ -127,7 +132,7 @@ const mockAgentsApi = vi.hoisted(() => ({
 // can shape the built adapter config (e.g. a configured ANTHROPIC_API_KEY)
 // without a real adapter package.
 const mockAdapterBuild = vi.hoisted(() => ({
-  buildAdapterConfig: vi.fn(() => ({}) as Record<string, unknown>),
+  buildAdapterConfig: vi.fn((_values: import("../adapters/types").CreateConfigValues) => ({}) as Record<string, unknown>),
 }));
 // The Connect path loads environment settings before probing; without these
 // the probe dies on "Could not load environment settings" and the hire never
@@ -198,23 +203,21 @@ vi.mock("../adapters", () => ({
   getUIAdapter: () => ({ buildAdapterConfig: mockAdapterBuild.buildAdapterConfig }),
 }));
 vi.mock("../adapters/metadata", () => ({ isVisualAdapterChoice: () => true }));
-vi.mock("../adapters/adapter-display-registry", () => ({
-  getAdapterDisplay: (type: string) => ({
-    type,
-    // Mirrors the real registry, where these two and only these two are
-    // `recommended`. A blanket `false` used to be harmless because every adapter
-    // then sat in the "Advanced settings" disclosure and was reachable anyway;
-    // with the step down to a tile row built from this flag, it made that row
-    // empty in every test and hid the surface under it.
-    recommended: type === "claude_local" || type === "codex_local" || mockAdapterRegistry.list.some(entry => entry.type === type && entry.recommended),
-    label: type,
-    description: "",
-    icon: () => null,
-  }),
-  getAdapterLabel: (type: string) => type,
-  getAdapterLabels: () => ({}) as Record<string, string>,
-  isKnownAdapterType: () => true,
-}));
+vi.mock("../adapters/adapter-display-registry", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../adapters/adapter-display-registry")>();
+  return {
+    getAdapterDisplay: (type: string) => ({
+      type,
+      recommended: actual.getAdapterDisplay(type).recommended || mockAdapterRegistry.list.some(entry => entry.type === type && entry.recommended),
+      label: type,
+      description: "",
+      icon: () => null,
+    }),
+    getAdapterLabel: (type: string) => type,
+    getAdapterLabels: () => ({}) as Record<string, string>,
+    isKnownAdapterType: () => true,
+  };
+});
 vi.mock("../adapters/use-disabled-adapters", () => ({
   useDisabledAdaptersSync: () => mockAdapterRegistry.disabled,
   // Added by #11371's adapter snap. A module mock replaces the whole module,
@@ -241,7 +244,7 @@ vi.mock("../adapters/use-adapter-capabilities", () => ({
   useAdapterCapabilities: () => (type: string) => ({
     supportsInstructionsBundle: false,
     supportsSkills: false,
-    supportsLocalAgentJwt: false,
+    supportsLocalAgentJwt: type === "agent_pool",
     requiresMaterializedRuntimeSkills: false,
     login: ADAPTER_LOGIN_MODES[type]
       ? { panelMode: ADAPTER_LOGIN_MODES[type]!, timeoutPolicy: "fixed" as const }
@@ -341,6 +344,8 @@ function isArcPrimary(text: string): boolean {
 
 describe("OnboardingWizard restore-gate (stale localStorage across accounts)", () => {
   beforeEach(() => {
+    mockAgentPoolsApi.list.mockReset().mockResolvedValue([{ id: "pool-default", companyId: "company-new", name: "default" }]);
+    mockAgentPoolsApi.create.mockReset().mockImplementation(async (companyId, name) => ({ id: `pool-${name}`, companyId, name }));
     mockAdaptersApi.list.mockReset().mockResolvedValue([]);
     mockEnvironmentsApi.probe.mockReset().mockResolvedValue({ ok: true, driver: "sandbox", summary: "Measured image", details: { platformQualificationRecorded: true, leaseId: "platform-lease" } });
     localHealth.get.mockResolvedValue({ deploymentMode: "authenticated" });
@@ -756,12 +761,12 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
 
   describe("hire gate: adapter authentication (claude_local, the default onboarding adapter)", () => {
     /** Drives the wizard to the Connect step, agent name already filled in. */
-    async function openConnectStep({ useApiKeys = false } = {}) {
+    async function openConnectStep({ useApiKeys = false, agentPool = false } = {}) {
       // The tile row is built from this registry, and the suite's default is
       // empty. That was survivable while the step preselected a source; now that
       // nothing is chosen until a tile is pressed, a step with no tiles is a step
       // that can never advance.
-      mockAdapterRegistry.list = [{ type: "claude_local" }, { type: "codex_local" }];
+      mockAdapterRegistry.list = [{ type: "claude_local" }, { type: "codex_local" }, { type: "agent_pool" }];
       mockCompaniesApi.create.mockResolvedValue({ id: "company-new", issuePrefix: "INI" });
       window.localStorage.setItem(
         ONBOARDING_STORAGE_KEY,
@@ -810,10 +815,170 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       // having answered — so the input surface stays closed and the step will
       // not advance until a tile is pressed. Every case below is about what
       // happens *after* that choice, so the helper makes it.
-      await pickFirstSource(clickByText);
+      if (agentPool) await clickByText((text) => text === "AgentPool");
+      else await pickFirstSource(clickByText);
 
       return { root, clickByText };
     }
+
+    describe("AgentPool onboarding", () => {
+      async function selectPool(value: string) {
+        const select = document.body.querySelector('select[aria-label="Agent pool"]') as HTMLSelectElement;
+        await act(async () => {
+          select.value = value;
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+        await flushReact();
+      }
+
+      beforeEach(() => {
+        mockAdapterBuild.buildAdapterConfig.mockImplementation(
+          (values) => ({
+            name: values.adapterSchemaValues?.name ?? "default",
+          }),
+        );
+      });
+
+      it.each([false, true])("hires through a named pool without a connected worker or provider credentials (API mode: %s)", async (useApiKeys) => {
+        mockAgentsApi.testEnvironment.mockResolvedValue({
+          adapterType: "agent_pool",
+          status: "fail",
+          checks: [{ code: "agent_pool_worker", level: "error", message: "No connected worker" }],
+          testedAt: new Date().toISOString(),
+        });
+        const { root, clickByText } = await openConnectStep({ agentPool: true, useApiKeys });
+        expect(document.body.querySelectorAll('button[role="radio"]')).toHaveLength(3);
+        const tile = [...document.body.querySelectorAll('button[role="radio"]')]
+          .find((button) => button.textContent === "AgentPool")!;
+        expect(tile.getAttribute("aria-checked")).toBe("true");
+        expect(document.body.querySelector('input[aria-label="API key"]')).toBeNull();
+        expect(document.body.querySelector('input[aria-label="Authorization code"]')).toBeNull();
+        expect(document.body.textContent).not.toContain("Use API key");
+        expect(document.body.textContent).not.toContain("This environment does not support browser sign-in");
+        expect((document.body.querySelector('select[aria-label="Agent pool"]') as HTMLSelectElement).value).toBe("default");
+        await selectPool("__new__");
+        const poolField = document.body.querySelector('input[aria-label="Pool name"]') as HTMLInputElement;
+        expect(poolField.value).toBe("");
+        await act(async () => setControlledValue(poolField, "build-workers"));
+        await flushReact();
+        expect(JSON.parse(window.localStorage.getItem(ONBOARDING_STORAGE_KEY)!).poolName).toBe("build-workers");
+
+        await clickByText((text) => text === "Create agent");
+        expect(mockAgentPoolsApi.create).toHaveBeenCalledWith("company-new", "build-workers");
+        expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
+        expect(mockAgentsApi.hire).toHaveBeenCalledWith("company-new", expect.objectContaining({
+          adapterType: "agent_pool",
+          adapterConfig: { name: "build-workers" },
+          runtimeConfig: expect.not.objectContaining({ aiConnection: expect.anything() }),
+        }));
+        expect(managedApi.create).not.toHaveBeenCalled();
+        expect(managedApi.connectLocal).not.toHaveBeenCalled();
+        expect(mockAgentsApi.startClaudeSetupTokenLogin).not.toHaveBeenCalled();
+        expect(mockAgentsApi.startAdapterAuthLogin).not.toHaveBeenCalled();
+        await act(async () => root.unmount());
+      });
+
+      it("reports a failed hire and retries with an updated pool name", async () => {
+        mockAgentsApi.hire.mockRejectedValueOnce(new Error("Hire failed"));
+        const { root, clickByText } = await openConnectStep({ agentPool: true });
+        await clickByText((text) => text === "Create agent");
+        expect(document.body.textContent).toContain("Hire failed");
+        await selectPool("__new__");
+        const poolField = document.body.querySelector('input[aria-label="Pool name"]') as HTMLInputElement;
+        await act(async () => setControlledValue(poolField, "another-pool"));
+        await flushReact();
+        await clickByText((text) => text === "Create agent");
+        expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
+        expect(mockAgentsApi.hire).toHaveBeenCalledTimes(2);
+        expect(mockAgentsApi.hire).toHaveBeenLastCalledWith("company-new", expect.objectContaining({
+          adapterConfig: { name: "another-pool" },
+        }));
+        await act(async () => root.unmount());
+      });
+
+      it("reuses a selected existing pool without creating another one", async () => {
+        mockAgentPoolsApi.list.mockResolvedValue([
+          { id: "pool-default", companyId: "company-new", name: "default" },
+          { id: "pool-build", companyId: "company-new", name: "build" },
+          { id: "pool-review", companyId: "company-new", name: "review" },
+        ]);
+        const { root, clickByText } = await openConnectStep({ agentPool: true });
+        await selectPool("review");
+        await clickByText((text) => text === "Create agent");
+        expect(mockAgentPoolsApi.create).not.toHaveBeenCalled();
+        expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
+        expect(mockAgentsApi.hire).toHaveBeenCalledWith("company-new", expect.objectContaining({
+          adapterConfig: { name: "review" },
+        }));
+        await act(async () => root.unmount());
+      });
+
+      it("reuses a newly created pool when a failed hire is retried", async () => {
+        mockAgentsApi.hire.mockRejectedValueOnce(new Error("Hire failed"));
+        const { root, clickByText } = await openConnectStep({ agentPool: true });
+        await selectPool("__new__");
+        const field = document.body.querySelector('input[aria-label="Pool name"]') as HTMLInputElement;
+        await act(async () => setControlledValue(field, "retry-pool"));
+        await flushReact();
+        await clickByText((text) => text === "Create agent");
+        expect(document.body.textContent).toContain("Hire failed");
+        expect((document.body.querySelector('select[aria-label="Agent pool"]') as HTMLSelectElement).value).toBe("retry-pool");
+        await clickByText((text) => text === "Create agent");
+        expect(mockAgentPoolsApi.create).toHaveBeenCalledTimes(1);
+        expect(mockAgentsApi.hire).toHaveBeenCalledTimes(2);
+        await act(async () => root.unmount());
+      });
+
+      it("does not adopt an existing same-name agent assigned to a different pool", async () => {
+        mockAgentsApi.list.mockResolvedValueOnce([{
+          id: "other-agent", name: "Ada", adapterType: "agent_pool", adapterConfig: { name: "other-pool" },
+        }]);
+        const { root, clickByText } = await openConnectStep({ agentPool: true });
+        await clickByText((text) => text === "Create agent");
+        expect(mockAgentsApi.hire).toHaveBeenCalledWith("company-new", expect.objectContaining({
+          adapterConfig: { name: "default" },
+        }));
+        await act(async () => root.unmount());
+      });
+
+      it("rejects invalid pool names through both the button and keyboard", async () => {
+        const { root } = await openConnectStep({ agentPool: true });
+        await selectPool("__new__");
+        const poolField = document.body.querySelector('input[aria-label="Pool name"]') as HTMLInputElement;
+        await act(async () => setControlledValue(poolField, "../invalid"));
+        await flushReact();
+        const connect = [...document.body.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Create agent")!;
+        expect(connect.disabled).toBe(true);
+        await act(async () => {
+          poolField.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+        });
+        expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
+        expect(mockAgentsApi.hire).not.toHaveBeenCalled();
+        await act(async () => root.unmount());
+      });
+
+      it("restores the pool name when resuming an unfinished first-agent setup", async () => {
+        const { root } = await openConnectStep({ agentPool: true });
+        await selectPool("__new__");
+        const poolField = document.body.querySelector('input[aria-label="Pool name"]') as HTMLInputElement;
+        await act(async () => setControlledValue(poolField, "saved-workers"));
+        await flushReact();
+        await act(async () => root.unmount());
+        mockCompaniesApi.list.mockResolvedValue([{ id: "company-new", name: "Initech", issuePrefix: "INI" }]);
+        const resumed = render();
+        await renderWizardView(resumed.root, resumed.queryClient);
+        await flushReact();
+        const tile = [...document.body.querySelectorAll('button[role="radio"]')]
+          .find((button) => button.textContent === "AgentPool")!;
+        await act(async () => tile.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+        await flushReact();
+        expect((document.body.querySelector('input[aria-label="Pool name"]') as HTMLInputElement).value)
+          .toBe("saved-workers");
+        expect(mockAgentsApi.hire).not.toHaveBeenCalled();
+        expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
+        await act(async () => resumed.root.unmount());
+      });
+    });
 
     it("blocks the hire on a warn result that holds adapter_auth_missing, and shows the returned checks", async () => {
       mockAgentsApi.testEnvironment.mockResolvedValue({

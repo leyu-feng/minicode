@@ -25,6 +25,8 @@ API: `present` — representative operation IDs:
 
 - `POST /api/companies/{companyId}/agent-hires`.
 - `POST /api/companies/{companyId}/agents`.
+- `GET /api/companies/{companyId}/agent-pools`.
+- `POST /api/companies/{companyId}/agent-pools`.
 
 Agent access: `partial` — Native hire_agent; REST / CLI agent; runtime inheritance for
 native hires.
@@ -65,6 +67,14 @@ creation defaults. Do not count a board call or component test as agent evidence
 
 Gaps: Identity/persona hiring works. Operator account login and sensitive
 adapter/environment configuration are separate guarded actions.
+
+The AgentPool hiring UI can reuse a company pool or create a uniquely named
+pool before saving an agent, without requiring a connected worker. The existing
+[pool routes](../../server/src/routes/agent-pools.ts) require board identity and
+company access; an agent's hire grant does not grant pool administration.
+[Shared selector](../../ui/src/components/AgentPoolSelect.tsx) and
+[new-agent controls](../../ui/src/pages/NewAgent.test.tsx) are source/component
+evidence only, not a live permitted-agent journey.
 
 The runner request does not grant new account, environment-probe or native API
 fallback authority; see [validation access](./runs-adapters.md#validation) and

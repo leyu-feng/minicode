@@ -165,6 +165,7 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     label: "AgentPool",
     description: "Paired Minicode workers in a named pool",
     icon: Cpu,
+    recommended: true,
   },
 };
 

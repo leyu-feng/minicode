@@ -69,6 +69,7 @@ import { companiesApi } from "../api/companies";
 import { useCompanyListQuery } from "../api/companies-query";
 import { goalsApi } from "../api/goals";
 import { agentsApi } from "../api/agents";
+import { AgentPoolSelect, useAgentPoolSelection } from "./AgentPoolSelect";
 import { approvalsApi } from "../api/approvals";
 import { issuesApi } from "../api/issues";
 import { projectsApi } from "../api/projects";
@@ -637,6 +638,10 @@ function OnboardingWizardInner({
   const [url, setUrl] = useState(
     savedNativeRunnerDraft ? "" : (saved?.url as string) ?? "",
   );
+  const [poolName, setPoolName] = useState(
+    typeof saved?.poolName === "string" ? saved.poolName : "default",
+  );
+  const isAgentPool = adapterType === "agent_pool";
   const [adapterEnvResult, setAdapterEnvResult] =
     useState<AdapterEnvironmentTestResult | null>(null);
   const [adapterEnvError, setAdapterEnvError] = useState<string | null>(null);
@@ -695,10 +700,17 @@ function OnboardingWizardInner({
   const [createdCompanyId, setCreatedCompanyId] = useState<string | null>(
     existingCompanyId ?? (saved?.createdCompanyId as string) ?? null
   );
+  const poolSelection = useAgentPoolSelection({
+    companyId: createdCompanyId,
+    name: poolName,
+    onNameChange: setPoolName,
+    enabled: Boolean(createdCompanyId) && effectiveOnboardingOpen && step === 4 && isAgentPool,
+    initialMode: saved?.poolModeChoice === "existing" || saved?.poolModeChoice === "new" ? saved.poolModeChoice : null,
+  });
   const savedKeys = useSavedProviderKeys(
     createdCompanyId,
     apiKeyEnvKeyFor(adapterType),
-    effectiveOnboardingOpen && step === 4,
+    effectiveOnboardingOpen && step === 4 && !isAgentPool,
   );
   // The chooser is absent in onboarding. Prefer the user's explicit default;
   // otherwise only reuse an unambiguous account, regardless of list ordering.
@@ -765,6 +777,7 @@ function OnboardingWizardInner({
   const managedProvider = aiProviderForAdapter(adapterType);
   const managedSubscriptionProvider = managedProvider === "anthropic" || managedProvider === "openai" || managedProvider === "xai" ? managedProvider : undefined;
   function managedBindingForStep(): AiConnectionBinding | undefined {
+    if (isAgentPool) return undefined;
     if (credentialMode === "api") return selectedApiKey?.aiConnection ?? (
       !selectedApiKey && apiKeySecretRef.current?.companyId === createdCompanyId && apiKeySecretRef.current.envKey === apiKeyEnvKeyFor(adapterType)
         ? apiKeySecretRef.current.aiConnection : undefined);
@@ -915,7 +928,8 @@ function OnboardingWizardInner({
     if (!effectiveOnboardingOpen) return;
     const state = {
       step, companyName,
-      agentName, agentAppearance, agentRole, adapterType, runner, cwd, model, command, args, url,
+      agentName, agentAppearance, agentRole, adapterType, runner, cwd, model, command, args, url, poolName,
+      poolModeChoice: poolSelection.modeChoice,
       // The mode, never the key: this blob is localStorage.
       credentialMode, credentialModeChoice,
       createdCompanyId, createdCompanyPrefix, createdAgentId,
@@ -924,7 +938,7 @@ function OnboardingWizardInner({
     onboardingDraftStorage.write(JSON.stringify(state));
   }, [
     effectiveOnboardingOpen, step, companyName,
-    agentName, agentAppearance, agentRole, adapterType, runner, cwd, model, command, args, url,
+    agentName, agentAppearance, agentRole, adapterType, runner, cwd, model, command, args, url, poolName, poolSelection.modeChoice,
     credentialMode, credentialModeChoice,
     createdCompanyId, createdCompanyPrefix, createdAgentId,
     createdCompanyGoalId, createdProjectId, createdIssueRef,
@@ -1055,7 +1069,7 @@ function OnboardingWizardInner({
       setAdapterEnvLoading(false);
     }
     return () => { connectAttemptRef.current++; };
-  }, [effectiveOnboardingOpen, createdCompanyId, adapterType, credentialMode, step]);
+  }, [effectiveOnboardingOpen, createdCompanyId, adapterType, credentialMode, step, isAgentPool ? poolName : undefined]);
 
   const canShowAdapterLogin = Boolean(
     adapterCaps.login != null &&
@@ -1143,7 +1157,7 @@ function OnboardingWizardInner({
     adapterCaps.supportsInstructionsBundle ||
     adapterCaps.supportsSkills ||
     adapterCaps.supportsLocalAgentJwt;
-  const isLocalAdapter =
+  const isLocalAdapter = !isAgentPool && (
     isLocalAdapterCaps ||
     adapterType === "claude_local" ||
     adapterType === "codex_local" ||
@@ -1151,7 +1165,8 @@ function OnboardingWizardInner({
     adapterType === "kimi_local" ||
     adapterType === "opencode_local" ||
     adapterType === "pi_local" ||
-    adapterType === "cursor";
+    adapterType === "cursor"
+  );
   // Build adapter grids dynamically from the UI registry + display metadata.
   // External/plugin adapters automatically appear with generic defaults, and
   // server-disabled types are filtered out.
@@ -1195,7 +1210,8 @@ function OnboardingWizardInner({
    * Anything that gates this step belongs in here, so the next one is added
    * once rather than twice.
    */
-  const connectStepReady = sourceSelected && !adapterEnvLoading && !savedKeys.loading;
+  const connectStepReady = sourceSelected && !adapterEnvLoading &&
+    (isAgentPool ? poolSelection.ready : !savedKeys.loading);
 
   /**
    * Whether this step has a sign-in to do before it can hire.
@@ -1206,7 +1222,7 @@ function OnboardingWizardInner({
    * sandbox, or a local CLI account — Connect verifies credentials before the hire.
    */
   const connectStepNeedsLogin = Boolean(
-    credentialMode !== "api" &&
+    !isAgentPool && credentialMode !== "api" &&
       // Connection-list invalidation can arrive before the login's completion
       // poll. Keep its controller mounted until it reports success; otherwise
       // the saved account replaces the panel and "Connecting" never finishes.
@@ -1235,7 +1251,7 @@ function OnboardingWizardInner({
 
   /** Without browser login, show instructions for the selected execution environment. */
   const connectStepHasNoSandbox =
-    credentialMode !== "api" && !canShowAdapterLogin && !authSignalUndecided;
+    !isAgentPool && credentialMode !== "api" && !canShowAdapterLogin && !authSignalUndecided;
 
   /*
     The sequence's derived state. Space and visibility are separate throughout:
@@ -1245,10 +1261,10 @@ function OnboardingWizardInner({
   */
   const connectCollapsed =
     connectPhase !== "idle" && connectPhase !== "unwindRow" && sourceSelected;
-  const connectProgress = adapterEnvLoading ? "Testing connection…" : loading ? "Connecting…" : null;
+  const connectProgress = adapterEnvLoading ? "Testing connection…" : loading ? (isAgentPool ? "Creating agent…" : "Connecting…") : null;
   const hasSavedSubscription = Boolean(savedSubscription || savedKeys.storedLogin.data ||
     (credentialMode !== "api" && managedBindingForStep()));
-  const connectHasCard = credentialMode === "api" || connectStepNeedsLogin || connectStepHasNoSandbox || Boolean(connectProgress);
+  const connectHasCard = isAgentPool || credentialMode === "api" || connectStepNeedsLogin || connectStepHasNoSandbox || Boolean(connectProgress);
   const connectCardLive =
     connectHasCard &&
     (connectPhase === "loading" ||
@@ -1403,10 +1419,10 @@ function OnboardingWizardInner({
                 disabled: !connectAuthUrl,
               }
             : {
-                label: "Connect",
+                label: isAgentPool ? "Create agent" : "Connect",
                 icon: "arrow",
                 disabled:
-                  !connectStepReady || (credentialMode === "api" && !apiKey.trim() && !selectedApiKey),
+                  !connectStepReady || (!isAgentPool && credentialMode === "api" && !apiKey.trim() && !selectedApiKey),
               }
           : // Nothing is chosen on arrival, and the row is what chooses. Until
             // it has been answered the button has nothing to do.
@@ -1654,6 +1670,8 @@ function OnboardingWizardInner({
     setCommand("");
     setArgs("");
     setUrl("");
+    setPoolName("default");
+    poolSelection.reset();
     setAdapterEnvResult(null);
     adapterEnvResultAppliedStoredLoginRef.current = false;
     setAdapterEnvError(null);
@@ -1840,6 +1858,13 @@ function OnboardingWizardInner({
 
   function buildAdapterConfig(bindApiKey = false): Record<string, unknown> {
     const adapter = getUIAdapter(adapterType);
+    if (isAgentPool) {
+      return adapter.buildAdapterConfig({
+        ...defaultCreateValues,
+        adapterType,
+        adapterSchemaValues: { name: poolName.trim() },
+      });
+    }
     const config = adapter.buildAdapterConfig({
       ...defaultCreateValues,
       adapterType,
@@ -2101,6 +2126,11 @@ function OnboardingWizardInner({
     setLoading(true);
     setError(null);
     try {
+      if (isAgentPool) {
+        const pool = await poolSelection.ensurePool();
+        if (!isCurrent()) return;
+        poolSelection.select(pool.name);
+      }
       if (adapterType === "opencode_local") {
         const selectedModelId = model.trim();
         if (!isValidOpenCodeModelId(selectedModelId)) {
@@ -2152,7 +2182,7 @@ function OnboardingWizardInner({
       // hire describe it the same way — as a reference. A failure here stops the
       // hire rather than falling through to a configuration with no credential.
       let apiKeyStored = false;
-      if (credentialMode === "api" && !selectedApiKey && apiKey.trim()) {
+      if (!isAgentPool && credentialMode === "api" && !selectedApiKey && apiKey.trim()) {
         apiKeyStored = await storeApiKeyUserSecret(createdCompanyId);
         if (!apiKeyStored || !isCurrent()) return;
       }
@@ -2242,7 +2272,8 @@ function OnboardingWizardInner({
       const existing = existingAgents?.find(
         (agent) =>
           agent.name.trim().toLowerCase() === hireName.toLowerCase() &&
-          agentHarnessType(agent.adapterType, agent.adapterConfig) === adapterType,
+          agentHarnessType(agent.adapterType, agent.adapterConfig) === adapterType &&
+          (!isAgentPool || (agent.adapterConfig?.name ?? "default") === poolName.trim()),
       );
       if (existing) {
         if (!isCurrent()) return;
@@ -2742,6 +2773,7 @@ function OnboardingWizardInner({
                         id: opt.type,
                         label: CONNECT_SOURCE_NAMES[opt.type] ?? opt.label,
                         icon: <ModelSourceMark type={opt.type} Fallback={opt.icon} />,
+                        ...(opt.type === "agent_pool" ? { credentialMode: null } : {}),
                       }))}
                       mode={credentialMode}
                       selectedId={
@@ -2769,7 +2801,7 @@ function OnboardingWizardInner({
                         Once a sign-in is running there is no switching to keys
                         without abandoning it, so it goes rather than sitting
                         there inviting a press that cannot be honoured. */}
-                    <motion.div
+                    {!(sourcePicked && isAgentPool) && <motion.div
                       className="overflow-hidden"
                       /*
                         Inert once it has faded. It is clipped to nothing rather
@@ -2791,7 +2823,7 @@ function OnboardingWizardInner({
                         {savedKeys.options.length > 0 && <p className="px-3 text-sm text-muted-foreground">{savedKeys.options.length} saved API {savedKeys.options.length === 1 ? "key available" : "keys available"}.</p>}
                         {credentialMode === "subscription" && authSignalStatus === "present" && <p className="px-3 text-sm text-muted-foreground">An existing provider connection is available.</p>}
                       </div>
-                    </motion.div>
+                    </motion.div>}
                   </div>
 
                   {/*
@@ -2835,6 +2867,10 @@ function OnboardingWizardInner({
                         <Loader2 className="size-4 animate-spin" />
                         {connectProgress}
                       </p>
+                    ) : isAgentPool ? (
+                      <OnboardingLoginCard instruction="Use an existing pool or create a new one">
+                        <AgentPoolSelect selection={poolSelection} onSubmit={handleConnectStepPrimary} />
+                      </OnboardingLoginCard>
                     ) : credentialMode === "api" ? (
                       <OnboardingLoginCard
                         instruction={savedKeys.options.length ? "Choose a saved API key or enter a new one" : `Provide your ${

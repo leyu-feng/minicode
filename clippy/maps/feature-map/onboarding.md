@@ -60,6 +60,21 @@ also permits Legacy. Do not switch runners after onboarding when claiming proof
 of that default. Test the selected runtime and account, then complete a bounded
 useful task and follow-up with an independently checked file artifact. Saved
 execution configuration and recorded run identity must match after reload.
+
+For AgentPool, select its model-source tile and choose an existing company pool
+(`default` initially) or create a new pool by a unique name. Saving creates the
+new pool before hiring; an agent-save retry reuses a successfully created pool
+instead of creating a duplicate. Pool-list and creation errors must be visible;
+duplicate names require explicit reuse or a different name. No provider sign-in
+or API key is requested. Create the first agent with no connected worker;
+onboarding must not run a worker-readiness probe or block the hire on worker
+availability. Verify `agent_pool` and the chosen pool name persist without a
+provider credential or AI-connection binding. Leaving and resuming must retain
+the pool name and reuse/new choice. Before executing tasks,
+pair/connect a Minicode worker in company settings.
+Agent creation is not worker-connectivity or model-execution proof; verify a
+real task separately.
+
 The Codex first-task eval applies operator QA bounds before Get started through
 the existing agent configuration API. It verifies that only timeout and
 concurrency change; automatic runner, account and environment choices remain.

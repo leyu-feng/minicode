@@ -21,9 +21,10 @@ for ($i = 0; $i -lt $Arguments.Count; $i++) {
 }
 
 $executionRoot = if ($repo_root) { $repo_root } else { (Get-Location).Path }
-if (-not (Test-Path -LiteralPath $executionRoot)) {
+if (-not (Test-Path -LiteralPath $executionRoot -PathType Container)) {
   throw "repo_root does not exist: $executionRoot"
 }
+$executionRoot = (Resolve-Path -LiteralPath $executionRoot).Path
 $env:CLIPPY_REPO_ROOT = $executionRoot
 
 if (-not (Test-Path -LiteralPath (Join-Path $appPath "package.json"))) {
@@ -60,6 +61,7 @@ if (-not $bash) {
   throw "Clippy needs Git for Windows' bash.exe to run its build scripts."
 }
 $env:npm_config_script_shell = $bash
+$previousPaperclipHome = $env:PAPERCLIP_HOME
 
 Push-Location $appPath
 try {
@@ -86,9 +88,11 @@ try {
     Invoke-Pnpm @("install")
   }
 
-  # Keep clippy's database and config apart from any real Paperclip install,
-  # which defaults to ~/.paperclip.
-  if (-not $env:PAPERCLIP_HOME) { $env:PAPERCLIP_HOME = Join-Path $HOME ".clippy" }
+  # Each workspace keeps its own persistent database and instance configuration.
+  if (-not $env:PAPERCLIP_HOME) { $env:PAPERCLIP_HOME = Join-Path $executionRoot ".clippy" }
+  if ($env:DATABASE_URL) {
+    Write-Warning "DATABASE_URL is set; using the configured external database instead of the workspace-local database."
+  }
 
   # Clippy stays Node-only: skip the Rust-built native runner (paperclip-runnerd).
   $env:PAPERCLIP_DISABLE_NATIVE_RUNNER = "true"
@@ -97,7 +101,8 @@ try {
   $env:PAPERCLIP_OPEN_ON_LISTEN = "true"
   if ($port) { $env:PORT = $port }
 
-  Invoke-Pnpm @("dev:once")
+  Invoke-Pnpm @("dev:once", "--data-dir", $env:PAPERCLIP_HOME)
 } finally {
+  $env:PAPERCLIP_HOME = $previousPaperclipHome
   Pop-Location
 }

@@ -72,6 +72,8 @@ API: `present` — representative operation IDs:
 
 - `GET /api/companies/{companyId}/adapters/{type}/models`.
 - `POST /api/companies/{companyId}/adapters/{type}/test-environment`.
+- `GET /api/companies/{companyId}/agent-pools`.
+- `POST /api/companies/{companyId}/agent-pools`.
 
 Agent access: `partial` — Permitted agent/model API; operator
 provider-account/environment setup.
@@ -96,6 +98,14 @@ is insufficient. A 403, absent proof, changed configuration, missing response
 identity or unconfirmed cleanup remains visible. No probe is added to creation
 or discovery, no agent/company grant is broadened, and provider authentication
 errors never cause an automatic runner switch.
+
+AgentPool onboarding reuses the existing board-only, company-scoped pool
+inventory/create routes. Pool names are unique per company. Saving can create
+a pool before the hire and requires no worker connection or readiness probe.
+This does not grant pool management to agent identities or bypass normal hire
+approval. [Shared selector](../../ui/src/components/AgentPoolSelect.tsx) and
+[pool routes](../../server/src/routes/agent-pools.ts) are source evidence;
+component controls do not establish live agent access.
 
 Native setup derives outer sandbox isolation from the server-resolved execution
 target, as task execution does. This is an internal transport choice, not a

@@ -1,2 +1,3 @@
 node_modules/
 minicode-portable*.zip
+.clippy/

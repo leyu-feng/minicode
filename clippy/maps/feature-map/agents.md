@@ -50,6 +50,14 @@ Automated: [new agent page](../../ui/src/pages/NewAgent.test.tsx) and [configura
 
 Manual: Hire an agent with a distinct name and role. Complete any required approval, reload the roster, and open its configuration. Confirm manager, adapter, and model persisted; run a small task to prove execution readiness.
 
+For AgentPool, reuse an existing company pool or choose **Create a new pool**
+and enter a unique name. A company may have multiple distinct named pools.
+Save without connecting a worker or running a worker-readiness test. Verify
+the pool and agent are persisted and the agent names the selected pool.
+Duplicate names must offer explicit reuse; a pool created before a failed hire
+must remain selectable on retry. Pair/connect workers later through company
+settings before verifying a real task; saving an agent is not execution proof.
+
 For a new Codex hire, choose the Codex harness. Automatic selection uses Paperclip
 Runner on a qualified selected target; Advanced offers an explicit Legacy runner
 override. Other harness defaults are unchanged. Record the persisted runner and
