@@ -37,8 +37,9 @@ Usage:
   minicode auth use <name>       Select the active auth
   minicode auth list             List configured auth options
   minicode auth clear            Clear deployment configuration
-  minicode worker --server <url> --worker-id <id> --repo-root <dir>
-                                Connect to an AgentPool as a worker
+  minicode worker --server <url> --worker-id <id> --repo-root <dir> [--entra-user <upn>]
+                                Connect to an AgentPool as a worker; --entra-user signs in
+                                to an Entra-gated Clippy through clippy-auth
   minicode --help
 
 Options:

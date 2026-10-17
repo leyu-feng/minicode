@@ -23,7 +23,7 @@ async function fixture(t, entry, { initialize = true, rootFlag, chat = false, co
     fs.mkdir(path.join(root, "bootstrap")),
     fs.mkdir(caller),
   ])
-  for (const file of ["cli.js", "package.json", "server/agent-pool-worker.js", "server/agent-session.js", "server/auth.js", "server/kill-tree.js"]) {
+  for (const file of ["cli.js", "package.json", "server/agent-pool-worker.js", "server/agent-session.js", "server/auth.js", "server/entra-proxy.js", "server/entra-session.js", "server/kill-tree.js"]) {
     await fs.copyFile(new URL(`../${file}`, import.meta.url), path.join(app, file))
   }
   await fs.symlink(fileURLToPath(new URL("../node_modules", import.meta.url)), path.join(app, "node_modules"),

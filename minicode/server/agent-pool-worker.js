@@ -6,6 +6,8 @@ import { promisify } from "node:util"
 import WebSocket from "ws"
 import { AgentSession } from "./agent-session.js"
 import { authFilePath } from "./auth.js"
+import { SESSION_HEADER, createEntraSession, isEasyAuthChallenge } from "./entra-session.js"
+import { startEntraProxy } from "./entra-proxy.js"
 
 const MAX_FRAME = 256 * 1024
 const MAX_OUTPUT = 2 * 1024 * 1024
@@ -91,7 +93,7 @@ export async function loadWorkerCredential({ server, workerId, cwd, stateDir }) 
 }
 
 export async function startAgentPoolWorker({
-  server, workerId, cwd, clientToken,
+  server, workerId, cwd, clientToken, entraSession = null,
   workspaceRoot = path.join(path.dirname(authFilePath()), "agent-pool", "workspaces", workerId),
   sessionFactory = (options) => new AgentSession(options),
   reconnectMs = 1000, leaseMs = LEASE_MS,
@@ -109,6 +111,10 @@ export async function startAgentPoolWorker({
   await fs.mkdir(workspaceRoot, { recursive: true, mode: 0o700 })
   workspaceRoot = await fs.realpath(workspaceRoot)
   if (isInside(cwd, workspaceRoot)) throw new Error("AgentPool workspaces must be outside the source checkout")
+  // Behind Entra sign-in, the agent's own calls go through a loopback proxy that adds the worker's
+  // Easy Auth session; otherwise they go straight to the server, as before.
+  const proxy = entraSession ? await startEntraProxy({ server: origin.origin, session: entraSession }) : null
+  const agentApiUrl = proxy ? proxy.origin : origin.origin
   const endpoint = new URL("/api/agent-pool/worker", origin)
   endpoint.protocol = origin.protocol === "https:" ? "wss:" : "ws:"
   endpoint.searchParams.set("workerId", workerId)
@@ -137,6 +143,7 @@ export async function startAgentPoolWorker({
     // write() settles only after its active model/tool operation unwinds.
     await active?.execution
     active?.session?.dispose()
+    await proxy?.close()
     settle(error)
   }
 
@@ -164,6 +171,7 @@ export async function startAgentPoolWorker({
       throw new Error("AgentPool task received while busy or invalid")
     }
     const reachableUrl = (value) => {
+      if (proxy) return proxy.rewrite(value)
       const target = new URL(value)
       return new URL(target.pathname + target.search, origin).href
     }
@@ -186,7 +194,7 @@ export async function startAgentPoolWorker({
         id: task.runId, cwd: workspace,
         env: {
           ...workspaceEnv(),
-          PAPERCLIP_API_URL: origin.origin,
+          PAPERCLIP_API_URL: agentApiUrl,
           PAPERCLIP_API_KEY: task.authToken ?? "",
           PAPERCLIP_RUN_ID: task.runId,
           PAPERCLIP_AGENT_ID: task.agent.id,
@@ -243,7 +251,11 @@ export async function startAgentPoolWorker({
   function connect() {
     if (stopped) return
     socket = new WebSocket(endpoint, {
-      headers: { Authorization: `Bearer ${clientToken}` }, maxPayload: MAX_FRAME, handshakeTimeout: 10_000,
+      headers: {
+        Authorization: `Bearer ${clientToken}`,
+        ...(entraSession ? { [SESSION_HEADER]: entraSession.token() } : {}),
+      },
+      maxPayload: MAX_FRAME, handshakeTimeout: 10_000,
     })
     const current = socket
     const heartbeat = () => {
@@ -289,6 +301,15 @@ export async function startAgentPoolWorker({
     })
     current.on("unexpected-response", (_request, response) => {
       response.resume()
+      // Easy Auth refused the session, not Clippy the worker: renew it and connect again.
+      if (entraSession && isEasyAuthChallenge(response.statusCode, response.headers["www-authenticate"])) {
+        // The close that follows must not schedule a reconnect of its own.
+        current.renewingEntra = true
+        current.terminate()
+        log("AgentPool Entra session refused; renewing")
+        entraSession.renew().then(() => { if (!stopped) connect() }, (error) => void stop(error))
+        return
+      }
       void stop(new Error(`AgentPool authentication failed (HTTP ${response.statusCode}); check pairing or revocation`))
     })
     current.on("error", (error) => {
@@ -297,7 +318,7 @@ export async function startAgentPoolWorker({
     current.on("close", (code) => {
       connected = false
       clearTimeout(heartbeatTimer)
-      if (stopped) return
+      if (stopped || current.renewingEntra) return
       if (code === 1008) { void stop(new Error("AgentPool execution or credentials rejected; retry explicitly")); return }
       log("AgentPool disconnected; reconnecting without replay")
       if (active && !leaseTimer) {
@@ -310,10 +331,22 @@ export async function startAgentPoolWorker({
   return { stop, finished }
 }
 
+const WORKER_USAGE = "Usage: minicode worker --server <origin> --worker-id <id> [--repo-root <directory>] [--entra-user <upn> [--clippy-auth <cli.js>]]"
+
+// A server behind Entra sign-in answers an unauthenticated probe with Easy Auth's challenge.
+async function requiresEntra(server) {
+  try {
+    const response = await fetch(new URL("/api/health", server), { signal: AbortSignal.timeout(15_000), redirect: "manual" })
+    return isEasyAuthChallenge(response.status, response.headers.get("www-authenticate"))
+  } catch {
+    return false
+  }
+}
+
 export async function runAgentPoolWorkerCli(argv, repoRoot) {
   const options = {}
   for (let i = 0; i < argv.length; i++) {
-    if (!["--server", "--worker-id"].includes(argv[i]) || !argv[i + 1]) throw new Error("Usage: minicode worker --server <origin> --worker-id <id> [--repo-root <directory>]")
+    if (!["--server", "--worker-id", "--entra-user", "--clippy-auth"].includes(argv[i]) || !argv[i + 1]) throw new Error(WORKER_USAGE)
     options[argv[i].slice(2)] = argv[++i]
   }
   const workerId = options["worker-id"]
@@ -321,17 +354,35 @@ export async function runAgentPoolWorkerCli(argv, repoRoot) {
   const server = agentPoolServerUrl(options.server).origin
   const cwd = await fs.realpath(path.resolve(repoRoot || process.env.MINICODE_REPO_ROOT || process.cwd()))
   const state = await loadWorkerCredential({ server, workerId, cwd })
+
+  // --entra-user turns Entra sign-in on and names the account. Without it, a server that needs it
+  // would let the worker connect and then refuse every result the agent tries to post back.
+  const user = options["entra-user"]
+  let entraSession = null
+  if (user) {
+    entraSession = createEntraSession({ server, user, ...(options["clippy-auth"] ? { clippyAuth: path.resolve(options["clippy-auth"]) } : {}) })
+    await entraSession.ensure()
+  } else if (await requiresEntra(server)) {
+    throw new Error(`${server} requires Entra sign-in; start the worker with --entra-user <upn>`)
+  }
+
   const serverToken = process.env.MINICODE_AGENT_POOL_PAIRING_TOKEN
   delete process.env.MINICODE_AGENT_POOL_PAIRING_TOKEN
   if (serverToken) {
-    const response = await fetch(new URL("/api/agent-pool/pair", server), {
-      method: "POST", headers: { "Content-Type": "application/json" },
+    const pair = () => fetch(new URL("/api/agent-pool/pair", server), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(entraSession ? { [SESSION_HEADER]: entraSession.token() } : {}) },
       body: JSON.stringify({ workerId, serverToken, clientToken: state.clientToken }),
       signal: AbortSignal.timeout(15_000), redirect: "error",
     })
+    let response = await pair()
+    if (entraSession && isEasyAuthChallenge(response.status, response.headers.get("www-authenticate"))) {
+      await entraSession.renew()
+      response = await pair()
+    }
     if (!response.ok) throw new Error(`AgentPool pairing failed (HTTP ${response.status}). Tokens are single-use; if already paired, unset MINICODE_AGENT_POOL_PAIRING_TOKEN and reconnect.`)
   }
-  const worker = await startAgentPoolWorker({ server, workerId, cwd, clientToken: state.clientToken })
+  const worker = await startAgentPoolWorker({ server, workerId, cwd, clientToken: state.clientToken, entraSession })
   const onSignal = () => { void worker.stop() }
   process.once("SIGINT", onSignal)
   process.once("SIGTERM", onSignal)
