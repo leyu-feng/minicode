@@ -46,6 +46,66 @@ deployment name and default model. Named deployments are stored in
 Use `auth clear` to remove all saved minicode auth options and return to
 first-run setup without signing out of Azure CLI.
 
+### Sign in as a specific user
+
+Use Azure CLI with a separate identity cache for each requested UPN/tenant:
+
+```powershell
+.\minicode.ps1 auth add my-resource --model gpt-5.6-sol --entra-user alice@contoso.com
+.\minicode.ps1 auth login
+.\minicode.ps1 auth list
+```
+
+`--entra-user` is a UPN, not an object ID. Add `--tenant <tenant-id-or-domain>`
+when selecting a particular tenant (for example, for a guest account).
+Adding this profile runs `az login`. Select the requested account in the sign-in
+dialog; Minicode verifies the account, tenant, and model-resource token before
+saving the profile. A different account or failed login does not replace the saved
+profile. Azure CLI must be installed, and the account must have model-resource
+permissions. This does not use a username/password login.
+
+Minicode stores only the deployment, endpoint, model, credential provider, UPN,
+tenant, and Azure CLI cache directory in `auth.json`, **not access or refresh
+tokens**. Each identity uses its own `AZURE_CONFIG_DIR` under Minicode's
+`azure-cli` configuration directory. Only the child Azure CLI process receives
+this setting: your normal Azure CLI cache and active account are unchanged.
+Different deployments/Minicode processes can therefore use different identities
+at the same time. Running plain `az login` outside Minicode does not sign into
+these isolated caches.
+
+Agent-run shell commands and their child processes inherit the session's
+`AZURE_CONFIG_DIR`, so commands such as `az account list` use the same identity
+as the session's model requests. The model profile is pinned when the session
+first resolves it (at startup for the CLI REPL, or on the first prompt otherwise).
+Changing `auth use` affects new sessions, not an already-bound session, even
+after clearing its conversation. The outer terminal's environment is unchanged.
+This is environment inheritance, not a security boundary: commands can override it.
+Standalone web shell and Pi panes retain their existing environments.
+
+Runtime token requests use the saved cache and tenant, verify the selected account,
+and renew silently through `az account get-access-token`. Each newly acquired token
+is decoded to check its username (`preferred_username`, `upn`, or `unique_name`)
+and tenant (`tid`) against the saved profile before it is cached or used.
+Missing, unreadable, or mismatched claims fail explicitly. These are identity
+consistency checks, not local signature validation; Azure validates the token
+and permissions when the model API receives it. If interaction is
+required, run `minicode auth login` with that deployment active. Runtime requests
+never open a sign-in dialog. `auth clear` removes Minicode profiles but does not
+delete Azure CLI caches or sign accounts out.
+
+Without `--entra-user`, existing Azure CLI behavior is unchanged and uses your
+normal active account. Model authentication has no `clippy-auth` or MSAL dependency.
+Old `clippy-auth` model profiles must be re-added with
+`auth add <deployment> --entra-user <upn>` (and `--model`, `--endpoint`, or
+`--tenant` as needed); they never silently fall back to another identity.
+The worker's separate Easy Auth session still uses `clippy-auth`, and its
+`--clippy-auth <path-to-cli.js>` override remains available.
+
+Both the CLI (including `/model` and `auth list`) and the web toolbar show
+**deployment · model · UPN** for identity-bound profiles. Unbound Azure CLI
+profiles use the literal display name **`login@az.cli`**, rather than attempting
+to identify Azure CLI's current account.
+
 REPL commands: `exit`/`quit`/`:q` to leave, `/clear` to reset the conversation,
 `/cwd` for the working directory, `/model` for the active model. `Ctrl+C`
 cancels the current turn; `Ctrl+C` at an empty prompt exits. **Conversation
@@ -166,7 +226,17 @@ Or directly:
 ```powershell
 .\minicode.ps1 web            # random free port
 .\minicode.ps1 web 7317       # fixed port
+.\minicode.ps1 web 7317 --auth my-resource
 ```
+
+`--auth <entry>` selects a saved entry from `auth list` for this web process,
+without changing the shared active entry in `auth.json`. Separate web instances
+can select different entries and identities. The selection survives portal
+restarts and applies to the toolbar, new agent sessions, model tokens, and
+agent-run Azure CLI commands. Unknown entries fail at startup instead of falling
+back to the active entry. The flag also works with the terminal agent.
+An explicit selection takes precedence over API-key provider environment variables;
+existing endpoint and model overrides still apply.
 
 The server listens on `127.0.0.1` only and opens your default browser.
 

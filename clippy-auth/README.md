@@ -6,6 +6,12 @@ Apps "Easy Auth"), and saves the Easy Auth session the worker then sends on ever
 It is a separate package so that Minicode itself stays small: the Entra and WAM dependencies live
 here, and the worker only reads a file and, when it needs a new session, runs this tool.
 
+Model API authentication is separate and uses Azure CLI through
+`minicode auth add --entra-user`; this helper only manages worker Easy Auth sessions.
+WAM window parenting is delegated to MSAL without invoking PowerShell or `Add-Type`,
+so the helper remains compatible with PowerShell Constrained Language Mode.
+If the native broker is unavailable, sign-in fails explicitly; there is no browser fallback.
+
 ## Quick start
 
 ```powershell

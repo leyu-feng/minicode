@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import childProcess from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -8,6 +9,7 @@ import { isEasyAuthChallenge, parseChallenge, readChallenge } from "../src/chall
 import { exchangeForSession, jwtExpiry, sessionAccepted } from "../src/easyauth.js"
 import { readSession, removeSession, sessionPath, writeSession } from "../src/session-store.js"
 import { EXIT_ERROR, main, parseArgs } from "../cli.js"
+import { acquireToken, createBrokerApplication, InteractionRequiredError } from "../src/wam.js"
 
 const SERVER = "https://clippy.example.net"
 const CHALLENGE = 'Bearer realm="clippy.example.net" authorization_uri="https://login.microsoftonline.com/tenant-id/oauth2/v2.0/authorize" resource_id="app-id"'
@@ -113,4 +115,56 @@ test("status without a saved session says how to sign in", async () => {
   const lines = []
   assert.equal(await main(["status", "--server", SERVER], (line) => lines.push(line)), EXIT_ERROR)
   assert.match(lines[0], /clippy-auth login --server https:\/\/clippy\.example\.net/)
+})
+
+test("rejects the removed model-token commands", () => {
+  assert.throws(() => parseArgs(["login", "--resource", "https://cognitiveservices.azure.com", "--user", "alice@contoso.com"]), /Unknown/)
+  assert.throws(() => parseArgs(["get-access-token", "--server", SERVER]), /Usage/)
+})
+
+const WAM_OPTIONS = {
+  authority: "https://login.microsoftonline.com/tenant-id", clientId: "public-client",
+  scopes: ["app-id/user_impersonation"], user: "alice@contoso.com",
+}
+class MockInteractionRequiredAuthError extends Error {}
+
+function brokerApplication(app) {
+  return async () => ({ app, InteractionRequiredAuthError: MockInteractionRequiredAuthError })
+}
+
+test("worker WAM interaction delegates window discovery to MSAL without invoking PowerShell", { skip: process.platform !== "win32" }, async (t) => {
+  t.mock.method(childProcess, "execFile", assert.fail)
+  const token = { accessToken: "worker-token" }
+  const result = await acquireToken(WAM_OPTIONS, brokerApplication({
+    getAllAccounts: async () => [],
+    acquireTokenInteractive: async (request) => {
+      assert.deepEqual(request.scopes, WAM_OPTIONS.scopes)
+      assert.equal(request.loginHint, WAM_OPTIONS.user)
+      assert.equal(request.windowHandle, undefined)
+      await assert.rejects(request.openBrowser(), /WAM should handle sign-in without a browser/)
+      return token
+    },
+  }))
+  assert.equal(result, token)
+})
+
+test("worker WAM renewal selects the requested account and never opens UI silently", { skip: process.platform !== "win32" }, async (t) => {
+  t.mock.method(childProcess, "execFile", assert.fail)
+  const account = { username: "Alice@Contoso.com" }
+  const token = { accessToken: "worker-token" }
+  const app = {
+    getAllAccounts: async () => [{ username: "bob@contoso.com" }, account],
+    acquireTokenSilent: async (request) => { assert.equal(request.account, account); return token },
+    acquireTokenInteractive: assert.fail,
+  }
+  assert.equal(await acquireToken({ ...WAM_OPTIONS, silentOnly: true }, brokerApplication(app)), token)
+  app.acquireTokenSilent = async () => { throw new MockInteractionRequiredAuthError() }
+  await assert.rejects(acquireToken({ ...WAM_OPTIONS, silentOnly: true }, brokerApplication(app)), InteractionRequiredError)
+})
+
+test("unavailable native broker fails before constructing a browser client", async () => {
+  await assert.rejects(createBrokerApplication(WAM_OPTIONS, async () => ({
+    msal: { PublicClientApplication: class { constructor() { assert.fail("No browser client may be created") } } },
+    extensions: { NativeBrokerPlugin: class { isBrokerAvailable = false } },
+  })), /WAM native broker is unavailable/)
 })
