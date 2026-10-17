@@ -9,8 +9,9 @@ import {
   addAzureDeployment,
   authFilePath,
   clearAuth,
+  getActiveAzureDeployment,
   listAuthConfigs,
-  loginAzureCli,
+  loginActiveDeployment,
   resolveModelConfig,
   setActiveAuth,
 } from "./server/auth.js"
@@ -32,7 +33,8 @@ Usage:
   minicode                       Interactive REPL (conversation is remembered)
   minicode "<prompt>"            Run one prompt, print the answer, exit
   minicode --no-tools "<prompt>" Answer without running any shell commands
-  minicode auth login            Sign in with Azure CLI
+  minicode web [port]            Start the browser portal
+  minicode auth login            Sign in with the active deployment's credential CLI
   minicode auth add [deployment] Add an Azure deployment
   minicode auth use <name>       Select the active auth
   minicode auth list             List configured auth options
@@ -45,7 +47,11 @@ Usage:
 Options:
   --repo-root <dir>       Working directory for shell commands
   --model <name>          Override the model for this run
+  --auth <entry>          Use a saved auth entry without changing the active one
   --endpoint <url>        Responses endpoint (with 'auth add')
+  --entra-user <upn>      Sign in with an isolated Azure CLI identity (with 'auth add')
+  --tenant <id>           Select the Entra tenant (with 'auth add --entra-user')
+  --clippy-auth <cli.js>  Override the Easy Auth helper (with 'worker' only)
 
 REPL commands:
   exit, quit, :q     Leave
@@ -71,13 +77,31 @@ function parseArgs(argv) {
     else if (arg === "--no-tools") options.noTools = true
     else if ((arg === "--repo-root" || arg === "-repo_root") && argv[i + 1]) options.repoRoot = argv[++i]
     else if (arg === "--model" && argv[i + 1]) options.model = argv[++i]
+    else if (arg === "--auth") {
+      if (!argv[i + 1] || argv[i + 1].startsWith("--")) throw new Error("Missing value for --auth.")
+      options.auth = argv[++i]
+    }
     else if (arg === "--endpoint" && argv[i + 1]) options.endpoint = argv[++i]
+    else if (["auth", "providers"].includes(options.positional[0]) && arg === "--clippy-auth") {
+      throw new Error("--clippy-auth is only supported with worker. Model sign-in uses Azure CLI.")
+    }
+    else if (["auth", "providers"].includes(options.positional[0]) && ["--entra-user", "--tenant"].includes(arg)) {
+      if (!argv[i + 1] || argv[i + 1].startsWith("--")) throw new Error(`Missing value for ${arg}.`)
+      const key = { "--entra-user": "entraUser", "--tenant": "tenant" }[arg]
+      options[key] = argv[++i]
+    }
     else options.positional.push(arg)
   }
   return options
 }
 
-const options = parseArgs(process.argv.slice(2))
+let options
+try {
+  options = parseArgs(process.argv.slice(2))
+} catch (error) {
+  console.error(`Minicode: ${error.message}`)
+  process.exit(1)
+}
 
 if (options.help) {
   usage()
@@ -90,22 +114,26 @@ if (options.version) {
 
 // --model applies before anything resolves configuration.
 if (options.model) process.env.OPENCODE_MODEL = options.model
+if (options.auth) process.env.MINICODE_AUTH_ENTRY = options.auth
 
 /* ------------------------------------------------------------------ auth */
 
 async function runAuth(argv) {
   const action = argv[0] || "list"
+  if (action !== "add" && (options.entraUser || options.tenant)) {
+    throw new Error("--entra-user and --tenant are only supported with auth add.")
+  }
 
   if (action === "login") {
     await ensureAzureDeployment()
-    await loginAzureCli()
-    console.log(`${C.green}Azure CLI login successful${C.reset}`)
+    const deployment = await loginActiveDeployment()
+    console.log(`${C.green}Signed in: ${deployment.name} · ${deployment.model} · ${deployment.user}${C.reset}`)
     return 0
   }
 
   if (action === "add") {
     const deployment = await promptForAzureDeployment(argv[1])
-    console.log(`${C.green}Active auth: ${deployment.name} · ${deployment.model}${C.reset}`)
+    console.log(`${C.green}Active auth: ${deployment.name} · ${deployment.model} · ${deployment.user || "login@az.cli"}${C.reset}`)
     console.log(`${C.dim}${authFilePath()}${C.reset}`)
     return 0
   }
@@ -113,7 +141,7 @@ async function runAuth(argv) {
   if (action === "use") {
     if (!argv[1]) throw new Error("Usage: minicode auth use <name>")
     const deployment = await setActiveAuth(argv[1])
-    console.log(`${C.green}Active auth: ${deployment.name} · ${deployment.model}${C.reset}`)
+    console.log(`${C.green}Active auth: ${deployment.name} · ${deployment.model} · ${deployment.user || "login@az.cli"}${C.reset}`)
     return 0
   }
 
@@ -130,7 +158,7 @@ async function runAuth(argv) {
       return 0
     }
     for (const deployment of deployments) {
-      console.log(`${deployment.active ? "*" : " "} ${deployment.name} · ${deployment.model} (${deployment.provider})`)
+      console.log(`${deployment.active ? "*" : " "} ${deployment.name} · ${deployment.model} · ${deployment.user} (${deployment.credentialProvider || "azure-cli"})`)
       if (deployment.endpoint) console.log(`  ${C.dim}${deployment.endpoint}${C.reset}`)
     }
     console.log(`${C.dim}${authFilePath()}${C.reset}`)
@@ -140,12 +168,12 @@ async function runAuth(argv) {
   if (action === "clear") {
     const removed = await clearAuth()
     console.log(removed ? "Cleared minicode auth configuration." : "Minicode auth configuration is already empty.")
-    console.log(`${C.dim}Azure CLI login was not changed.${C.reset}`)
+    console.log(`${C.dim}Azure CLI and WAM sign-ins were not changed.${C.reset}`)
     return 0
   }
 
   if (action === "logout") {
-    console.log("Azure CLI credentials are managed outside minicode. Run: az logout")
+    console.log("Credentials are managed outside minicode. Azure CLI: az logout. WAM: manage accounts in Windows Settings.")
     return 0
   }
 
@@ -175,10 +203,16 @@ async function promptForAzureDeployment(initialName) {
     name,
     model: model || DEFAULT_AZURE_MODEL,
     endpoint: options.endpoint,
+    entraUser: options.entraUser,
+    tenant: options.tenant,
   })
 }
 
 async function ensureAzureDeployment() {
+  if (process.env.MINICODE_AUTH_ENTRY) {
+    await getActiveAzureDeployment()
+    return
+  }
   if (process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY) return
   const deployments = await listAuthConfigs()
   if (deployments.length) return
@@ -188,9 +222,30 @@ async function ensureAzureDeployment() {
 
 const AUTH_COMMANDS = new Set(["auth", "providers"])
 if (AUTH_COMMANDS.has(options.positional[0])) {
-  process.exit(await runAuth(options.positional.slice(1)))
+  try {
+    process.exitCode = await runAuth(options.positional.slice(1))
+  } catch (error) {
+    console.error(`Minicode auth: ${error.message}`)
+    process.exitCode = 1
+  }
+  process.exit(process.exitCode)
 }
-if (options.positional[0] === "worker") {
+if (options.positional[0] === "web") {
+  try {
+    const [, port, ...extra] = options.positional
+    if (extra.length || (port !== undefined && !/^\d+$/.test(port))) {
+      throw new Error("Usage: minicode web [port] [--auth <entry>]")
+    }
+    if (port !== undefined && Number(port) > 65535) throw new Error("Web port must be between 0 and 65535.")
+    process.env.MINICODE_REPO_ROOT = path.resolve(options.repoRoot || process.env.MINICODE_REPO_ROOT || process.cwd())
+    process.env.MINICODE_WEB_PORT = port ?? process.env.MINICODE_WEB_PORT ?? "0"
+    await ensureAzureDeployment()
+    await import("./server/index.js")
+  } catch (error) {
+    console.error(`Minicode web: ${error.message}`)
+    process.exitCode = 1
+  }
+} else if (options.positional[0] === "worker") {
   try {
     await runAgentPoolWorkerCli(options.positional.slice(1), options.repoRoot)
   } catch (error) {
@@ -229,13 +284,16 @@ async function runNoTools(prompt) {
 }
 
 async function runRepl() {
-  const config = await resolveModelConfig().catch(() => null)
-  if (!config) {
-    console.error(`${C.red}Not signed in.${C.reset} Run: az login`)
+  let config
+  try {
+    config = await resolveModelConfig()
+    session.config = config
+  } catch (error) {
+    console.error(`${C.red}${error.message}${C.reset}`)
     process.exit(1)
   }
 
-  console.log(`${C.green}minicode${C.reset} ${C.dim}${config.deployment} · ${config.model}${C.reset}`)
+  console.log(`${C.green}minicode${C.reset} ${C.dim}${config.deployment || "API key"} · ${config.model} · ${config.user || "API key"}${C.reset}`)
   console.log(`${C.dim}repo: ${cwd}${C.reset}`)
   console.log(`${C.dim}type 'exit' to quit, '/clear' to reset the conversation${C.reset}\n`)
 
@@ -286,7 +344,7 @@ async function runRepl() {
     }
     if (value === "/model") {
       const active = session.config || config
-      console.log(`${C.dim}${active.deployment} · ${active.model}${C.reset}`)
+      console.log(`${C.dim}${active.deployment || "API key"} · ${active.model} · ${active.user || "API key"}${C.reset}`)
       rl.prompt()
       continue
     }

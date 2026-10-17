@@ -363,7 +363,11 @@ export class AgentSession extends EventEmitter {
     const result = { exitCode: 0 }
 
     try {
-      this.config = await resolveModelConfig()
+      if (!this.config) {
+        const config = await resolveModelConfig()
+        this.#throwIfInactive(run)
+        this.config = config
+      }
       this.#throwIfInactive(run)
       this.messages.push({ role: "user", content: prompt })
 
@@ -453,7 +457,9 @@ export class AgentSession extends EventEmitter {
         this.#emitOutput(`\u001b[33m$ ${command}\u001b[0m\r\n`)
         const shellResult = await runShellCommand(command, {
           cwd: this.cwd,
-          env: this.env,
+          env: this.config.azureConfigDir
+            ? { ...(this.env ?? process.env), AZURE_CONFIG_DIR: this.config.azureConfigDir }
+            : this.env,
           signal,
           // A killed process can flush buffered output after Ctrl+C. Do not
           // let output from an invalidated run appear in the next prompt.

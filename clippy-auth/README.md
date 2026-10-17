@@ -11,6 +11,12 @@ development. Challenges must name a Microsoft Entra authority in a supported Azu
 and a valid application identifier or HTTPS/`api://` resource URI. The token exchange refuses
 redirects, so it cannot forward credentials to another origin.
 
+Model API authentication is separate and uses Azure CLI through
+`minicode auth add --entra-user`; this helper only manages worker Easy Auth sessions.
+WAM window parenting is delegated to MSAL without invoking PowerShell or `Add-Type`,
+so the helper remains compatible with PowerShell Constrained Language Mode.
+If the native broker is unavailable, sign-in fails explicitly; there is no browser fallback.
+
 ## Quick start
 
 ```powershell

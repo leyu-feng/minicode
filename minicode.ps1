@@ -88,15 +88,10 @@ function Ensure-Pi {
 # Browser portal: multi-pane terminal at http://127.0.0.1
 if ($command -eq "web") {
   Ensure-Dependencies $agentPath "Web portal project"
-  & node.exe (Join-Path $agentPath "cli.js") auth ensure
-  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   if (-not (Ensure-Pi)) {
     Write-Host "pi-agent not installed; Pi panes will be unavailable." -ForegroundColor Yellow
   }
-  if ($effectiveArgs.Count -ge 2) {
-    $env:MINICODE_WEB_PORT = $effectiveArgs[1]
-  }
-  Invoke-Node (Join-Path $agentPath "server\index.js") @()
+  Invoke-Node (Join-Path $agentPath "cli.js") $effectiveArgs
 }
 
 # Pi coding agent CLI passthrough.

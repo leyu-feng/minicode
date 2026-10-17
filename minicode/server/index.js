@@ -92,7 +92,8 @@ const server = http.createServer(async (req, res) => {
         repoRoot,
         platform: process.platform,
         deployment: deployment?.name || "not configured",
-        model: process.env.OPENCODE_MODEL || process.env.AZURE_OPENAI_MODEL || deployment?.model || "default",
+        model: deployment?.model || "default",
+        user: deployment?.user || "not configured",
       }),
     )
     return
