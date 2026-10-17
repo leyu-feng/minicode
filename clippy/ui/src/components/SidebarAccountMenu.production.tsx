@@ -16,7 +16,7 @@ import { useCloudInviteUrl } from "@/hooks/useCloudInviteUrl";
 import { useCanInviteCompanyMembers } from "@/hooks/useCompanyInviteAccess";
 import { useHiddenSettings } from "@/hooks/useHiddenSettings";
 import { useSignOut } from "@/hooks/useSignOut";
-import { useStagingCommit } from "@/hooks/useStagingCommit";
+import { useRunningCommit } from "@/hooks/useRunningCommit";
 import { userProfilePath } from "@/lib/userProfileLinks";
 import { useSidebar } from "../context/SidebarContext";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -144,7 +144,7 @@ export function SidebarAccountMenu({
   const { isMobile, setSidebarOpen, collapsed, peeking } = useSidebar();
   const rail = collapsed && !peeking;
   const open = controlledOpen ?? internalOpen;
-  const stagingCommit = useStagingCommit(open);
+  const { commit: runningCommit, isLoading: commitLoading } = useRunningCommit(open);
   const setOpen = onOpenChange ?? setInternalOpen;
   const { data: session } = useQuery({
     queryKey: queryKeys.auth.session,
@@ -197,7 +197,7 @@ export function SidebarAccountMenu({
         >
           <div className="h-24 bg-(image:--gradient-extract-25)" />
           <div className="-mt-8 px-4 pb-4">
-            {/* The profile link is a stretched overlay so the staging SHA anchor can sit beside the email without nesting anchors. */}
+            {/* Keep the commit selectable without activating the profile link. */}
             <div className="relative flex items-start gap-3">
               <Link
                 to={profileHref}
@@ -214,18 +214,17 @@ export function SidebarAccountMenu({
               <div className="pointer-events-none relative min-w-0 flex-1 pt-1">
                 <h2 className="truncate text-base font-semibold text-foreground">{displayName}</h2>
                 <p className="truncate text-sm text-muted-foreground">{secondaryLabel}</p>
-                {stagingCommit ? (
-                  <a
-                    className="pointer-events-auto block truncate font-mono text-(length:--text-micro) leading-(--profile-popover-meta-line-height) text-muted-foreground hover:underline focus-visible:underline"
-                    href={`https://github.com/paperclipai/paperclip/commit/${stagingCommit}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    aria-label={`View commit ${stagingCommit} on GitHub`}
-                    title={stagingCommit}
-                  >
-                    SHA {stagingCommit.slice(0, 7)}
-                  </a>
-                ) : null}
+                <span
+                  className="pointer-events-auto block select-text truncate font-mono text-(length:--text-micro) leading-(--profile-popover-meta-line-height) text-muted-foreground"
+                  aria-label={runningCommit ? `Running commit ${runningCommit}` : undefined}
+                  title={runningCommit ?? undefined}
+                >
+                  {commitLoading
+                    ? "Loading commit..."
+                    : runningCommit
+                      ? `Commit ${runningCommit.slice(0, 7)}`
+                      : "Commit unavailable"}
+                </span>
               </div>
             </div>
 

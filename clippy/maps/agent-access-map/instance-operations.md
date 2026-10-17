@@ -113,6 +113,13 @@ remaining operations before qualifying the whole capability.
 Gaps: Health is an API; full local doctor/repair inspects host configuration and is not
 equivalent to that response.
 
+The portal's account menu displays `GET /api/health`'s `commit` on all deployment
+hostnames, refreshing on open independently of the board's access-gate cache.
+This is a read-only presentation change, not a new endpoint, grant, or agent
+control surface. [The shared hook](../../ui/src/hooks/useRunningCommit.ts) and
+[account-menu tests](../../ui/src/components/SidebarAccountMenu.test.tsx) cover
+UI refresh and unavailable metadata; they do not qualify live agent access.
+
 ## `backup`
 
 Review: `baseline`.

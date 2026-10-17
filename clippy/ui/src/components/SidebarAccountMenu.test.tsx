@@ -142,6 +142,7 @@ describe("SidebarAccountMenu", () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({
       enableIsolatedWorkspaces: false,
     });
+    mockHealthApi.get.mockResolvedValue({ status: "ok", commit: null });
     mockAuthApi.signOut.mockResolvedValue({ success: true, redirectTo: "/cloud/logout" });
     // Default to a company owner: the self-hosted Invite shortcut needs the
     // `users:invite` grant, which owners, admins, and operators hold by default.
@@ -155,21 +156,19 @@ describe("SidebarAccountMenu", () => {
     vi.unstubAllGlobals();
   });
 
-  describe.each([SidebarAccountMenu, ProductionSidebarAccountMenu])("staging commit (%#)", (AccountMenu) => {
+  describe.each([SidebarAccountMenu, ProductionSidebarAccountMenu])("running commit (%#)", (AccountMenu) => {
     const commit = "8751e2de4626ff5e7355fe28b30509991cfff920";
 
     it.each([
-      ["paperclip.staging.paperclip.app", true],
-      ["another.staging.paperclip.app", true],
-      ["paperclip.paperclip.app", false],
-      ["localhost", false],
-      ["paperclip.staging.paperclip.app.example.com", false],
-    ])("shows the running SHA only on staging: %s", async (hostname, visible) => {
+      "paperclip.staging.paperclip.app",
+      "paperclip.paperclip.app",
+      "portal.azurecontainerapps.io",
+      "localhost",
+    ])("shows the running SHA on any deployment host: %s", async (hostname) => {
       vi.stubGlobal("location", new URL(`https://${hostname}`));
       mockHealthApi.get.mockResolvedValue({ status: "ok", commit });
       const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-      // Production must stay hidden even if the shared cache contains a commit.
-      queryClient.setQueryData(queryKeys.health, { status: "ok", commit });
+      queryClient.setQueryData(queryKeys.health, { status: "ok", commit: "old-commit" });
       const root = createRoot(container);
       await act(async () => {
         root.render(
@@ -180,23 +179,17 @@ describe("SidebarAccountMenu", () => {
       });
       await flushReact();
 
-      const label = document.body.querySelector(`a[title="${commit}"]`);
-      expect(Boolean(label)).toBe(visible);
-      if (visible) {
-        expect(label?.textContent).toBe("SHA 8751e2d");
-        expect(label?.previousElementSibling?.textContent).toBe("jane@example.com");
-        expect(label?.getAttribute("href")).toBe(`https://github.com/paperclipai/paperclip/commit/${commit}`);
-        expect(label?.getAttribute("aria-label")).toBe(`View commit ${commit} on GitHub`);
-        expect(mockHealthApi.get).toHaveBeenCalledOnce();
-      } else {
-        expect(mockHealthApi.get).not.toHaveBeenCalled();
-      }
+      const label = document.body.querySelector(`span[title="${commit}"]`);
+      expect(label?.textContent).toBe("Commit 8751e2d");
+      expect(label?.previousElementSibling?.textContent).toBe("jane@example.com");
+      expect(label?.getAttribute("aria-label")).toBe(`Running commit ${commit}`);
+      expect(document.body.textContent).not.toContain("old-commit");
+      expect(mockHealthApi.get).toHaveBeenCalledOnce();
       await act(() => root.unmount());
       queryClient.clear();
     });
 
-    it("refreshes the running SHA each time the staging menu opens", async () => {
-      vi.stubGlobal("location", new URL("https://paperclip.staging.paperclip.app"));
+    it("refreshes the running SHA each time the menu opens", async () => {
       const nextCommit = "3447609d2247e75e55d91493dda91a608364f672";
       mockHealthApi.get
         .mockResolvedValueOnce({ status: "ok", commit })
@@ -217,23 +210,22 @@ describe("SidebarAccountMenu", () => {
       await renderMenu(false);
       expect(mockHealthApi.get).not.toHaveBeenCalled();
       await renderMenu(true);
-      expect(document.body.textContent).toContain("SHA 8751e2d");
+      expect(document.body.textContent).toContain("Commit 8751e2d");
       await renderMenu(false);
       await renderMenu(true);
-      expect(document.body.textContent).toContain("SHA 3447609");
-      expect(document.body.textContent).not.toContain("SHA 8751e2d");
+      expect(document.body.textContent).toContain("Commit 3447609");
+      expect(document.body.textContent).not.toContain("Commit 8751e2d");
       expect(mockHealthApi.get).toHaveBeenCalledTimes(2);
       await act(() => root.unmount());
       queryClient.clear();
     });
 
     it("does not change the board health state when a menu refresh fails", async () => {
-      vi.stubGlobal("location", new URL("https://paperclip.staging.paperclip.app"));
       mockHealthApi.get.mockRejectedValueOnce(new Error("Deploy in progress"));
       const queryClient = new QueryClient();
       const boardHealth = { status: "ok", commit };
       queryClient.setQueryData(queryKeys.health, boardHealth);
-      queryClient.setQueryData(queryKeys.stagingCommit, boardHealth);
+      queryClient.setQueryData(queryKeys.runningCommit, boardHealth);
       const root = createRoot(container);
       await act(() => {
         root.render(
@@ -245,16 +237,16 @@ describe("SidebarAccountMenu", () => {
       await flushReact();
 
       expect(mockHealthApi.get).toHaveBeenCalledOnce();
-      expect(queryClient.getQueryState(queryKeys.stagingCommit)?.status).toBe("error");
+      expect(queryClient.getQueryState(queryKeys.runningCommit)?.status).toBe("error");
       expect(queryClient.getQueryState(queryKeys.health)?.status).toBe("success");
       expect(queryClient.getQueryData(queryKeys.health)).toEqual(boardHealth);
-      expect(document.body.textContent).not.toContain("SHA ");
+      expect(document.body.textContent).toContain("Commit unavailable");
+      expect(document.body.textContent).not.toContain("Commit 8751e2d");
       await act(() => root.unmount());
       queryClient.clear();
     });
 
-    it.each([null, undefined])("omits unavailable commit metadata (%s)", async (commit) => {
-      vi.stubGlobal("location", new URL("https://paperclip.staging.paperclip.app"));
+    it.each([null, undefined])("labels unavailable commit metadata (%s)", async (commit) => {
       mockHealthApi.get.mockResolvedValue({ status: "ok", commit });
       const queryClient = new QueryClient();
       const root = createRoot(container);
@@ -266,7 +258,26 @@ describe("SidebarAccountMenu", () => {
         );
       });
       await flushReact();
-      expect(document.body.textContent).not.toContain("SHA ");
+      expect(document.body.textContent).toContain("Commit unavailable");
+      await act(() => root.unmount());
+      queryClient.clear();
+    });
+
+    it("shows a loading label rather than a cached commit during refresh", async () => {
+      mockHealthApi.get.mockReturnValue(new Promise(() => {}));
+      const queryClient = new QueryClient();
+      queryClient.setQueryData(queryKeys.runningCommit, { status: "ok", commit });
+      const root = createRoot(container);
+      await act(() => {
+        root.render(
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider><AccountMenu open /></TooltipProvider>
+          </QueryClientProvider>,
+        );
+      });
+      await flushReact();
+      expect(document.body.textContent).toContain("Loading commit...");
+      expect(document.body.textContent).not.toContain("Commit 8751e2d");
       await act(() => root.unmount());
       queryClient.clear();
     });
@@ -404,18 +415,14 @@ describe("SidebarAccountMenu", () => {
     expect(popover?.textContent).not.toContain("Feedback");
     expect(popover?.querySelector('a[href="https://paperclip.ing/feedback"]')).toBeNull();
 
-    // Profile access moved off the action list: the header links to the
-    // profile, and the separate view/edit rows are gone. Editing lives on the
-    // profile page itself.
+    // Profile access lives in the header rather than separate action rows.
     expect(popover?.textContent).not.toContain("View profile");
     expect(popover?.textContent).not.toContain("Edit profile");
     // The link resolves by user id, not display name: names are not unique,
     // and the profile endpoint returns the first member whose slug matches.
     const profileHeaderLink = popover?.querySelector<HTMLAnchorElement>('a[aria-label="View profile"]');
     expect(profileHeaderLink?.getAttribute("href")).toBe("/u/user-1");
-    // The link is a stretched overlay over the header block (so the staging
-    // SHA anchor can live beside the email without nesting anchors), so the
-    // identity text is in the header block rather than inside the anchor.
+    // The stretched profile link leaves the commit independently selectable.
     const profileHeader = profileHeaderLink?.parentElement;
     expect(profileHeader?.textContent).toContain("Jane Example");
     expect(profileHeader?.textContent).toContain("jane@example.com");
@@ -439,7 +446,7 @@ describe("SidebarAccountMenu", () => {
     const themePos = menuText.indexOf("Switch to");
     expect(docsPos).toBeLessThan(themePos);
 
-    // The popover header stays down to name + email: no "Account" badge, no version line.
+    // The header has identity and commit, not an account badge or package version.
     expect(popover?.textContent).not.toContain("Account");
     expect(popover?.textContent).not.toContain("Paperclip v");
     expect(document.body.textContent).toContain("jane@example.com");

@@ -15,7 +15,7 @@ Agent access: [companion](../agent-access-map/instance-operations.md).
 - `install-update`: inspect install channel/version and apply supported update or rollback operations.
 - `server-service`: start/stop the intended instance and inspect its service health.
 - `configuration`: configure database, server binding, storage, secrets, and available experimental settings.
-- `diagnostics`: use doctor/health output to distinguish readiness from a listening port.
+- `diagnostics`: use doctor/health output to distinguish readiness from a listening port, and inspect the running commit in the portal account menu.
 - `backup`: create and inspect backups and verify restore only into a separate disposable target.
 
 ## How to get to it (user POV)
@@ -43,6 +43,15 @@ process startup status and the public build commit without SQL or authentication
 It remains reachable during an idle drain. Use `/api/health` for explicit database
 readiness, signed bootstrap, and authorized diagnostics; liveness does not
 establish database health or claim a workspace.
+
+In either portal layout, open the bottom-left account menu to inspect the running
+server's short commit and hover for its full hash. This works on self-hosted,
+Azure, staging, and local hostnames without enabling the server debug view.
+Reopen after a rollout to fetch fresh `/api/health` metadata; loading or failed
+requests must not show an old cached hash. Missing metadata shows
+"Commit unavailable".
+[Account-menu tests](../../ui/src/components/SidebarAccountMenu.test.tsx) cover
+both layouts, hostnames, refresh, loading, and unavailable metadata.
 
 ### `settings-backup`
 

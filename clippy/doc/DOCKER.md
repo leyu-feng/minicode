@@ -66,6 +66,12 @@ Local Docker builds must supply a full `PAPERCLIP_BUILD_COMMIT` to include a
 qualified pack. Unstamped builds remain usable for local adapters and skip pack
 generation. The pack stays root-owned and readable by remapped runtime UIDs.
 
+To identify the running deployment, open the portal's bottom-left account menu.
+The commit beneath your name and email comes from the running server's
+`/api/health` response and refreshes whenever the menu opens, on any deployment
+hostname. Hover over the short hash to see the full commit. Unstamped builds or
+failed health requests show "Commit unavailable" rather than a cached hash.
+
 The legacy recurring public `-cloud` publisher is retired. Master pushes,
 release tags, and manual `Docker` dispatches no longer build that variant.
 Existing `-cloud` tags and digests remain in the registry for rollback; their
