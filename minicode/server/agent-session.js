@@ -320,6 +320,10 @@ export class AgentSession extends EventEmitter {
       "Paths are relative to the working directory. For edit, 'find' must appear exactly once (set \"all\":true to replace every occurrence).",
       "For shell commands: they are already executed via powershell.exe -Command, so NEVER wrap a command in another 'powershell -Command'.",
       "Escape quotes inside PowerShell strings with a backtick (`\"), never a backslash, and avoid && (this is Windows PowerShell 5.1).",
+      // Scheduled tasks outlive the session, so keep every one Minicode creates in one folder the
+      // user can review and clean up, and make sure the user hears about it.
+      "If you create a Windows scheduled task, register it in the \\Minicode\\ task folder (for example Register-ScheduledTask -TaskPath '\\Minicode\\' -TaskName '<descriptive name>' ...), never in the root folder or another one,",
+      "and say in your final message that you created it, its full path, its schedule, and how to remove it (Unregister-ScheduledTask -TaskPath '\\Minicode\\' -TaskName '<name>').",
       "No markdown. No code fences.",
     ].join(" ")
   }
