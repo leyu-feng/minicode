@@ -1,0 +1,21 @@
+{
+  "name": "clippy-auth",
+  "version": "0.1.0",
+  "description": "Signs a Minicode AgentPool worker in to an Entra-gated Clippy and saves the Easy Auth session it needs",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "clippy-auth": "cli.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "start": "node cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@azure/msal-node": "^3.8.0",
+    "@azure/msal-node-extensions": "^1.5.0"
+  }
+}
