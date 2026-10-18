@@ -97,6 +97,7 @@ test("AgentSession reports failure when shell actions exhaust the tool turn limi
     queueMicrotask(() => proc.emit("close", 0))
     return proc
   })
+
   const session = new AgentSession({ id: "exhausted-worker", cwd: process.cwd() })
   try {
     const result = await session.write("do work")
@@ -108,5 +109,36 @@ test("AgentSession reports failure when shell actions exhaust the tool turn limi
     else process.env.OPENCODE_API_KEY = originalKey
     if (originalUrl === undefined) delete process.env.OPENCODE_BASE_URL
     else process.env.OPENCODE_BASE_URL = originalUrl
+  }
+})
+
+test("worker instructions reach the model and a reported blocker produces a failed result without shell execution", async (t) => {
+  const instructions = "Only use the assigned workspace. Stop if required server credentials are missing."
+  let request
+  globalThis.fetch = async (_url, init) => {
+    request = JSON.parse(init.body)
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        type: "final", message: "Cannot retrieve the required skill. Supply server credentials.",
+        error: "Missing server credentials",
+      }) } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })
+  }
+  t.mock.method(childProcess, "spawn", assert.fail)
+  const session = new AgentSession({ id: "blocked-worker", cwd: process.cwd(), instructions })
+  session.config = {
+    api: "chat-completions", endpoint: "https://example.test/v1/chat/completions",
+    apiKey: "fixture-only", model: "fixture-model",
+  }
+  let output = ""
+  session.on("output", ({ data }) => { output += data })
+  try {
+    const result = await session.write("Read a required skill")
+    assert.equal(result.exitCode, 1)
+    assert.equal(result.error, "Missing server credentials")
+    assert.ok(request.messages[0].content.includes(instructions))
+    assert.match(output, /Supply server credentials/)
+  } finally {
+    session.dispose()
   }
 })

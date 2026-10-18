@@ -167,6 +167,12 @@ test("run credentials stay in the per-session tool environment rather than the m
   })
   await waitUntil(() => peer.messages.some((message) => message.type === "result"))
   assert.equal(options.env.PAPERCLIP_API_KEY, "run-jwt-fixture")
+  assert.ok(options.instructions.includes(options.cwd))
+  assert.match(options.instructions, /Read, search, list, and modify files only inside that workspace/)
+  assert.match(options.instructions, /Never search the machine for missing skills/)
+  assert.match(options.instructions, /Do not scan ports, guess endpoints or authentication schemes/)
+  assert.match(options.instructions, /authentication\/authorization failure, stop task execution/)
+  assert.match(options.instructions, /"error":"<short failure reason>"/)
   assert.equal(JSON.parse(options.env.PAPERCLIP_RUNTIME_TOOLS_JSON).bearerToken, "tool-token-fixture")
   assert.equal(new URL(JSON.parse(options.env.PAPERCLIP_RUNTIME_TOOLS_JSON).mcpEndpoint).hostname, "127.0.0.1")
   assert.ok(!prompt.includes("run-jwt-fixture"))
@@ -200,6 +206,64 @@ test("a changed server process fails and stops the live execution without rerunn
   assert.equal(interrupted, 1)
 })
 
+test("workers load only workspace-root AGENTS.md and reread it for each assignment", async (t) => {
+  const sessions = []
+  class Session extends EventEmitter {
+    async write() { return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, (options) => { sessions.push(options); return new Session() })
+  await fs.writeFile(path.join(path.dirname(fixture.source), "AGENTS.md"), "Parent instructions must not be loaded.")
+  await fs.writeFile(path.join(fixture.source, "AGENTS.md"), "Root instructions: preserve the assessment.")
+  await fs.mkdir(path.join(fixture.source, "nested"))
+  await fs.writeFile(path.join(fixture.source, "nested", "AGENTS.md"), "Nested instructions must not be loaded.")
+  await fixture.git("add", "AGENTS.md", "nested/AGENTS.md")
+  await fixture.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false",
+    "commit", "-m", "Workspace instructions")
+  await fs.writeFile(path.join(fixture.source, "AGENTS.md"), "Uncommitted source instructions must not be loaded.")
+  const peer = await fixture.welcome(0)
+  for (const runId of ["instructions-first", "instructions-second"]) {
+    const readyCount = peer.messages.filter((message) => message.type === "ready").length
+    peer.send({ type: "task", runId, agent, context: {} })
+    await waitUntil(() => peer.messages.some((message) => message.type === "result" && message.runId === runId))
+    const result = peer.messages.find((message) => message.type === "result" && message.runId === runId)
+    assert.equal(result.exitCode, 0, result.error)
+    assert.ok(peer.messages.some((message) => message.runId === runId && message.data?.includes("Loaded workspace instructions from AGENTS.md")))
+    peer.send({ type: "ack", runId, seq: result.seq, completed: true })
+    await waitUntil(() => peer.messages.filter((message) => message.type === "ready").length > readyCount)
+    if (runId === "instructions-first") {
+      await fs.writeFile(path.join(sessions[0].cwd, "AGENTS.md"), "Updated workspace instructions: read back the published document.")
+    }
+  }
+  assert.equal(sessions.length, 2)
+  assert.ok(sessions[0].instructions.includes("Root instructions: preserve the assessment."))
+  assert.ok(!sessions[0].instructions.includes("Updated workspace instructions:"))
+  assert.ok(sessions[1].instructions.includes("Updated workspace instructions: read back the published document."))
+  assert.ok(!sessions[1].instructions.includes("Root instructions: preserve the assessment."))
+  for (const { instructions } of sessions) {
+    assert.ok(!instructions.includes("Parent instructions must not be loaded."))
+    assert.ok(!instructions.includes("Nested instructions must not be loaded."))
+    assert.ok(!instructions.includes("Uncommitted source instructions must not be loaded."))
+    assert.match(instructions, /Worker workspace and failure rules take precedence over repository AGENTS.md/)
+  }
+})
+
+test("an invalid workspace AGENTS.md fails before starting the model", async (t) => {
+  let calls = 0
+  const fixture = await harness(t, () => { calls++; throw new Error("Must not start a session") })
+  const workspace = path.join(fixture.workspaceRoot, agent.id)
+  await execFileAsync("git", ["clone", "--no-hardlinks", "--", fixture.source, workspace], { windowsHide: true })
+  await fs.mkdir(path.join(workspace, "AGENTS.md"))
+  const peer = await fixture.welcome(0)
+  peer.send({ type: "task", runId: "invalid-instructions", agent, context: {} })
+  await waitUntil(() => peer.messages.some((message) => message.type === "result"))
+  const result = peer.messages.find((message) => message.type === "result")
+  assert.equal(result.exitCode, 1)
+  assert.match(result.error, /AGENTS.md must be a regular file/)
+  assert.equal(calls, 0)
+})
+
 test("real model tools use committed files in an independent workspace, not the source checkout", async (t) => {
   const originalKey = process.env.OPENCODE_API_KEY
   const originalUrl = process.env.OPENCODE_BASE_URL
@@ -221,11 +285,19 @@ test("real model tools use committed files in an independent workspace, not the 
     { type: "write", path: "tracked.txt", content: "agent-edit" },
     { type: "final", message: "Done" },
   ]
-  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({
-    choices: [{ message: { content: JSON.stringify(actions.shift()) } }],
-  }), { status: 200, headers: { "Content-Type": "application/json" } }))
+  const requests = []
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(actions.shift()) } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })
+  })
   let cwd
   const fixture = await harness(t, (options) => { cwd = options.cwd; return new AgentSession(options) })
+  await fs.writeFile(path.join(fixture.source, "AGENTS.md"), "Repository-specific rule: preserve existing assessment files.")
+  await fixture.git("add", "AGENTS.md")
+  await fixture.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false",
+    "commit", "-m", "Workspace instructions")
   process.env.GIT_DIR = path.join(fixture.source, ".git")
   await fs.writeFile(path.join(fixture.source, "tracked.txt"), "source-edit")
   await fs.writeFile(path.join(fixture.source, "staged.txt"), "staged-only")
@@ -239,6 +311,9 @@ test("real model tools use committed files in an independent workspace, not the 
   })
   await waitUntil(() => peer.messages.some((message) => message.type === "result"))
   assert.equal(peer.messages.find((message) => message.type === "result").exitCode, 0)
+  assert.ok(requests.length > 0)
+  assert.ok(requests.every((request) => request.messages[0].role === "system"
+    && request.messages[0].content.includes("Repository-specific rule: preserve existing assessment files.")))
   assert.equal(cwd, path.join(await fs.realpath(fixture.workspaceRoot), agent.id))
   const output = peer.messages.filter((message) => message.type === "log").map((message) => message.data).join("")
   assert.ok(output.includes(cwd))
