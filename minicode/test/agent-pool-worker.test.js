@@ -3,7 +3,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { EventEmitter, once } from "node:events"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import test from "node:test"
@@ -22,7 +22,12 @@ async function waitUntil(predicate) {
   }
 }
 
-async function harness(t, factory) {
+function inlineInstructions(content, revisionId = "revision-1") {
+  return { version: 1, format: "markdown", content, revisionId,
+    contentSha256: createHash("sha256").update(content).digest("hex") }
+}
+
+async function harness(t, factory, workerOptions = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-workspace-test-"))
   const source = path.join(directory, "source repo")
   const workspaceRoot = path.join(directory, "workspaces")
@@ -45,6 +50,7 @@ async function harness(t, factory) {
     server: `http://127.0.0.1:${server.address().port}`, workerId: randomUUID(),
     clientToken: "a".repeat(64), cwd: source, workspaceRoot, sessionFactory: factory,
     reconnectMs: 10, log: () => {},
+    ...workerOptions,
   }
   let worker = await startAgentPoolWorker(options)
   t.after(async () => {
@@ -67,6 +73,115 @@ async function harness(t, factory) {
       worker = await startAgentPoolWorker(options)
     },
   }
+}
+
+test("inline instructions are agent-scoped snapshots applied without workspace instruction files", async (t) => {
+  const sessions = []
+  class Session extends EventEmitter {
+    async write() { return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, (options) => { sessions.push(options); return new Session() })
+  const peer = await fixture.welcome(0)
+  assert.deepEqual(peer.messages.find(message => message.type === "hello").capabilities, ["inline_instructions_v1"])
+  for (const [index, content] of ["Keep reports concise.", "Updated instructions: include evidence."].entries()) {
+    const runId = `inline-${index}`
+    peer.send({ type: "task", protocolVersion: 1, runId, agent, context: {}, instructions: inlineInstructions(content, `revision-${index}`) })
+    await waitUntil(() => peer.messages.some(message => message.type === "result" && message.runId === runId))
+    const result = peer.messages.find(message => message.type === "result" && message.runId === runId)
+    assert.equal(result.exitCode, 0)
+    assert.ok(sessions[index].instructions.includes(content))
+    await assert.rejects(fs.stat(path.join(sessions[index].cwd, "AGENTS.md")), { code: "ENOENT" })
+    peer.send({ type: "ack", runId, seq: result.seq, completed: true })
+    await waitUntil(() => peer.messages.filter(message => message.type === "ready").length === index + 2)
+  }
+  assert.ok(!sessions[0].instructions.includes("Updated instructions:"))
+  assert.ok(!sessions[1].instructions.includes("Keep reports concise."))
+  assert.ok(!peer.messages.some(message => message.data?.includes("Keep reports concise.")))
+})
+
+test("malformed inline instructions fail before workspace or model work starts", async (t) => {
+  let sessions = 0
+  const fixture = await harness(t, () => { sessions++; throw new Error("Must not create session") })
+  const peer = await fixture.welcome(0)
+  const invalid = [
+    { ...inlineInstructions("text"), version: 2 },
+    { ...inlineInstructions("text"), content: "tampered" },
+    { ...inlineInstructions("text"), content: 42 },
+    { ...inlineInstructions("text"), format: "html" },
+  ]
+  for (const [index, instructions] of invalid.entries()) {
+    const runId = `invalid-inline-${index}`
+    peer.send({ type: "task", runId, agent, context: {}, instructions })
+    await waitUntil(() => peer.messages.some(message => message.type === "result" && message.runId === runId))
+    const result = peer.messages.find(message => message.type === "result" && message.runId === runId)
+    assert.equal(result.exitCode, 1)
+    assert.match(result.error, /Invalid AgentPool inline instructions/)
+    peer.send({ type: "ack", runId, seq: result.seq, completed: true })
+    await waitUntil(() => peer.messages.filter(message => message.type === "ready").length === index + 2)
+  }
+  assert.equal(sessions, 0)
+  assert.deepEqual(await fs.readdir(fixture.workspaceRoot), [])
+})
+
+test("separate workers can read the same configured shared folder without copying its contents", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-shared-test-"))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  const workerShared = path.join(directory, "shared files")
+  const sessions = []
+  class Session extends EventEmitter {
+    constructor(options) { super(); this.options = options; sessions.push(options) }
+    async write() {
+      assert.equal(await fs.readFile(path.join(this.options.env.WORKER_SHARED, "reference.txt"), "utf8"), "shared reference")
+      await assert.rejects(fs.stat(path.join(this.options.cwd, "reference.txt")), { code: "ENOENT" })
+      return { exitCode: 0 }
+    }
+    interrupt() {}
+    dispose() {}
+  }
+  const first = await harness(t, (options) => new Session(options), { workerShared })
+  await fs.writeFile(path.join(workerShared, "reference.txt"), "shared reference")
+  const second = await harness(t, (options) => new Session(options), { workerShared })
+  for (const fixture of [first, second]) {
+    const peer = await fixture.welcome(0)
+    peer.send({ type: "task", runId: "shared-read", agent, context: {} })
+    await waitUntil(() => peer.messages.some(message => message.type === "result"))
+    const result = peer.messages.find(message => message.type === "result")
+    assert.equal(result.exitCode, 0, result.error)
+  }
+  assert.notEqual(sessions[0].cwd, sessions[1].cwd)
+  for (const session of sessions) {
+    assert.equal(session.env.WORKER_SHARED, await fs.realpath(workerShared))
+    assert.ok(session.instructions.includes(await fs.realpath(workerShared)))
+    assert.match(session.instructions, /Never create, edit, delete, rename, move, or change permissions/)
+    assert.ok(!session.instructions.includes("shared reference"))
+  }
+})
+
+for (const outputMode of ["normal", "verbose"]) {
+  test(`${outputMode} worker output preserves summaries and errors with mode-specific raw tool output`, async (t) => {
+    const raw = outputMode === "normal" ? "raw tool output\n".repeat(150_000) : "raw tool output\n"
+    class Session extends EventEmitter {
+      async write() {
+        this.emit("output", { stream: "command", data: raw })
+        this.emit("output", { stream: "stderr", data: "A useful error\n" })
+        this.emit("output", { stream: "stdout", data: "Model summary of results\n" })
+        return { exitCode: 0 }
+      }
+      interrupt() {}
+      dispose() {}
+    }
+    const fixture = await harness(t, () => new Session(), { outputMode })
+    const peer = await fixture.welcome(0)
+    peer.send({ type: "task", runId: "output-mode", agent, context: {} })
+    await waitUntil(() => peer.messages.some(message => message.type === "result"))
+    const output = peer.messages.filter(message => message.type === "log").map(message => message.data).join("")
+    assert.equal(output.includes("raw tool output"), outputMode === "verbose")
+    assert.ok(output.includes("A useful error"))
+    assert.ok(output.includes("Model summary of results"))
+    assert.equal(peer.messages.find(message => message.type === "result").exitCode, 0)
+  })
 }
 
 test("worker credentials survive restart, stay bound to root/server, and require secure transport", async (t) => {
@@ -168,7 +283,8 @@ test("run credentials stay in the per-session tool environment rather than the m
   await waitUntil(() => peer.messages.some((message) => message.type === "result"))
   assert.equal(options.env.PAPERCLIP_API_KEY, "run-jwt-fixture")
   assert.ok(options.instructions.includes(options.cwd))
-  assert.match(options.instructions, /Read, search, list, and modify files only inside that workspace/)
+  assert.match(options.instructions, /Read, search, and list files only inside your assigned workspace or the read-only shared folder/)
+  assert.match(options.instructions, /Create and modify files only inside your assigned workspace/)
   assert.match(options.instructions, /Never search the machine for missing skills/)
   assert.match(options.instructions, /Do not scan ports, guess endpoints or authentication schemes/)
   assert.match(options.instructions, /authentication\/authorization failure, stop task execution/)
@@ -280,8 +396,8 @@ test("real model tools use committed files in an independent workspace, not the 
   })
   const actions = [
     { type: "tool", command: process.platform === "win32"
-      ? "Get-Location; Get-ChildItem -Name; git rev-parse --show-toplevel"
-      : "pwd; ls; git rev-parse --show-toplevel" },
+      ? "Write-Output RAW_TOOL_SENTINEL; Get-Location; Get-ChildItem -Name; git rev-parse --show-toplevel; Get-Content -LiteralPath (Join-Path $env:WORKER_SHARED 'shared.txt')"
+      : 'echo RAW_TOOL_SENTINEL; pwd; ls; git rev-parse --show-toplevel; cat "$WORKER_SHARED/shared.txt"' },
     { type: "write", path: "tracked.txt", content: "agent-edit" },
     { type: "final", message: "Done" },
   ]
@@ -294,6 +410,8 @@ test("real model tools use committed files in an independent workspace, not the 
   })
   let cwd
   const fixture = await harness(t, (options) => { cwd = options.cwd; return new AgentSession(options) })
+  const shared = path.join(path.dirname(await fs.realpath(fixture.source)), "worker_shared")
+  await fs.writeFile(path.join(shared, "shared.txt"), "SHARED_CONFIG_SENTINEL")
   await fs.writeFile(path.join(fixture.source, "AGENTS.md"), "Repository-specific rule: preserve existing assessment files.")
   await fixture.git("add", "AGENTS.md")
   await fixture.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false",
@@ -307,6 +425,7 @@ test("real model tools use committed files in an independent workspace, not the 
   const peer = await fixture.welcome(0)
   peer.send({
     type: "task", runId: "real-tools", agent,
+    instructions: inlineInstructions("Inline rule: describe the evidence in your final response."),
     context: { paperclipWorkspace: { cwd: fixture.source } },
   })
   await waitUntil(() => peer.messages.some((message) => message.type === "result"))
@@ -314,10 +433,17 @@ test("real model tools use committed files in an independent workspace, not the 
   assert.ok(requests.length > 0)
   assert.ok(requests.every((request) => request.messages[0].role === "system"
     && request.messages[0].content.includes("Repository-specific rule: preserve existing assessment files.")))
+  assert.ok(requests.every(request => request.messages[0].content.includes("Inline rule: describe the evidence in your final response.")))
+  assert.ok(requests[1].messages.at(-1).content.split("output:\n")[1].includes("RAW_TOOL_SENTINEL"))
+  assert.ok(requests[1].messages.at(-1).content.split("output:\n")[1].includes("SHARED_CONFIG_SENTINEL"))
   assert.equal(cwd, path.join(await fs.realpath(fixture.workspaceRoot), agent.id))
   const output = peer.messages.filter((message) => message.type === "log").map((message) => message.data).join("")
   assert.ok(output.includes(cwd))
   assert.ok(output.includes("tracked.txt"))
+  assert.ok(!output.includes("\r\nRAW_TOOL_SENTINEL\r\n"))
+  assert.ok(!output.includes("SHARED_CONFIG_SENTINEL"))
+  assert.ok(requests.every(request => request.messages[0].content.includes(shared)))
+  assert.equal(await fs.readFile(path.join(shared, "shared.txt"), "utf8"), "SHARED_CONFIG_SENTINEL")
   assert.ok(!output.includes("local-only.txt"))
   assert.ok(!output.includes(fixture.source))
   assert.ok(!output.includes(fixture.source.replaceAll("\\", "/")))
@@ -422,4 +548,32 @@ test("worker startup rejects workspace storage inside the source checkout and no
   await fs.mkdir(subdirectory)
   await assert.rejects(startAgentPoolWorker({ ...options, cwd: subdirectory, workspaceRoot: fixture.workspaceRoot }),
     /root of the source Git repository/)
+})
+
+test("worker startup rejects overlapping shared folders, including directory links, before creating shared files", async (t) => {
+  const fixture = await harness(t, () => { throw new Error("Must not start a session") })
+  const options = {
+    server: "http://127.0.0.1:1", workerId: randomUUID(), cwd: fixture.source,
+    clientToken: "a".repeat(64), workspaceRoot: fixture.workspaceRoot,
+  }
+  for (const workerShared of [
+    fixture.source, path.dirname(fixture.source), path.join(fixture.source, "shared"),
+    fixture.workspaceRoot, path.join(fixture.workspaceRoot, "shared"),
+  ]) {
+    await assert.rejects(startAgentPoolWorker({ ...options, workerShared }), /--worker-shared must not overlap/)
+  }
+  const sourceLink = path.join(path.dirname(fixture.source), "source-link")
+  await fs.symlink(fixture.source, sourceLink, process.platform === "win32" ? "junction" : "dir")
+  for (const workerShared of [sourceLink, path.join(sourceLink, "shared")]) {
+    await assert.rejects(startAgentPoolWorker({ ...options, workerShared }), /--worker-shared must not overlap/)
+  }
+  await assert.rejects(fs.stat(path.join(fixture.source, "shared")), { code: "ENOENT" })
+  await assert.rejects(fs.stat(path.join(fixture.workspaceRoot, "shared")), { code: "ENOENT" })
+  await assert.rejects(startAgentPoolWorker({
+    ...options, workerShared: path.join(path.dirname(fixture.source), "missing-parent", "shared"),
+  }), { code: "ENOENT" })
+  const notDirectory = path.join(path.dirname(fixture.source), "not-a-directory")
+  await fs.writeFile(notDirectory, "keep")
+  await assert.rejects(startAgentPoolWorker({ ...options, workerShared: notDirectory }), /EEXIST|ENOTDIR/)
+  assert.equal(await fs.readFile(notDirectory, "utf8"), "keep")
 })

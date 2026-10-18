@@ -52,6 +52,8 @@ Options:
   --entra-user <upn>      Sign in with an isolated Azure CLI identity (with 'auth add')
   --tenant <id>           Select the Entra tenant (with 'auth add --entra-user')
   --clippy-auth <cli.js>  Override the Easy Auth helper (with 'worker' only)
+  --worker-shared <dir>   Worker read-only shared folder (default: sibling worker_shared)
+  --output-mode <mode>   Worker logs: normal (default) or verbose (includes raw tool output)
 
 REPL commands:
   exit, quit, :q     Leave

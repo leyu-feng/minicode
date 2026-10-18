@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
@@ -33,13 +33,13 @@ async function harness(reconnectMs = 1000) {
     for (const socket of server.clients) socket.terminate();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
-  async function worker(id = randomUUID(), instanceId = randomUUID(), runId: string | null = null, ready = true) {
+  async function worker(id = randomUUID(), instanceId = randomUUID(), runId: string | null = null, ready = true, capabilities: string[] = []) {
     const socket = new WebSocket(`ws://127.0.0.1:${port}?id=${id}`);
     const messages: Array<Record<string, unknown>> = [];
     socket.on("message", (data) => messages.push(JSON.parse(data.toString())));
     await once(socket, "open");
     const send = (value: object) => socket.send(JSON.stringify(value));
-    send({ type: "hello", instanceId, runId });
+    send({ type: "hello", protocolVersion: 1, instanceId, runId, capabilities });
     await vi.waitFor(() => expect(messages.length || socket.readyState === WebSocket.CLOSED).toBeTruthy());
     const welcome = messages.shift();
     if (welcome && !runId && ready) {
@@ -63,6 +63,44 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("requires inline capability, selects a compatible worker, and sends one bounded instruction snapshot", async () => {
+    const { broker, worker } = await harness();
+    const legacy = await worker();
+    const ctx = context();
+    const instructions = {
+      version: 1, format: "markdown", content: "Agent-specific operating instructions",
+      revisionId: "saved-revision", contentSha256: createHash("sha256").update("Agent-specific operating instructions").digest("hex"),
+    };
+    ctx.context.paperclipAgentInstructions = instructions;
+    await expect(broker.execute(ctx)).rejects.toThrow("inline_instructions_v1");
+    expect(legacy.messages).toEqual([]);
+    expect(ctx.onDispatch).not.toHaveBeenCalled();
+    const compatible = await worker(randomUUID(), randomUUID(), null, true, ["inline_instructions_v1", "future_extension"]);
+    const result = broker.execute(ctx);
+    const task = await compatible.take("task");
+    expect(task).toMatchObject({ protocolVersion: 1, agent: { id: ctx.agent.id }, instructions });
+    expect(task.context).not.toHaveProperty("paperclipAgentInstructions");
+    instructions.content = "A subsequent edit";
+    expect(task.instructions).toMatchObject({ content: "Agent-specific operating instructions" });
+    expect(legacy.messages).toEqual([]);
+    compatible.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await result;
+  });
+
+  it("rejects oversized instructions without reserving or dispatching the worker", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker(randomUUID(), randomUUID(), null, true, ["inline_instructions_v1"]);
+    const ctx = context();
+    ctx.context.paperclipAgentInstructions = {
+      version: 1, format: "markdown", content: "x".repeat(256 * 1024),
+      revisionId: "large-revision", contentSha256: "a".repeat(64),
+    };
+    await expect(broker.execute(ctx)).rejects.toThrow("256 KiB frame limit");
+    expect(broker.status(client.id)).toBe("idle");
+    expect(ctx.onDispatch).not.toHaveBeenCalled();
+    expect(client.messages).toEqual([]);
+  });
+
   it("checks company-scoped pool readiness while idle or busy, but not during handshake or reconnect", async () => {
     const { broker, worker } = await harness();
     expect(broker.hasConnectedWorker("company-a", "default")).toBe(false);

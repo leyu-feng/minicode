@@ -197,8 +197,29 @@ are delivered to that session's tool environment, not its model prompt.
 The model receives only allowlisted task, wake, handoff and workspace context;
 runtime configuration is excluded even when nested in the server context.
 
-Worker system instructions restrict file reads, searches, and writes to the assigned
-agent workspace, including prohibiting links or parent paths into other folders.
+Worker system instructions restrict writes to the assigned agent workspace.
+Reads and searches are allowed in that workspace and one **read-only shared
+folder**, defaulting to `worker_shared` beside the canonical source repository
+root. For example, `D:\Code\portland\stocks` uses
+`D:\Code\portland\worker_shared`. Override it with `--worker-shared <directory>`.
+Relative overrides resolve from the worker process's current directory.
+Minicode creates an empty folder if missing; its parent must already exist.
+The shared folder must not overlap the source checkout or agent workspace storage,
+including through directory links. Workers must not follow links outside either
+permitted scope.
+
+The shared path is included in each assignment's instructions and exposed to
+shell tools as `WORKER_SHARED`. Operators can place shared configuration,
+reference files, or skills there without committing them to a repository.
+For example, read the instance config with
+`Get-Content (Join-Path $env:WORKER_SHARED '.config\stock-trading-assistant.jsonc')`.
+Shared files are not automatically loaded as instructions or copied into agent
+clones. Workers are instructed never to create, modify, delete, move, or change
+permissions on shared files. **Read-only access is instruction policy, not an
+OS permission or sandbox**; the worker account still has its normal privileges.
+No Windows ACLs or operator write permissions are changed. Use a restricted
+identity or sandbox if writes must be prevented independently of the model.
+
 Missing skills/instructions, missing server credentials/endpoints, connection
 failures, and authentication/authorization failures must be reported as blockers,
 not worked around by scanning personal folders, other repositories, ports, or
@@ -220,6 +241,27 @@ Commit instructions to the source repository for new clones; existing clones
 retain their own files and do not automatically receive source updates.
 This automatic loading applies only to worker mode; interactive CLI and web
 sessions are unchanged.
+
+For instructions specific to an agent rather than its repository, use that
+agent's **Instructions** tab in Clippy. The saved managed entry document is
+delivered inline with every new assignment and applied to the model's system
+instructions; no repository commit, worker file, or restart is required for
+content edits. Built-in worker rules take precedence over agent-specific
+instructions, which take precedence over repository guidance. Active runs and
+network reconnects retain their original instruction snapshot. Supporting bundle
+files are not transferred. Restart older workers once to load inline-instruction
+support; incompatible workers cannot receive assignments requiring it.
+
+Worker logging defaults to **normal**: raw shell/tool output still goes to the
+model, but is not streamed to Clippy's run log or counted against the public
+output limit. Command progress, exit status, errors, and the model's response
+remain visible. To retain the previous full-output behavior, start with
+`--output-mode verbose`; `--output-mode normal` is the explicit default.
+Interactive CLI and web logging are unchanged.
+
+Other worker implementations can use the same versioned, capability-negotiated
+[AgentPool protocol](../clippy/doc/agent-pool-protocol.md), without depending on
+Minicode internals.
 
 An offline or fully busy pool fails the run visibly rather than waiting forever.
 An interrupted network connection can resume the **same live execution** for up

@@ -49,6 +49,12 @@ Paperclip supports several ways to run an agent's heartbeat:
 4. **External adapter plugins** — Paperclip loads adapter packages through the plugin/adapter flow so self-hosted installs can add runtimes without hardcoding them in core.
 5. **AgentPool workers** — Minicode connects outbound over an authenticated WebSocket to a named company pool. An agent selects the pool by name; each run is assigned once to one idle worker. Company settings owns pool creation and one-time worker pairing. Existing adapters are unchanged.
 
+AgentPool agents can use the managed **Instructions** editor. The saved entry
+document is delivered inline on each assignment, independently of repository
+files; active executions retain their original snapshot. The
+[versioned worker protocol](agent-pool-protocol.md) supports other compatible
+agent harnesses through explicit capability negotiation.
+
 Agent runs can use project and execution workspaces, managed runtime services such as preview/dev servers, adapter-specific session state, and HTTP/webhook-style execution. We provide sensible defaults, but the adapter is still the boundary: if a runtime can be invoked, observed, and authorized, Paperclip can coordinate it.
 
 ### Task Management
