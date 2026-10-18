@@ -6,16 +6,23 @@ Apps "Easy Auth"), and saves the Easy Auth session the worker then sends on ever
 It is a separate package so that Minicode itself stays small: the Entra and WAM dependencies live
 here, and the worker only reads a file and, when it needs a new session, runs this tool.
 
-Entra sign-in and worker sessions require HTTPS, except for HTTP on loopback during local
-development. Challenges must name a Microsoft Entra authority in a supported Azure cloud
-and a valid application identifier or HTTPS/`api://` resource URI. The token exchange refuses
-redirects, so it cannot forward credentials to another origin.
-
 Model API authentication is separate and uses Azure CLI through
 `minicode auth add --entra-user`; this helper only manages worker Easy Auth sessions.
 WAM window parenting is delegated to MSAL without invoking PowerShell or `Add-Type`,
 so the helper remains compatible with PowerShell Constrained Language Mode.
-If the native broker is unavailable, sign-in fails explicitly; there is no browser fallback.
+If Application Control or another machine policy prevents Node from loading the native WAM
+module, the helper falls back to the installed `az` command. It keeps a dedicated Azure CLI cache
+per UPN and tenant under Minicode's configuration directory, requests the delegated Easy Auth
+scope during sign-in, and validates both the selected account and returned token against `--user`
+and the challenged tenant. This cache is separate from the user's normal Azure CLI session.
+On Windows, the fallback invokes a native `az.exe` or the Microsoft Azure CLI installer's
+bundled Python directly, never `cmd.exe` or a batch wrapper. Unsupported custom batch-only
+installations must be replaced with the Microsoft installer.
+
+Entra sign-in and worker sessions require HTTPS, except for HTTP on loopback during local
+development. Challenges must name a Microsoft Entra authority in a supported Azure cloud
+and a valid application identifier or HTTPS/`api://` resource URI. The token exchange refuses
+redirects, so it cannot forward credentials to another origin.
 
 ## Quick start
 
@@ -179,9 +186,11 @@ Set once per environment, on the Entra app configured for Easy Auth:
   `1950a258-227b-4e31-a9cf-717495945fc2`, scope `user_impersonation`. Without it WAM fails with
   `AADSTS650057` (or a consent prompt), since that client's own registration lists no permissions for
   the app. Requesting `/.default` fails the same way, which is why clippy-auth names the scope.
-- **Let Easy Auth accept that client.** `defaultAuthorizationPolicy.allowedApplications` must list it
-  alongside the app itself. An empty list means the app alone, and Easy Auth answers the worker's
-  token with an empty 403. Configure these allowed client applications through the deployment's Easy Auth settings.
+- **Let Easy Auth accept the authentication clients.** `defaultAuthorizationPolicy.allowedApplications`
+  must list the WAM client `1950a258-227b-4e31-a9cf-717495945fc2` and, when the Azure CLI fallback
+  is used, the Microsoft Azure CLI client `04b07795-8ddb-461a-bbee-02f9e1bf7b46`, alongside the app
+  itself. An empty list means the app alone, and Easy Auth answers the worker's token with an empty
+  403. Configure these allowed client applications through the deployment's Easy Auth settings.
 
 ## Session file
 

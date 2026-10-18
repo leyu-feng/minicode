@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import childProcess from "node:child_process"
+import { EventEmitter } from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -9,7 +10,7 @@ import { isEasyAuthChallenge, parseChallenge, readChallenge } from "../src/chall
 import { exchangeForSession, jwtExpiry, sessionAccepted } from "../src/easyauth.js"
 import { readSession, removeSession, serverOrigin, sessionPath, writeSession } from "../src/session-store.js"
 import { EXIT_ERROR, main, parseArgs } from "../cli.js"
-import { acquireToken, createBrokerApplication, InteractionRequiredError } from "../src/wam.js"
+import { acquireToken, acquireTokenWithAzureCli, azureCliConfigDir, azureCliInvocation, createBrokerApplication, InteractionRequiredError } from "../src/wam.js"
 
 const SERVER = "https://clippy.example.net"
 const CHALLENGE = 'Bearer realm="clippy.example.net" authorization_uri="https://login.microsoftonline.com/tenant-id/oauth2/v2.0/authorize" resource_id="app-id"'
@@ -128,6 +129,14 @@ const WAM_OPTIONS = {
 }
 class MockInteractionRequiredAuthError extends Error {}
 
+async function fakeAzureCli() {
+  const directory = path.join(configHome, "azure-cli-install", "wbin")
+  await fs.mkdir(directory, { recursive: true })
+  await fs.writeFile(path.join(directory, "az.cmd"), "not executed")
+  await fs.writeFile(path.join(directory, "..", "python.exe"), "")
+  return { ...process.env, PATH: directory }
+}
+
 function brokerApplication(app) {
   return async () => ({ app, InteractionRequiredAuthError: MockInteractionRequiredAuthError })
 }
@@ -169,6 +178,50 @@ test("unavailable native broker fails before constructing a browser client", asy
   })), /WAM native broker is unavailable/)
 })
 
+test("unavailable native broker falls back to Azure CLI", { skip: process.platform !== "win32" }, async () => {
+  const expected = { accessToken: "azure-cli-token" }
+  assert.equal(await acquireToken(WAM_OPTIONS, async () => {
+    throw new Error("WAM native broker is unavailable.")
+  }, async (options) => {
+    assert.equal(options, WAM_OPTIONS)
+    return expected
+  }), expected)
+})
+
+test("Azure CLI fallback uses an isolated cache and validates account and token identity", { skip: process.platform !== "win32" }, async () => {
+  const accessToken = jwt({ preferred_username: WAM_OPTIONS.user, tid: "tenant-id" })
+  const calls = []
+  const result = await acquireTokenWithAzureCli({ ...WAM_OPTIONS, silentOnly: true }, {
+    env: await fakeAzureCli(),
+    run: async (command, args, options) => {
+      calls.push({ command, args, env: options.env })
+      if (args[2] === "account" && args[3] === "show") return { stdout: JSON.stringify({
+        user: { type: "user", name: WAM_OPTIONS.user }, tenantId: "tenant-id",
+      }) }
+      return { stdout: JSON.stringify({ accessToken }) }
+    },
+  })
+  assert.equal(result.accessToken, accessToken)
+  assert.equal(calls.length, 2)
+  assert.equal(calls[1].command, path.join(configHome, "azure-cli-install", "python.exe"))
+  assert.deepEqual(calls[1].args, ["-IBm", "azure.cli", "account", "get-access-token",
+    "--scope", "app-id/user_impersonation", "--tenant", "tenant-id", "--output", "json"])
+  assert.equal(calls[0].env.AZURE_CONFIG_DIR, azureCliConfigDir(WAM_OPTIONS))
+  assert.match(calls[0].env.AZURE_CONFIG_DIR, /azure-cli[\\/]clippy-auth/)
+})
+
+test("Azure CLI fallback rejects a different signed-in user before requesting a token", { skip: process.platform !== "win32" }, async () => {
+  let calls = 0
+  await assert.rejects(acquireTokenWithAzureCli({ ...WAM_OPTIONS, silentOnly: true }, {
+    env: await fakeAzureCli(),
+    run: async () => {
+      calls++
+      return { stdout: JSON.stringify({ user: { type: "user", name: "mallory@contoso.com" }, tenantId: "tenant-id" }) }
+    },
+  }), InteractionRequiredError)
+  assert.equal(calls, 1)
+})
+
 test("rejects untrusted authorities and malformed challenge resources", () => {
   for (const authority of [
     "http://login.microsoftonline.com/tenant-id/oauth2/authorize",
@@ -208,3 +261,49 @@ test("Entra transport rejects remote HTTP and URL credentials before any request
   })
 })
 
+test("Windows Azure CLI resolution never sends arguments through a batch shell", { skip: process.platform !== "win32" }, async () => {
+  const env = await fakeAzureCli()
+  const args = ["account", "get-access-token", "--scope", 'api://app/a b&|^%PATH%!"c']
+  const invocation = await azureCliInvocation(args, { env })
+  assert.equal(invocation.command, path.join(env.PATH, "..", "python.exe"))
+  assert.deepEqual(invocation.args, ["-IBm", "azure.cli", ...args])
+  await fs.writeFile(path.join(env.PATH, "az.exe"), "")
+  assert.deepEqual(await azureCliInvocation(args, { env }), { command: path.join(env.PATH, "az.exe"), args })
+  await fs.rm(path.join(env.PATH, "az.exe"))
+  await fs.rm(invocation.command)
+  await assert.rejects(azureCliInvocation(args, { env }), /bundled python.exe was not found/)
+  await fs.rm(path.join(env.PATH, "az.cmd"))
+  await assert.rejects(azureCliInvocation(args, { env }), /Azure CLI was not found on PATH/)
+})
+
+test("interactive Azure CLI fallback preserves scope boundaries and verifies the post-login identity", { skip: process.platform !== "win32" }, async () => {
+  const scopes = ["api://app/scope", 'api://app/second&|^%PATH%!"scope']
+  const accessToken = jwt({ preferred_username: WAM_OPTIONS.user, tid: "tenant-id" })
+  let accountReads = 0
+  let logins = 0
+  const result = await acquireTokenWithAzureCli({ ...WAM_OPTIONS, scopes }, {
+    env: await fakeAzureCli(),
+    run: async (_command, args) => {
+      if (args[3] === "show") {
+        if (accountReads++ === 0) throw new Error("No account")
+        return { stdout: JSON.stringify({ user: { type: "user", name: WAM_OPTIONS.user }, tenantId: "tenant-id" }) }
+      }
+      assert.equal(args[5], scopes.join(" "))
+      return { stdout: JSON.stringify({ accessToken }) }
+    },
+    spawn: (command, args, options) => {
+      logins++
+      assert.equal(command, path.join(configHome, "azure-cli-install", "python.exe"))
+      assert.deepEqual(args, ["-IBm", "azure.cli", "login", "--tenant", "tenant-id",
+        "--scope", scopes.join(" "), "--allow-no-subscriptions", "--output", "none"])
+      assert.equal(options.stdio, "inherit")
+      assert.equal(options.env.AZURE_CONFIG_DIR, azureCliConfigDir(WAM_OPTIONS))
+      const child = new EventEmitter()
+      queueMicrotask(() => child.emit("exit", 0))
+      return child
+    },
+  })
+  assert.equal(result.accessToken, accessToken)
+  assert.equal(accountReads, 2)
+  assert.equal(logins, 1)
+})
