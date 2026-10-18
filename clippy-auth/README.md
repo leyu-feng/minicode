@@ -10,7 +10,11 @@ Model API authentication is separate and uses Azure CLI through
 `minicode auth add --entra-user`; this helper only manages worker Easy Auth sessions.
 WAM window parenting is delegated to MSAL without invoking PowerShell or `Add-Type`,
 so the helper remains compatible with PowerShell Constrained Language Mode.
-If the native broker is unavailable, sign-in fails explicitly; there is no browser fallback.
+If Application Control or another machine policy prevents Node from loading the native WAM
+module, the helper falls back to the installed `az` command. It keeps a dedicated Azure CLI cache
+per UPN and tenant under Minicode's configuration directory, requests the delegated Easy Auth
+scope during sign-in, and validates both the selected account and returned token against `--user`
+and the challenged tenant. This cache is separate from the user's normal Azure CLI session.
 
 ## Quick start
 
@@ -174,10 +178,12 @@ Set once per environment, on the Entra app Easy Auth signs users in to (in dbg, 
   `1950a258-227b-4e31-a9cf-717495945fc2`, scope `user_impersonation`. Without it WAM fails with
   `AADSTS650057` (or a consent prompt), since that client's own registration lists no permissions for
   the app. Requesting `/.default` fails the same way, which is why clippy-auth names the scope.
-- **Let Easy Auth accept that client.** `defaultAuthorizationPolicy.allowedApplications` must list it
-  alongside the app itself. An empty list means the app alone, and Easy Auth answers the worker's
-  token with an empty 403. In the engsys templates this is `authAllowedClientIds` in
-  `paperclip.bicep`, set from `paperclipWorkerClientIds` in config (default: this client).
+- **Let Easy Auth accept the authentication clients.** `defaultAuthorizationPolicy.allowedApplications`
+  must list the WAM client `1950a258-227b-4e31-a9cf-717495945fc2` and, when the Azure CLI fallback
+  is used, the Microsoft Azure CLI client `04b07795-8ddb-461a-bbee-02f9e1bf7b46`, alongside the app
+  itself. An empty list means the app alone, and Easy Auth answers the worker's token with an empty
+  403. In the engsys templates this is `authAllowedClientIds` in `paperclip.bicep`, set from
+  `paperclipWorkerClientIds` in config.
 
 ## Session file
 

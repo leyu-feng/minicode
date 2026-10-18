@@ -9,7 +9,7 @@ import { isEasyAuthChallenge, parseChallenge, readChallenge } from "../src/chall
 import { exchangeForSession, jwtExpiry, sessionAccepted } from "../src/easyauth.js"
 import { readSession, removeSession, sessionPath, writeSession } from "../src/session-store.js"
 import { EXIT_ERROR, main, parseArgs } from "../cli.js"
-import { acquireToken, createBrokerApplication, InteractionRequiredError } from "../src/wam.js"
+import { acquireToken, acquireTokenWithAzureCli, azureCliConfigDir, createBrokerApplication, InteractionRequiredError } from "../src/wam.js"
 
 const SERVER = "https://clippy.example.net"
 const CHALLENGE = 'Bearer realm="clippy.example.net" authorization_uri="https://login.microsoftonline.com/tenant-id/oauth2/v2.0/authorize" resource_id="app-id"'
@@ -167,4 +167,44 @@ test("unavailable native broker fails before constructing a browser client", asy
     msal: { PublicClientApplication: class { constructor() { assert.fail("No browser client may be created") } } },
     extensions: { NativeBrokerPlugin: class { isBrokerAvailable = false } },
   })), /WAM native broker is unavailable/)
+})
+
+test("unavailable native broker falls back to Azure CLI", { skip: process.platform !== "win32" }, async () => {
+  const expected = { accessToken: "azure-cli-token" }
+  assert.equal(await acquireToken(WAM_OPTIONS, async () => {
+    throw new Error("WAM native broker is unavailable.")
+  }, async (options) => {
+    assert.equal(options, WAM_OPTIONS)
+    return expected
+  }), expected)
+})
+
+test("Azure CLI fallback uses an isolated cache and validates account and token identity", { skip: process.platform !== "win32" }, async () => {
+  const accessToken = jwt({ preferred_username: WAM_OPTIONS.user, tid: "tenant-id" })
+  const calls = []
+  const result = await acquireTokenWithAzureCli({ ...WAM_OPTIONS, silentOnly: true }, {
+    run: async (_command, args, options) => {
+      calls.push({ line: args.at(-1), env: options.env })
+      if (args.at(-1).includes("account show")) return { stdout: JSON.stringify({
+        user: { type: "user", name: WAM_OPTIONS.user }, tenantId: "tenant-id",
+      }) }
+      return { stdout: JSON.stringify({ accessToken }) }
+    },
+  })
+  assert.equal(result.accessToken, accessToken)
+  assert.equal(calls.length, 2)
+  assert.match(calls[1].line, /get-access-token --scope app-id\/user_impersonation --tenant tenant-id/)
+  assert.equal(calls[0].env.AZURE_CONFIG_DIR, azureCliConfigDir(WAM_OPTIONS))
+  assert.match(calls[0].env.AZURE_CONFIG_DIR, /azure-cli[\\/]clippy-auth/)
+})
+
+test("Azure CLI fallback rejects a different signed-in user before requesting a token", { skip: process.platform !== "win32" }, async () => {
+  let calls = 0
+  await assert.rejects(acquireTokenWithAzureCli({ ...WAM_OPTIONS, silentOnly: true }, {
+    run: async () => {
+      calls++
+      return { stdout: JSON.stringify({ user: { type: "user", name: "mallory@contoso.com" }, tenantId: "tenant-id" }) }
+    },
+  }), InteractionRequiredError)
+  assert.equal(calls, 1)
 })
