@@ -4,6 +4,10 @@ import { AGENT_FILES_CONTRACT } from "../agent-file-store.js";
 import { AgentDirectoryReuseInvalidatedError } from "../agent-directory-working-copies.js";
 
 const native = vi.hoisted(() => ({ reserve: vi.fn(), claim: vi.fn() }));
+const readInstructions = vi.hoisted(() => vi.fn());
+vi.mock("../agent-instruction-revisions.js", () => ({
+  agentInstructionRevisionService: () => ({ readCommittedForRuntime: readInstructions }),
+}));
 vi.mock("../native-runtime/index.js", async importOriginal => ({
   ...await importOriginal<typeof import("../native-runtime/index.js")>(),
   reserveWarmNativeInstructionDirectory: native.reserve,
@@ -14,7 +18,7 @@ type Input = Parameters<typeof createHeartbeatInstructionWorkingCopy>[0];
 type Prepare = Parameters<ReturnType<typeof createHeartbeatInstructionWorkingCopy>["prepare"]>[0];
 type Copy = NonNullable<Awaited<ReturnType<Input["instructionCopies"]["prepare"]>>>;
 
-function fixture() {
+function fixture(adapterType = "codex_local") {
   let run = { id: "current-run", companyId: "company", agentId: "agent", runnerProfileJson: null, status: "queued" } as ReturnType<Input["readRun"]>;
   const copy = { runId: run.id, companyId: run.companyId, agentId: run.agentId,
     localRoot: "/workspace/copy", executionRoot: "/workspace/copy", entryFile: "AGENTS.md",
@@ -32,7 +36,7 @@ function fixture() {
   const controller = createHeartbeatInstructionWorkingCopy({
     db: {} as Input["db"], instructionCopies: copies as unknown as Input["instructionCopies"],
     readRun: () => run,
-    agent: { id: "agent", companyId: "company", adapterType: "codex_local", adapterConfig: { lifecycleMode: "warm" }, runtimeConfig: {} } as unknown as Input["agent"],
+    agent: { id: "agent", companyId: "company", adapterType, adapterConfig: { lifecycleMode: "warm" }, runtimeConfig: {} } as unknown as Input["agent"],
     context,
     session: { taskSession: null, taskSessionForRun: { lastRunId: "previous-run" }, sessionConfigMetadata: {} as Input["session"]["sessionConfigMetadata"] },
     workspace: { executionTarget: null, executionWorkspace: { cwd: "/workspace" } as Input["workspace"]["executionWorkspace"], persistedExecutionWorkspace: null },
@@ -46,9 +50,36 @@ function fixture() {
     replaceRun: () => { run = { ...run, status: "running" }; return run; } };
 }
 
-beforeEach(() => { vi.clearAllMocks(); native.claim.mockResolvedValue(null); });
+beforeEach(() => { vi.clearAllMocks(); readInstructions.mockReset(); native.claim.mockResolvedValue(null); });
 
 describe("instruction working-copy extraction boundary", () => {
+  it("reads current company/agent instructions on each pool assignment without creating worker-visible paths", async () => {
+    const f = fixture("agent_pool");
+    const snapshot = { content: "First agent instructions", revision: { id: "first", contentHash: "a".repeat(64) } };
+    readInstructions.mockResolvedValueOnce(snapshot)
+      .mockResolvedValueOnce({ content: "Updated agent instructions", revision: { id: "second", contentHash: "b".repeat(64) } })
+      .mockResolvedValueOnce(null);
+    const config = await f.controller.prepare(f.prepare);
+    const first = f.context.paperclipAgentInstructions;
+    expect(first).toEqual({ version: 1, format: "markdown", content: snapshot.content, revisionId: "first", contentSha256: "a".repeat(64) });
+    await f.controller.prepare(f.prepare);
+    expect(f.context.paperclipAgentInstructions).toMatchObject({ content: "Updated agent instructions", revisionId: "second" });
+    expect(first).toMatchObject({ content: "First agent instructions" });
+    await f.controller.prepare(f.prepare);
+    expect(f.context.paperclipAgentInstructions).toBeNull();
+    expect(readInstructions.mock.calls).toEqual(Array(3).fill([{ companyId: "company", agentId: "agent" }]));
+    expect(config).toEqual({ retained: true });
+    expect(f.copies.prepare).not.toHaveBeenCalled();
+    expect(native.reserve).not.toHaveBeenCalled();
+  });
+
+  it("fails pool preparation rather than silently omitting unreadable or invalid instructions", async () => {
+    const f = fixture("agent_pool");
+    readInstructions.mockRejectedValueOnce(new Error("Instruction storage is unreadable"));
+    await expect(f.controller.prepare(f.prepare)).rejects.toThrow("Instruction storage is unreadable");
+    expect(f.copies.prepare).not.toHaveBeenCalled();
+  });
+
   it("retains a warm reservation for outer cleanup when subsequent preparation throws", async () => {
     const f = fixture();
     f.copies.prepare.mockRejectedValue(new Error("preparation interrupted"));

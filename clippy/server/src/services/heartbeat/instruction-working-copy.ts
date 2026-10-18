@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { and, eq, sql } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
+import { agentPoolInstructionsSchema } from "@paperclipai/shared";
 import { parseObject } from "../../adapters/utils.js";
 import { logger } from "../../middleware/logger.js";
 import { AgentDirectoryReuseInvalidatedError, isAgentDirectoryCopy } from "../agent-directory-working-copies.js";
 import { collectStoppedInstructionCopyWithRetries, instructionWorkingCopyGuidance, type agentInstructionWorkingCopyService } from "../agent-instruction-working-copies.js";
+import { agentInstructionRevisionService } from "../agent-instruction-revisions.js";
 import { claimWarmNativeInstructionCopy, nativeSessionWorkspaceScope, reserveWarmNativeInstructionDirectory } from "../native-runtime/index.js";
 import { parseNativeExecutionInput } from "../../vendor/paperclip-runner/index.js";
 import type { HeartbeatRuntimeSelectionInput } from "./runtime-selection.js";
@@ -123,6 +125,16 @@ export function createHeartbeatInstructionWorkingCopy(input: InstructionWorkingC
     nativeRuntimeResolution: Selection["nativeRuntimeResolution"];
     hasInstructionFilesystem: boolean;
   }) {
+    if (agent.adapterType === "agent_pool") {
+      const snapshot = await agentInstructionRevisionService(db).readCommittedForRuntime({
+        companyId: agent.companyId, agentId: agent.id,
+      });
+      context.paperclipAgentInstructions = snapshot ? agentPoolInstructionsSchema.parse({
+        version: 1, format: "markdown", content: snapshot.content,
+        revisionId: snapshot.revision.id, contentSha256: snapshot.revision.contentHash,
+      }) : null;
+      return runtimeConfig;
+    }
     if (hasInstructionFilesystem) {
       try {
         // Missing contract fields on a restored session mean the deployed

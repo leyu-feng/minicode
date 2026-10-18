@@ -35,6 +35,7 @@ type AgentLike = {
   id: string;
   companyId: string;
   name: string;
+  adapterType?: string | null;
   adapterConfig: unknown;
 };
 
@@ -592,6 +593,9 @@ export function agentInstructionsService(db?: Db) {
   ): Promise<{ bundle: AgentInstructionsBundle; adapterConfig: Record<string, unknown> }> {
     const state = await recoverManagedBundleState(agent, deriveBundleState(agent));
     const nextMode = input.mode ?? state.mode ?? "managed";
+    if (agent.adapterType === "agent_pool" && nextMode !== "managed") {
+      throw unprocessable("AgentPool instructions must use managed storage so they can be delivered inline to workers.");
+    }
     const nextEntryFile = input.entryFile ? normalizeRelativeFilePath(input.entryFile) : state.entryFile;
     let nextRootPath: string;
 

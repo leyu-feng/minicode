@@ -79,6 +79,14 @@ describe("agent instructions service", () => {
     expect(await fs.readdir(root)).toEqual([]);
   });
 
+  it("rejects external host instructions for AgentPool before creating or copying any files", async () => {
+    const svc = agentInstructionsService();
+    const agent = { ...makeAgent({}), adapterType: "agent_pool" };
+    await expect(svc.updateBundle(agent, { mode: "external", rootPath: path.join(process.env.PAPERCLIP_HOME!, "external") }))
+      .rejects.toThrow("AgentPool instructions must use managed storage");
+    expect(await fs.readdir(process.env.PAPERCLIP_HOME!)).toEqual([]);
+  });
+
   it("copies the existing bundle into the managed root when switching to managed mode", async () => {
     const paperclipHome = await makeTempDir("paperclip-agent-instructions-home-");
     const externalRoot = await makeTempDir("paperclip-agent-instructions-external-");

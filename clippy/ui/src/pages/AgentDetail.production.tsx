@@ -2635,7 +2635,7 @@ export function PromptsTab({
     return (
       <div className="max-w-3xl">
         <p className="text-sm text-muted-foreground">
-          Instructions bundles are only available for local adapters.
+          This adapter does not support instruction bundles.
         </p>
       </div>
     );
@@ -2659,8 +2659,11 @@ export function PromptsTab({
       <p className="text-xs text-muted-foreground">
         Saved instructions affect the next run. Active runs keep the instructions they started with, and instruction changes may start a fresh adapter session.
       </p>
+      {agent.adapterType === "agent_pool" && <p className="text-xs text-muted-foreground">
+        The saved entry document is sent inline with every assignment. Active runs keep their original instructions. No repository commit or worker file path is required; supporting files are not transferred.
+      </p>}
 
-      <Collapsible defaultOpen={currentMode === "external"}>
+      {agent.adapterType !== "agent_pool" && <Collapsible defaultOpen={currentMode === "external"}>
         <CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors group">
           <ChevronRight className="h-3 w-3 transition-transform group-data-[state=open]:rotate-90" />
           Advanced
@@ -2811,7 +2814,7 @@ export function PromptsTab({
             </div>
           </TooltipProvider>
         </CollapsibleContent>
-      </Collapsible>
+      </Collapsible>}
 
       <div
         ref={containerRef}

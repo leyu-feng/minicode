@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { execFile, spawn } from "node:child_process";
@@ -162,6 +162,7 @@ const execFileAsync = promisify(execFile);
       const input = JSON.stringify(req.body);
       expect(input).toContain("Write a useful artifact");
       expect(req.body.messages[0].content).toContain(workspace);
+      expect(req.body.messages[0].content).toContain("Control-plane agent instructions delivered inline");
       modelCalls++;
       res.json({ choices: [{ message: { content: JSON.stringify(modelCalls === 1
         ? { type: "write", path: "proof.txt", content: "AgentPool completed this assignment" }
@@ -194,7 +195,13 @@ const execFileAsync = promisify(execFile);
       const logs: string[] = [];
       const result = await agentPoolBroker.execute({
         runId: randomUUID(), agent: { id: agentId, companyId, name: "Worker", adapterType: "agent_pool", adapterConfig: {} },
-        config: { name: "e2e" }, context: { task: "Write a useful artifact" },
+        config: { name: "e2e" }, context: {
+          task: "Write a useful artifact",
+          paperclipAgentInstructions: {
+            version: 1, format: "markdown", content: "Control-plane agent instructions delivered inline",
+            revisionId: "e2e-revision", contentSha256: createHash("sha256").update("Control-plane agent instructions delivered inline").digest("hex"),
+          },
+        },
         runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
         onLog: async (_stream, data) => { logs.push(data); },
       });

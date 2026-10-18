@@ -6,6 +6,7 @@ export const agentPoolAdapter: ServerAdapterModule = {
   type: "agent_pool",
   runtimeToolDelivery: "invocation_context",
   supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
   execute: (ctx) => agentPoolBroker.execute(ctx),
   async testEnvironment(ctx) {
     const name = ctx.config.name ?? "default";
@@ -26,5 +27,5 @@ export const agentPoolAdapter: ServerAdapterModule = {
           : `AgentPool '${parsedName.data}' has no connected worker. Pair and connect a Minicode worker in company settings.` }],
     };
   },
-  agentConfigurationDoc: "Select a company AgentPool with adapterConfig: {\"name\":\"default\"}. Pair Minicode workers in company settings. Runs fail if no worker is available; disconnected executions can reconnect without replay for 60 seconds.",
+  agentConfigurationDoc: "Select a company AgentPool with adapterConfig: {\"name\":\"default\"}. Pair compatible workers in company settings. Managed agent instructions are delivered inline on every assignment; workers must advertise inline_instructions_v1. Runs fail if no compatible worker is available; disconnected executions can reconnect without replay for 60 seconds.",
 };

@@ -5,6 +5,7 @@ import path from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, heartbeatRunEvents, issues, principalPermissionGrants } from "@paperclipai/db";
+import { agentPoolInstructionsSchema, type AgentPoolInstructions } from "@paperclipai/shared";
 import { registerServerAdapter, unregisterServerAdapter } from "../adapters/index.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { resolveManagedInstructionsRoot } from "../services/agent-instructions.js";
@@ -105,6 +106,38 @@ describePostgres("heartbeat instruction working-copy lifecycle", () => {
     const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run!.id));
     return { finished: finished!, events, input: captured.get(run!.id)! };
   }
+
+  it("delivers pool instructions from the assigned agent on each heartbeat without an instruction working copy", async () => {
+    const delivered = new Map<string, AgentPoolInstructions>();
+    const f = await seed();
+    await db.update(agents).set({ adapterType: "agent_pool" }).where(eq(agents.id, f.agentId));
+    registerServerAdapter({
+      type: "agent_pool", supportsLocalAgentJwt: false, supportsInstructionsBundle: true,
+      execute: async input => {
+        delivered.set(input.runId, agentPoolInstructionsSchema.parse(input.context.paperclipAgentInstructions));
+        expect(input.agent.id).toBe(f.agentId);
+        expect(input.config.instructionsFilePath).toBeUndefined();
+        await fs.writeFile(path.join(f.root, entryFile), edited);
+        expect(delivered.values().next().value?.content).toBe(initial);
+        await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, f.issueId));
+        await input.onProviderStopped?.();
+        return { exitCode: 0, signal: null, timedOut: false, resultJson: {} };
+      },
+      testEnvironment: async () => ({ adapterType: "agent_pool", status: "pass", checks: [], testedAt: new Date().toISOString() }),
+    });
+    try {
+      const first = await execute(f);
+      expect(first.finished.status, first.finished.error ?? undefined).toBe("succeeded");
+      const second = await execute(f);
+      expect(second.finished.status, second.finished.error ?? undefined).toBe("succeeded");
+      expect(delivered.get(first.finished.id)?.content).toBe(initial);
+      expect(delivered.get(second.finished.id)?.content).toBe(edited);
+      expect(delivered.get(first.finished.id)?.revisionId).not.toBe(delivered.get(second.finished.id)?.revisionId);
+      expect(first.events.some(event => event.eventType === "instruction_save")).toBe(false);
+    } finally {
+      unregisterServerAdapter("agent_pool");
+    }
+  });
 
   it("dispatches a private copy, saves exact bytes on provider stop, and restores them on the next run", async () => {
     const f = await seed();

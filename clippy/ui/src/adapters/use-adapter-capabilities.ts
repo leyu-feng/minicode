@@ -20,6 +20,7 @@ const ALL_FALSE: AdapterCapabilities = {
  * Reconcile the two together if any adapter's login flow changes.
  */
 const KNOWN_DEFAULTS: Record<string, AdapterCapabilities> = {
+  agent_pool: { supportsInstructionsBundle: true, supportsSkills: false, supportsLocalAgentJwt: true, requiresMaterializedRuntimeSkills: false, supportsAcp: false },
   claude_local: { supportsInstructionsBundle: true, supportsSkills: true, supportsLocalAgentJwt: true, requiresMaterializedRuntimeSkills: false, supportsAcp: true, login: { panelMode: "submitted_browser_code", timeoutPolicy: "fixed" } },
   codex_local: { supportsInstructionsBundle: true, supportsSkills: true, supportsLocalAgentJwt: true, requiresMaterializedRuntimeSkills: false, supportsAcp: true, login: { panelMode: "displayed_code", timeoutPolicy: "caller_bounded" } },
   paperclip_runner: { supportsInstructionsBundle: true, supportsSkills: true, supportsLocalAgentJwt: false, requiresMaterializedRuntimeSkills: false, supportsAcp: false },

@@ -29,6 +29,15 @@ files only. Runs execute there rather than in the source or a server-side
 workspace path. Worker model billing is unreported, and files remain worker-local.
 See the [worker setup and limits](../../minicode/README.md#connect-as-an-agentpool-worker).
 
+AgentPool supports managed agent instruction entry documents. Run preparation
+reads the assigned company's agent's current committed content and delivers a
+versioned inline envelope with revision/hash metadata, not a host path or Git
+file. Only workers advertising `inline_instructions_v1` may receive assignments
+with instructions; incompatible or oversized assignments fail explicitly before
+dispatch. Active executions and reconnects retain their snapshot. Existing
+instruction authorization, audit, and optimistic save semantics remain in force.
+See the harness-neutral [worker protocol](agent-pool-protocol.md).
+
 Paperclip V1 must provide a full control-plane loop for autonomous agents:
 
 1. A human board creates a company and defines goals.

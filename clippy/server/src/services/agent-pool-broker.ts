@@ -1,17 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { z } from "zod";
-import { agentPoolNameSchema } from "@paperclipai/shared";
+import {
+  AGENT_POOL_INLINE_INSTRUCTIONS, AGENT_POOL_PROTOCOL_VERSION,
+  agentPoolHelloSchema, agentPoolInstructionsSchema, agentPoolNameSchema, agentPoolTaskSchema,
+} from "@paperclipai/shared";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../adapters/types.js";
 
 export const AGENT_POOL_RECONNECT_MS = 60_000;
 export const AGENT_POOL_MAX_FRAME = 256 * 1024;
 const MAX_RUN_OUTPUT = 2 * 1024 * 1024;
-const helloSchema = z.object({
-  type: z.literal("hello"),
-  instanceId: z.string().uuid(),
-  runId: z.string().max(100).nullable(),
-});
 const readySchema = z.object({ type: z.literal("ready") });
 const eventSchema = z.discriminatedUnion("type", [
   z.object({
@@ -41,6 +39,7 @@ interface Peer {
   instanceId: string;
   socket: WebSocket | null;
   ready: boolean;
+  capabilities: string[];
   run: Run | null;
   expiry?: ReturnType<typeof setTimeout>;
 }
@@ -114,7 +113,7 @@ export class AgentPoolBroker {
         if (binary) throw new Error("AgentPool expects JSON text");
         const value: unknown = JSON.parse(text);
         if (!welcomed) {
-          const hello = helloSchema.parse(value);
+          const hello = agentPoolHelloSchema.parse(value);
           const existing = this.peers.get(identity.id);
           if (existing && existing.instanceId !== hello.instanceId) {
             this.revoke(identity.id, "AgentPool worker process restarted; retry the run explicitly");
@@ -131,13 +130,14 @@ export class AgentPoolBroker {
             peer.ready = false;
           } else {
             if (hello.runId) throw new Error("AgentPool server lost the execution; retry the run explicitly");
-            peer = { identity, instanceId: hello.instanceId, socket, ready: false, run: null };
+            peer = { identity, instanceId: hello.instanceId, socket, ready: false, run: null, capabilities: [] };
             this.peers.set(identity.id, peer);
           }
+          peer.capabilities = hello.capabilities;
           welcomed = true;
           clearTimeout(handshakeTimeout);
           this.send(peer, {
-            type: "welcome", serverInstanceId: this.serverInstanceId,
+            type: "welcome", protocolVersion: AGENT_POOL_PROTOCOL_VERSION, serverInstanceId: this.serverInstanceId,
             runId: peer.run?.id ?? null, ack: peer.run?.seq ?? 0,
             completed: peer.run?.completed ?? false,
           });
@@ -210,19 +210,25 @@ export class AgentPoolBroker {
     }
     await ctx.onCancellationReady?.();
     if (ctx.signal?.aborted) throw new Error("AgentPool run was cancelled before dispatch");
-    const peer = [...this.peers.values()].find((candidate) =>
+    const instructions = ctx.context.paperclipAgentInstructions == null
+      ? null : agentPoolInstructionsSchema.parse(ctx.context.paperclipAgentInstructions);
+    const available = [...this.peers.values()].filter((candidate) =>
       candidate.identity.companyId === ctx.agent.companyId && candidate.identity.poolName === name
       && candidate.ready && !candidate.run && candidate.socket?.readyState === WebSocket.OPEN);
-    if (!peer) throw new Error(`AgentPool '${name}' has no available connected worker; connect a worker and retry`);
-    const task = JSON.stringify({
-      type: "task", runId: ctx.runId,
+    if (!available.length) throw new Error(`AgentPool '${name}' has no available connected worker; connect a worker and retry`);
+    const peer = available.find(candidate => !instructions || candidate.capabilities.includes(AGENT_POOL_INLINE_INSTRUCTIONS));
+    if (!peer) throw new Error(`AgentPool '${name}' has no available worker supporting ${AGENT_POOL_INLINE_INSTRUCTIONS}; upgrade or connect a compatible worker and retry`);
+    const { paperclipAgentInstructions: _instructions, ...context } = ctx.context;
+    const task = JSON.stringify(agentPoolTaskSchema.parse({
+      type: "task", protocolVersion: AGENT_POOL_PROTOCOL_VERSION, runId: ctx.runId,
       agent: { id: ctx.agent.id, name: ctx.agent.name },
-      context: ctx.context,
+      instructions,
+      context,
       continuation: ctx.executionContinuation ?? null,
       runtimeTools: ctx.runtimeTools ?? null,
       authToken: ctx.authToken ?? null,
-    });
-    if (Buffer.byteLength(task) > AGENT_POOL_MAX_FRAME) throw new Error("AgentPool task exceeds the frame limit");
+    }));
+    if (Buffer.byteLength(task) > AGENT_POOL_MAX_FRAME) throw new Error("AgentPool task exceeds the 256 KiB frame limit; reduce instructions or task context");
     return new Promise((resolve, reject) => {
       let cancelTimer: ReturnType<typeof setTimeout> | undefined;
       const cancel = () => {
