@@ -290,7 +290,7 @@ export function callModelOnce(config, messages) {
  * for the lifetime of the session.
  */
 export class AgentSession extends EventEmitter {
-  constructor({ id, cwd, env }) {
+  constructor({ id, cwd, env, instructions = "" }) {
     super()
     this.id = id
     this.kind = "agent"
@@ -316,6 +316,7 @@ export class AgentSession extends EventEmitter {
       '{"type":"write","path":"<file path>","content":"<full new file contents>","reason":"<short reason>"}',
       '{"type":"edit","path":"<file path>","find":"<exact text to replace>","replace":"<new text>","reason":"<short reason>"}',
       '{"type":"final","message":"<final user-facing response>"}',
+      'For a task you cannot complete, return {"type":"final","message":"<blocker and required next step>","error":"<short failure reason>"} instead of claiming success.',
       "To change files, ALWAYS prefer the write/edit actions over shell commands — they take plain strings and need no shell escaping.",
       "Paths are relative to the working directory. For edit, 'find' must appear exactly once (set \"all\":true to replace every occurrence).",
       "For shell commands: they are already executed via powershell.exe -Command, so NEVER wrap a command in another 'powershell -Command'.",
@@ -326,6 +327,7 @@ export class AgentSession extends EventEmitter {
       "and say in your final message that you created it, its full path, its schedule, and how to remove it (Unregister-ScheduledTask -TaskPath '\\Minicode\\' -TaskName '<name>').",
       "No markdown. No code fences.",
     ].join(" ")
+    if (instructions) this.systemPrompt += `\n\n${instructions}`
   }
 
   #emitOutput(data, stream = "stdout") {
@@ -405,6 +407,10 @@ export class AgentSession extends EventEmitter {
             continue
           }
           const message = action?.type === "final" && typeof action.message === "string" ? action.message : raw
+          if (action?.type === "final" && typeof action.error === "string" && action.error.trim()) {
+            result.exitCode = 1
+            result.error = action.error.trim()
+          }
           this.#throwIfInactive(run)
           this.messages.push({ role: "assistant", content: raw })
           this.#emitOutput(`\u001b[36m${message.replace(/\n/g, "\r\n")}\u001b[0m\r\n`)

@@ -197,6 +197,30 @@ are delivered to that session's tool environment, not its model prompt.
 The model receives only allowlisted task, wake, handoff and workspace context;
 runtime configuration is excluded even when nested in the server context.
 
+Worker system instructions restrict file reads, searches, and writes to the assigned
+agent workspace, including prohibiting links or parent paths into other folders.
+Missing skills/instructions, missing server credentials/endpoints, connection
+failures, and authentication/authorization failures must be reported as blockers,
+not worked around by scanning personal folders, other repositories, ports, or
+server implementations. An already-working authorized reporting channel may be
+used; otherwise the worker returns the blocker in its run result. A final action
+with an `error` marks the run failed. These are model instructions, not OS-enforced
+filesystem isolation; use a sandbox or restricted account for that guarantee.
+Restart running workers to load instruction changes.
+
+Before each assignment, the worker loads the assigned clone's root `AGENTS.md`,
+if present, into the model's system instructions. It reads the current workspace
+copy on every run, so edits apply to the next assignment without restarting the
+worker. Built-in worker workspace and failure rules take precedence. Only that
+root file is loaded; parent directories, nested `AGENTS.md` files, and skill
+directories are not scanned. A missing file is optional; an unreadable file or
+a directory/symbolic link named `AGENTS.md` fails the run before the model starts.
+The run log records when the file is loaded, without logging its contents.
+Commit instructions to the source repository for new clones; existing clones
+retain their own files and do not automatically receive source updates.
+This automatic loading applies only to worker mode; interactive CLI and web
+sessions are unchanged.
+
 An offline or fully busy pool fails the run visibly rather than waiting forever.
 An interrupted network connection can resume the **same live execution** for up
 to 60 seconds while both processes survive. Sequenced logs and results are
