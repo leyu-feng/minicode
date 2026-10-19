@@ -63,6 +63,22 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("allows the same pool worker to serve different agents on successive assignments", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker();
+    for (const agentId of ["first-agent", "second-agent", "first-agent"]) {
+      const ctx = context();
+      ctx.agent.id = agentId;
+      const result = broker.execute(ctx);
+      expect(await client.take("task")).toMatchObject({ agent: { id: agentId }, runId: ctx.runId });
+      client.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+      await result;
+      await client.take("ack");
+      client.send({ type: "ready" });
+      await vi.waitFor(() => expect(broker.status(client.id)).toBe("idle"));
+    }
+  });
+
   it("does not dispatch any assignment to a worker without skill integrity support", async () => {
     const { broker, worker } = await harness();
     const legacy = await worker(randomUUID(), randomUUID(), null, true, []);

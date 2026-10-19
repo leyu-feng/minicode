@@ -232,7 +232,7 @@ DELETE /api/companies/{companyId}/agent-pools/{poolId}/workers/{workerId}.
 POST /api/agent-pool/pair consumes a ten-minute, single-use server token and binds
 a worker-generated client credential. WebSocket /api/agent-pool/worker requires
 that worker's client credential, including in local-trusted mode.
-GET /api/agent-pool/skills/{sha256}.zip serves the server's built-in operational
+GET /api/agent-pool/skills/{sha256}.zip serves the server's built-in operational and onboarding
 skill snapshot to an authenticated board or company agent, using the run-scoped
 bearer credential for workers. It exposes no worker-host paths or configuration.
 
@@ -240,14 +240,31 @@ Agent access: `operator-only` for pool/worker administration; normal agent keys
 are denied. Minicode's `worker` CLI is the worker entry point. It receives only
 its assigned run context and transient run-scoped tool credentials, not board
 authority or the credentials of another pool.
-Its actual tools run in a persistent, independent per-agent Git clone on that
-worker, initialized from committed source files outside the source checkout.
+Its actual tools run outside the source checkout, initialized from committed
+source files. Every pool worker can serve every pool agent; different setups
+require separate pools. Minicode defaults to stable short sibling Git worktrees
+per worker/agent pair, such as `w1a1`/`w1a2`. Each new assignment clean-resets its
+validated worktree to current committed source `HEAD`, removing tracked edits
+and untracked/ignored leftovers without changing source or shared files.
+Network reconnect preserves the active checkout/execution.
+Disk monitoring and persisted LRU eviction reclaim only that worker's idle
+owned worktrees below 24 GiB toward 36 GiB. Active assignments, other workers,
+source/shared storage, legacy and unmanaged paths remain protected. Stable
+slots are recreated on demand; insufficient space blocks new model work.
+`--workspace-mode clone` retains persistent independent per-agent clones.
+Linked worktrees share Git storage/configuration/exclusions with source.
 The source comes from an explicit `--repo-root` or the launcher's working
 directory. Worker tests pass the full `clippy-worker` submodule path explicitly.
 Server workspace paths remain context metadata, not worker filesystem bindings.
 This working-directory separation does not sandbox shell access.
 Operational skills are `available` through the authenticated bundle URL and the
 worker's `.worker/skills` discovery path; this does not grant pool administration.
+The ZIP also includes all onboarding `<flow>/skills/<name>/` trees, including
+`first-task`, excluding unrelated templates/personas. Duplicate skill names fail
+bundle creation. Minicode discovers local `.agents/skills/<name>/SKILL.md` in
+`worker_shared` and the assigned checkout, selecting shared > worktree > bundle
+fallback per name, including the injected core `paperclip` skill. Other selected
+paths are supplied for task-driven reading, not automatic activation.
 
 With operator-configured GitHub publication, the worker harness registers its
 verified receipt using the agent's run-scoped issue work-product/comment APIs.
@@ -275,6 +292,11 @@ extracts verified files before model execution. Invalid archives, unsafe/linked
 or tracked caches, and failed authenticated downloads block the run. The
 Git-ignored `.worker` cache is harness-owned by instruction policy, not a
 sandbox; `worker_shared` remains exclusively host-owned.
+Root `AGENTS.md` from both roots is reread per assignment with shared guidance
+above worktree guidance. Both local instructions and all skills remain below
+harness and managed-agent instructions. Linked/invalid discovery paths fail
+preparation; local guidance is outside the ZIP hash. No local skill directories
+are merged, overwritten, or installed into shared storage.
 
 Evidence: `source-only` — [routes](../../server/src/routes/agent-pools.ts),
 [credential service](../../server/src/services/agent-pools.ts),
@@ -291,6 +313,17 @@ Focused bundle fixtures additionally cover authenticated/anonymous downloads,
 deterministic archive snapshots, reference hashes, first install/cache reuse,
 changed or corrupt ZIPs, tampered extracted files, unsafe paths, tracked/linked
 caches, extraction limits, download cancellation, and capability negotiation.
+Focused worker/bundle fixtures cover shared > worktree > fallback selection
+(including actual core-skill injection), shared guidance, linked local roots,
+all onboarding-flow skill/reference inclusion, and bundle name collisions.
+Default sibling-worktree fixtures cover linked sources, stable worker/agent
+slots across restart, assignment reset to updated committed source, tracked and
+untracked/ignored cleanup, source/shared/legacy-path preservation, no reset on
+network reconnect, and visible reset/ownership/overlap failures before model work.
+Broker fixtures cover the same pool worker serving different agents successively.
+Disk fixtures cover persisted LRU/target eviction, stable slot recreation,
+periodic monitoring while a protected assignment is active, disk measurement
+and capacity failures, and refusal to delete changed ownership.
 
 Verification: `not-run` for deployed human/agent access. With disposable company
 identities, assert allowed board operations, foreign-company and agent-key

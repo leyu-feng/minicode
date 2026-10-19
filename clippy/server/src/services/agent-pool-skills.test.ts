@@ -45,12 +45,37 @@ describe("AgentPool downloadable operational skills", () => {
   it("resolves the shipped skills without reading worker_shared and refuses linked or incomplete bundles", async () => {
     const shipped = await readAgentPoolSkills();
     expect(shipped.files.some(file => file.path === "paperclip/scripts/paperclip-issue-update.sh")).toBe(true);
+    expect(shipped.files.some(file => file.path === "first-task/SKILL.md")).toBe(true);
     const root = await fixture();
     await fs.rm(path.join(root, "paperclip", "SKILL.md"));
     await expect(readAgentPoolSkills(root)).rejects.toThrow("missing the Paperclip skill");
     const other = await fixture();
     await fs.symlink(path.join(other, "paperclip"), path.join(root, "linked"), "junction");
     await expect(readAgentPoolSkills(root)).rejects.toThrow("Unsupported skill bundle entry");
+  });
+
+  it("bundles every onboarding flow's skills and references and refuses duplicate names", async () => {
+    const root = await fixture();
+    const onboarding = path.join(root, "..", "onboarding-assets");
+    for (const [flow, skill] of [["first-task", "first-task"], ["future-flow", "future-skill"]] as const) {
+      const directory = path.join(onboarding, flow, "skills", skill);
+      await fs.mkdir(path.join(directory, "references"), { recursive: true });
+      await fs.writeFile(path.join(directory, "SKILL.md"), `# ${skill}`);
+      await fs.writeFile(path.join(directory, "references", "guide.md"), "Supporting instructions");
+    }
+    await fs.mkdir(path.join(onboarding, "persona-only"));
+    await fs.writeFile(path.join(onboarding, "README.md"), "Not a skill");
+    const manifest = await readAgentPoolSkills(root, onboarding);
+    const archive = agentPoolSkillsArchive(manifest.sha256)!;
+    const contents = unzipSync(archive);
+    expect(Object.keys(contents)).toContain("first-task/SKILL.md");
+    expect(Object.keys(contents)).toContain("future-skill/references/guide.md");
+    expect(Object.keys(contents)).not.toContain("README.md");
+    expect(await readAgentPoolSkills(root, onboarding)).toEqual(manifest);
+    await fs.writeFile(path.join(onboarding, "future-flow", "skills", "future-skill", "references", "guide.md"), "Updated");
+    expect((await readAgentPoolSkills(root, onboarding)).sha256).not.toBe(manifest.sha256);
+    await fs.mkdir(path.join(onboarding, "duplicate", "skills", "Paperclip"), { recursive: true });
+    await expect(readAgentPoolSkills(root, onboarding)).rejects.toThrow("Duplicate AgentPool bundled skill name");
   });
 
   it("serves immutable authenticated downloads and rejects anonymous or unavailable requests", async () => {

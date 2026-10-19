@@ -73,6 +73,24 @@ applies only to the onboarding task that invokes it, not to every task assigned
 to that agent. The deterministic greeting,
 opening card, and initial no-wake behavior are unchanged.
 
+## AgentPool delivery and future onboarding skills
+
+AgentPool workers receive `first-task` in the existing authenticated skill ZIP,
+alongside the operational skills. The bundle builder discovers **all**
+`server/src/onboarding-assets/<flow>/skills/<name>/` directories, so place future
+onboarding skills there with a `SKILL.md` entry and any references/scripts in the
+same skill directory. No per-skill bundle list or separate download is required.
+Names must be unique across all flows and operational skills, case-insensitively;
+collisions fail bundle creation instead of merging or overwriting skills.
+Greeting, brief, question, and persona files outside `skills/` are not included.
+
+Minicode resolves each skill by **worker_shared > worktree > bundle fallback**,
+using `.agents/skills/<name>/SKILL.md` for both local sources. It never copies
+bundled skills into host-owned `worker_shared`; the verified bundle stays in
+the checkout's harness-owned `.worker/skills` cache. Availability does not
+activate onboarding skills on unrelated tasks: each skill must state when it
+applies, as `first-task` does for `/first-task`.
+
 ## Updates
 
 1. **Edits take effect on the next server restart locally, or the next release

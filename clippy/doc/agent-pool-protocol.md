@@ -4,6 +4,24 @@ AgentPool is a harness-neutral, authenticated JSON WebSocket protocol. Workers
 may use Minicode or another agent implementation. Pairing binds a worker to one
 company and named pool; the control plane chooses an idle compatible worker.
 Workers do not need access to the control plane's filesystem or Git checkout.
+Workers in a pool must be interchangeable across all agents assigned to it;
+different worker setups belong in different pools, not per-agent worker pins.
+
+Minicode's default worktree mode isolates each worker/agent pair in a short
+sibling checkout, for example `w1a1`, `w1a2`, and `w2a1`. Agent slots are
+worker-local and stable across restarts. Before every new assignment it detaches
+and hard-resets that pair's worktree to the source checkout's current committed
+`HEAD`, then removes untracked/ignored files. It preserves source and host-owned
+shared files; a network reconnect never resets the active execution.
+Workspace preparation failures stop the run before model work.
+Minicode monitors free space every 60 seconds and during assignment preparation.
+Below 24 GiB it evicts only that worker's idle, validated owned worktrees in
+persisted LRU order toward 36 GiB. Active assignments, other workers, source Git
+storage, host-owned shared files, legacy clones and unmanaged folders are
+protected. Slot mappings remain after eviction. Insufficient space or failed
+measurement/cleanup stops new model work explicitly; publish/upload durable
+results before completion because idle checkout files are disposable.
+Legacy `--workspace-mode clone` retains persistent independent per-agent clones.
 
 The canonical TypeScript schemas and types are exported from
 `@paperclipai/shared/agent-pools`. Non-TypeScript workers implement the same JSON
@@ -92,10 +110,14 @@ metadata if needed, not instruction bodies.
 ## Operational skill bundles
 
 `skill_bundle_v1` is required for every new assignment from an updated server.
-The server snapshots the bundled operational skills, references, scripts, and
+The server snapshots the bundled operational and onboarding skills, references, scripts, and
 license into a deterministic ZIP and sends its SHA-256 and per-file manifest.
 Neither the archive nor its manifest includes worker-host shared files,
 configuration, credentials, or agent-specific instruction bundles.
+Every `server/src/onboarding-assets/<flow>/skills/<name>/` tree is included in the
+same top-level skill namespace, including `first-task`; future onboarding skills
+follow that convention automatically. Non-skill templates/personas are excluded.
+Case-insensitive skill-name collisions fail bundle creation.
 
 Fetch the relative URL against the reachable Paperclip API origin using the
 assignment's run-scoped bearer credential; never forward credentials to redirects
@@ -116,7 +138,18 @@ Reconnect never replays the assignment or reloads its skill snapshot.
 Minicode stores these files in each agent checkout's `.worker/skills.zip` and
 `.worker/skills`, excluded through local `.git/info/exclude`. This cache is
 harness-managed; `worker_shared` remains entirely host-owned and is never a
-Paperclip installation target. Other harnesses may select an equivalent safe,
+Paperclip installation target. Default worktree clean-reset removes this cache,
+so it is downloaded and verified again for the next assignment; legacy clones
+can reuse verified caches. Minicode rereads root `AGENTS.md` and discovers
+`.agents/skills/<name>/SKILL.md` in both the shared root and assigned checkout on
+every new assignment. Shared guidance overrides worktree guidance; same-named
+skills resolve **worker_shared > worktree > bundle fallback**. The selected core
+`paperclip` skill is injected, and other selected skill paths are supplied for
+task-driven reading, without merging or overwriting skill directories. These
+local instructions and skills remain below harness safety rules and managed
+agent-specific instructions. Links in local instruction/skill discovery paths
+fail preparation; local guidance is not covered by the ZIP's hash.
+Other harnesses may select an equivalent safe,
 Git-ignored runtime directory. Make the core skill and its companion files
 discoverable and provide the skill's standard run-scoped `PAPERCLIP_*` environment.
 Skills do not grant new permissions. Task progress/completion uses the existing

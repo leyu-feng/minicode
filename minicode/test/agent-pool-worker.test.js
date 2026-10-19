@@ -6,6 +6,7 @@ import { EventEmitter, once } from "node:events"
 import { createHash, randomUUID } from "node:crypto"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
+import { fileURLToPath } from "node:url"
 import test from "node:test"
 import { createServer } from "node:http"
 import { zipSync } from "fflate"
@@ -22,6 +23,18 @@ async function waitUntil(predicate) {
     if (Date.now() > deadline) throw new Error("Timed out waiting for worker state")
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
+}
+
+async function executeTask(peer, task, exitCode = 0) {
+  await waitUntil(() => peer.messages.some(message => message.type === "ready"))
+  const readyCount = peer.messages.filter(message => message.type === "ready").length
+  peer.send({ type: "task", context: {}, ...task })
+  await waitUntil(() => peer.messages.some(message => message.type === "result" && message.runId === task.runId))
+  const result = peer.messages.find(message => message.type === "result" && message.runId === task.runId)
+  assert.equal(result.exitCode, exitCode, result.error)
+  peer.send({ type: "ack", runId: task.runId, seq: result.seq, completed: true })
+  await waitUntil(() => peer.messages.filter(message => message.type === "ready").length > readyCount)
+  return result
 }
 
 function inlineInstructions(content, revisionId = "revision-1") {
@@ -43,7 +56,7 @@ function skillBundle(contents = {
 }
 
 async function harness(t, factory, workerOptions = {}) {
-  const { bundle, ...configuredOptions } = workerOptions
+  const { bundle, linkedSource, ...configuredOptions } = workerOptions
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-workspace-test-"))
   const source = path.join(directory, "source repo")
   const workspaceRoot = path.join(directory, "workspaces")
@@ -53,6 +66,11 @@ async function harness(t, factory, workerOptions = {}) {
   await fs.writeFile(path.join(source, "tracked.txt"), "committed")
   await git("add", "tracked.txt")
   await git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "commit", "-m", "Fixture")
+  let workerSource = source
+  if (linkedSource) {
+    workerSource = path.join(directory, "main")
+    await git("worktree", "add", "--detach", workerSource, "HEAD")
+  }
   const http = createServer((req, res) => {
     if (bundle && req.url === bundle.skills.url) {
       bundle.downloads.push(req.headers)
@@ -72,8 +90,8 @@ async function harness(t, factory, workerOptions = {}) {
   })
   const options = {
     server: `http://127.0.0.1:${server.address().port}`, workerId: randomUUID(),
-    clientToken: "a".repeat(64), cwd: source, workspaceRoot, sessionFactory: factory,
-    reconnectMs: 10, log: () => {},
+    clientToken: "a".repeat(64), cwd: workerSource, workspaceRoot, workspaceMode: "clone", sessionFactory: factory,
+    reconnectMs: 10, diskFreeBytes: async () => 1024 ** 4, log: () => {},
     ...configuredOptions,
   }
   let worker = await startAgentPoolWorker(options)
@@ -92,7 +110,7 @@ async function harness(t, factory, workerOptions = {}) {
     return peer
   }
   return {
-    worker, welcome, connections, serverInstanceId, source, workspaceRoot, git,
+    worker, welcome, connections, serverInstanceId, serverUrl: options.server, source: workerSource, workspaceRoot, git, options,
     async restart() {
       await worker.stop()
       worker = await startAgentPoolWorker(options)
@@ -590,6 +608,85 @@ test("an invalid workspace AGENTS.md fails before starting the model", async (t)
   assert.equal(calls, 0)
 })
 
+test("shared guidance overrides worktree skills and worktree skills override the verified bundle per assignment", async t => {
+  const sessions = []
+  class Session extends EventEmitter {
+    constructor(options) { super(); sessions.push(options) }
+    async write() { return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const bundle = skillBundle({
+    "paperclip/SKILL.md": "# Bundled operational guidance",
+    "first-task/SKILL.md": "# Bundled onboarding guidance",
+  })
+  const fixture = await harness(t, options => new Session(options), { bundle })
+  const shared = path.join(path.dirname(fixture.source), "worker_shared")
+  await fs.writeFile(path.join(shared, "AGENTS.md"), "Shared policy overrides repository policy")
+  await fs.writeFile(path.join(fixture.source, "AGENTS.md"), "Repository policy")
+  for (const [root, label] of [[shared, "Shared"], [fixture.source, "Worktree"]]) {
+    for (const name of ["paperclip", "first-task"]) {
+      const directory = path.join(root, ".agents", "skills", name)
+      await fs.mkdir(directory, { recursive: true })
+      await fs.writeFile(path.join(directory, "SKILL.md"), `# ${label} ${name} guidance`)
+    }
+  }
+  await fixture.git("add", "AGENTS.md", ".agents")
+  await fixture.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false",
+    "commit", "-m", "Local skills")
+  const peer = await fixture.welcome(0)
+  await waitUntil(() => peer.messages.some(message => message.type === "ready"))
+  for (const [index, source] of ["worker_shared", "worktree", "bundle"].entries()) {
+    const runId = `resolved-skills-${index}`
+    const readyCount = peer.messages.filter(message => message.type === "ready").length
+    peer.send({ type: "task", runId, agent, context: {}, authToken: "run-credential", skills: bundle.skills,
+      instructions: inlineInstructions("Managed instructions remain above local guidance") })
+    await waitUntil(() => peer.messages.some(message => message.type === "result" && message.runId === runId))
+    const result = peer.messages.find(message => message.type === "result" && message.runId === runId)
+    assert.equal(result.exitCode, 0, result.error)
+    const session = sessions[index]
+    const expectedRoot = source === "worker_shared" ? shared
+      : source === "worktree" ? session.cwd : path.join(session.cwd, ".worker", "skills")
+    const skillPath = name => path.join(expectedRoot, ...(source === "bundle" ? [] : [".agents", "skills"]), name, "SKILL.md")
+    assert.ok(session.instructions.includes(`first-task [${source}]: ${skillPath("first-task")}`))
+    assert.ok(session.instructions.includes(`paperclip [${source}]: ${skillPath("paperclip")}`))
+    const label = source === "worker_shared" ? "Shared paperclip" : source === "worktree" ? "Worktree paperclip" : "Bundled operational"
+    assert.ok(session.instructions.includes(`# ${label} guidance`))
+    if (source !== "bundle") assert.ok(!session.instructions.includes("# Bundled operational guidance"))
+    assert.ok(session.instructions.includes(index ? "Updated shared policy" : "Shared policy overrides repository policy"))
+    assert.ok(session.instructions.indexOf("Repository policy") < session.instructions.indexOf("Host-owned shared AGENTS.md"))
+    assert.match(session.instructions, /worker_shared overrides the worktree/)
+    peer.send({ type: "ack", runId, seq: result.seq, completed: true })
+    await waitUntil(() => peer.messages.filter(message => message.type === "ready").length > readyCount)
+    if (source !== "bundle") {
+      for (const name of ["paperclip", "first-task"]) await fs.rm(path.dirname(skillPath(name)), { recursive: true })
+      await fs.writeFile(path.join(shared, "AGENTS.md"), "Updated shared policy")
+    }
+  }
+  assert.equal(await fs.readFile(path.join(shared, "AGENTS.md"), "utf8"), "Updated shared policy")
+  assert.equal(bundle.downloads.length, 1)
+})
+
+test("invalid shared instructions and linked local skill paths fail before the model starts", async t => {
+  for (const relative of ["AGENTS.md", ".agents", path.join(".agents", "skills"), path.join(".agents", "skills", "first-task")]) {
+    await t.test(relative, async t => {
+      let calls = 0
+      const fixture = await harness(t, () => { calls++; throw new Error("Must not start the model") })
+      const target = path.join(path.dirname(fixture.source), "worker_shared", relative)
+      await fs.mkdir(path.dirname(target), { recursive: true })
+      if (relative === "AGENTS.md") await fs.mkdir(target)
+      else await fs.symlink(fixture.source, target, process.platform === "win32" ? "junction" : "dir")
+      const peer = await fixture.welcome(0)
+      peer.send({ type: "task", runId: "invalid-guidance", agent, context: {} })
+      await waitUntil(() => peer.messages.some(message => message.type === "result"))
+      const result = peer.messages.find(message => message.type === "result")
+      assert.equal(result.exitCode, 1)
+      assert.match(result.error, /must be a regular (file|directory)/)
+      assert.equal(calls, 0)
+    })
+  }
+})
+
 test("real model tools use committed files in an independent workspace, not the source checkout", async (t) => {
   const originalKey = process.env.OPENCODE_API_KEY
   const originalUrl = process.env.OPENCODE_BASE_URL
@@ -742,6 +839,402 @@ test("agent workspaces retain edits across runs and worker restarts without shar
   assert.notEqual(paths[0], paths[2])
 })
 
+test("default worktrees isolate worker-agent pairs and reset each assignment to current committed source HEAD", async t => {
+  const sessions = []
+  const bundle = skillBundle()
+  let expected = "committed"
+  let taskCommit
+  const gitAt = async (cwd, ...args) => (await execFileAsync("git", args, { cwd, windowsHide: true })).stdout.trim()
+  const commitAt = cwd => gitAt(cwd, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+    "-c", "commit.gpgsign=false", "commit", "-am", "Assignment fixture")
+  class Session extends EventEmitter {
+    constructor(options) { super(); this.cwd = options.cwd; sessions.push(options) }
+    async write() {
+      assert.equal(await fs.readFile(path.join(this.cwd, "tracked.txt"), "utf8"), expected)
+      assert.equal(await gitAt(this.cwd, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD")
+      for (const name of ["progress.txt", "ignored.txt"]) {
+        await assert.rejects(fs.stat(path.join(this.cwd, name)), { code: "ENOENT" })
+      }
+      assert.ok((await fs.lstat(path.join(this.cwd, ".git"))).isFile())
+      assert.ok((await fs.readFile(path.join(this.cwd, ".worker", "skills", "paperclip", "SKILL.md"), "utf8")).includes("Paperclip"))
+      await fs.writeFile(path.join(this.cwd, "tracked.txt"), "task edits")
+      await fs.writeFile(path.join(this.cwd, "progress.txt"), `task ${sessions.length}`)
+      await fs.writeFile(path.join(this.cwd, "ignored.txt"), "ignored task leftovers")
+      if (sessions.length === 1) {
+        await gitAt(this.cwd, "checkout", "-b", "assignment-branch")
+        await commitAt(this.cwd)
+        taskCommit = await gitAt(this.cwd, "rev-parse", "HEAD")
+      }
+      return { exitCode: 0 }
+    }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, options => new Session(options),
+    { workspaceMode: undefined, workerName: "w1", linkedSource: true, bundle })
+  const root = path.dirname(fixture.source)
+  const workspace = path.join(root, "w1a1")
+  const otherAgentWorkspace = path.join(root, "w1a2")
+  const legacy = path.join(root, "w1")
+  await fs.mkdir(legacy)
+  await fs.writeFile(path.join(legacy, "legacy.txt"), "do not migrate or delete")
+  const shared = path.join(root, "worker_shared")
+  await fs.writeFile(path.join(shared, "keep.txt"), "host-owned")
+  await fs.writeFile(path.join(fixture.source, ".gitignore"), "ignored.txt\n")
+  await fs.writeFile(path.join(fixture.source, "AGENTS.md"), "First committed guidance.")
+  await gitAt(fixture.source, "add", ".gitignore", "AGENTS.md")
+  await commitAt(fixture.source)
+  await fs.writeFile(path.join(fixture.source, "tracked.txt"), "source edits")
+  const execute = (peer, runId, assignedAgent = agent) => executeTask(peer,
+    { runId, agent: assignedAgent, skills: bundle.skills, authToken: "run-credential" })
+  const first = await fixture.welcome(0)
+  await execute(first, "worktree-first")
+  assert.equal(sessions[0].cwd, workspace)
+  assert.ok(sessions[0].instructions.includes("First committed guidance."))
+  assert.match(sessions[0].instructions, /next assignment discards local edits/)
+  await fixture.restart()
+  const resumed = await fixture.welcome(1)
+  assert.equal(await fs.readFile(path.join(workspace, "progress.txt"), "utf8"), "task 1")
+  expected = "new source commit"
+  await fs.writeFile(path.join(fixture.source, "tracked.txt"), expected)
+  await fs.writeFile(path.join(fixture.source, "AGENTS.md"), "Updated committed guidance.")
+  await commitAt(fixture.source)
+  const sourceHead = await gitAt(fixture.source, "rev-parse", "HEAD")
+  await fs.writeFile(path.join(fixture.source, "tracked.txt"), "source edits")
+  await fs.writeFile(path.join(fixture.source, "local-only.txt"), "untracked source")
+  const sourceStatus = await gitAt(fixture.source, "status", "--porcelain")
+  await execute(resumed, "worktree-resumed")
+  await execute(resumed, "worktree-other-agent", { id: "agent-b" })
+  assert.equal(await fs.readFile(path.join(workspace, "progress.txt"), "utf8"), "task 2")
+  await execute(resumed, "worktree-first-agent-again")
+  assert.deepEqual(sessions.map(session => session.cwd), [workspace, workspace, otherAgentWorkspace, workspace])
+  assert.equal(await fs.readFile(path.join(otherAgentWorkspace, "progress.txt"), "utf8"), "task 3")
+  assert.ok(sessions.slice(1).every(session => session.instructions.includes("Updated committed guidance.")))
+  const secondWorker = await startAgentPoolWorker({ ...fixture.options, workerId: randomUUID(), workerName: "w2" })
+  try {
+    await execute(await fixture.welcome(2), "worktree-second-worker")
+    assert.equal(sessions[4].cwd, path.join(root, "w2a1"))
+  } finally {
+    await secondWorker.stop()
+  }
+  assert.equal(bundle.downloads.length, 5)
+  const status = await gitAt(workspace, "status", "--porcelain")
+  assert.match(status, /progress\.txt/)
+  assert.ok(!status.includes(".worker"))
+  assert.equal(await gitAt(workspace, "rev-parse", "assignment-branch"), taskCommit)
+  assert.equal(await fs.readFile(path.join(fixture.source, "tracked.txt"), "utf8"), "source edits")
+  assert.equal(await gitAt(fixture.source, "rev-parse", "HEAD"), sourceHead)
+  assert.equal(await gitAt(fixture.source, "status", "--porcelain"), sourceStatus)
+  assert.equal(await fs.readFile(path.join(shared, "keep.txt"), "utf8"), "host-owned")
+  assert.equal(await fs.readFile(path.join(legacy, "legacy.txt"), "utf8"), "do not migrate or delete")
+})
+
+test("sibling worktrees reject unsafe names and overlapping storage before connecting", async t => {
+  const fixture = await harness(t, () => { throw new Error("Must not start a session") },
+    { workspaceMode: "worktree", workerName: "w1" })
+  const options = {
+    server: "http://127.0.0.1:1", workerId: randomUUID(), cwd: fixture.source,
+    clientToken: "a".repeat(64), log: () => {},
+  }
+  for (const workerName of ["../escape", "CON", "nul", ".git", "bad/name", "a".repeat(25), path.basename(fixture.source)]) {
+    await assert.rejects(startAgentPoolWorker({ ...options, workerName }), /--worker-name|source checkout/)
+  }
+  await assert.rejects(startAgentPoolWorker({ ...fixture.options, server: options.server }), /registry belongs to a different/)
+  await assert.rejects(startAgentPoolWorker({ ...options, workspaceMode: "other" }), /--workspace-mode/)
+  await assert.rejects(startAgentPoolWorker({ ...options, workspaceMode: "clone", workerName: "w2" }), /--worker-name requires/)
+  await assert.rejects(startAgentPoolWorker({
+    ...options, workerName: "shared", workerShared: path.join(path.dirname(fixture.source), "shared"),
+  }), /--worker-shared must not overlap/)
+})
+
+test("worktree preparation refuses unmanaged, shared, and other-worker paths without resetting their files", async t => {
+  for (const kind of ["unmanaged", "shared", "other-worker"]) {
+    await t.test(kind, async t => {
+      let calls = 0
+      class Session extends EventEmitter {
+        constructor(options) { super(); this.cwd = options.cwd; calls++ }
+        async write() { await fs.writeFile(path.join(this.cwd, "keep.txt"), "keep"); return { exitCode: 0 } }
+        interrupt() {}
+        dispose() {}
+      }
+      const fixture = await harness(t, options => new Session(options), { workspaceMode: "worktree", workerName: "w1" })
+      const workspace = path.join(path.dirname(fixture.source), "w1a1")
+      let peer = await fixture.welcome(0)
+      let extraWorker
+      if (kind === "other-worker") {
+        await executeTask(peer, { runId: "owned-worktree", agent })
+        extraWorker = await startAgentPoolWorker({ ...fixture.options, workerId: randomUUID() })
+        peer = await fixture.welcome(1)
+      } else {
+        await fs.mkdir(workspace)
+        await fs.writeFile(path.join(workspace, "keep.txt"), "keep")
+        if (kind === "shared") {
+          extraWorker = await startAgentPoolWorker({
+            ...fixture.options, workerId: randomUUID(), workerShared: workspace,
+          })
+          peer = await fixture.welcome(1)
+        }
+      }
+      try {
+        const result = await executeTask(peer, { runId: `${kind}-worktree`, agent }, 1)
+        if (kind === "shared") assert.match(result.error, /must not overlap/)
+        if (kind === "other-worker") assert.match(result.error, /different worker, source or server/)
+        assert.equal(calls, kind === "other-worker" ? 1 : 0)
+        assert.equal(await fs.readFile(path.join(workspace, "keep.txt"), "utf8"), "keep")
+        assert.equal(await fs.readFile(path.join(fixture.source, "tracked.txt"), "utf8"), "committed")
+      } finally {
+        await extraWorker?.stop()
+      }
+    })
+  }
+})
+
+test("a failed clean reset stops the assignment before another model session starts", async t => {
+  let calls = 0
+  class Session extends EventEmitter {
+    constructor(options) { super(); this.cwd = options.cwd; calls++ }
+    async write() { await fs.writeFile(path.join(this.cwd, "keep.txt"), "keep"); return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, options => new Session(options), { workspaceMode: "worktree", workerName: "w1" })
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, { runId: "before-reset-failure", agent })
+  const workspace = path.join(path.dirname(fixture.source), "w1a1")
+  const lock = (await execFileAsync("git", ["rev-parse", "--path-format=absolute", "--git-path", "index.lock"],
+    { cwd: workspace, windowsHide: true })).stdout.trim()
+  await fs.writeFile(lock, "another Git operation")
+  const result = await executeTask(peer, { runId: "reset-failure", agent }, 1)
+  assert.match(result.error, /index\.lock/)
+  assert.equal(calls, 1)
+  assert.equal(await fs.readFile(path.join(workspace, "keep.txt"), "utf8"), "keep")
+})
+
+test("worktree network reconnect preserves the active assignment without resetting or replaying it", async t => {
+  let calls = 0
+  let started = false
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  class Session extends EventEmitter {
+    constructor(options) { super(); this.cwd = options.cwd; calls++ }
+    async write() {
+      await fs.writeFile(path.join(this.cwd, "active.txt"), "in progress")
+      started = true
+      await gate
+      return { exitCode: 0 }
+    }
+    interrupt() { release() }
+    dispose() {}
+  }
+  const fixture = await harness(t, options => new Session(options), { workspaceMode: "worktree", workerName: "w1" })
+  const peer = await fixture.welcome(0)
+  peer.send({ type: "task", runId: "worktree-reconnect", agent, context: {} })
+  await waitUntil(() => started)
+  peer.socket.terminate()
+  const resumed = await fixture.welcome(1)
+  assert.equal(resumed.messages.find(message => message.type === "hello").runId, "worktree-reconnect")
+  assert.equal(calls, 1)
+  assert.equal(await fs.readFile(path.join(path.dirname(fixture.source), "w1a1", "active.txt"), "utf8"), "in progress")
+  release()
+  await waitUntil(() => resumed.messages.some(message => message.type === "result"))
+  assert.equal(resumed.messages.find(message => message.type === "result").exitCode, 0)
+})
+
+test("disk pressure evicts persisted LRU idle worktrees to the target and recreates their original slots", async t => {
+  const logs = []
+  let pressure = false
+  let root
+  class Session extends EventEmitter {
+    constructor(options) { super(); this.cwd = options.cwd }
+    async write() { await fs.writeFile(path.join(this.cwd, "result.txt"), "local result"); return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, options => new Session(options), {
+    workspaceMode: "worktree", workerName: "w1", log: message => logs.push(message),
+    diskFreeBytes: async () => {
+      if (!pressure) return 48 * 1024 ** 3
+      const names = await fs.readdir(root)
+      return (20 + (names.includes("w1a2") ? 0 : 8) + (names.includes("w1a3") ? 0 : 8)) * 1024 ** 3
+    },
+  })
+  root = path.dirname(fixture.source)
+  for (const name of ["w1", "w1a9", "worker_shared"]) {
+    await fs.mkdir(path.join(root, name), { recursive: true })
+    await fs.writeFile(path.join(root, name, "keep.txt"), "not an eviction target")
+  }
+  let peer = await fixture.welcome(0)
+  for (const [index, id] of ["agent-a", "agent-b", "agent-c", "agent-a"].entries()) {
+    await executeTask(peer, { runId: `lru-setup-${index}`, agent: { id } })
+  }
+  const otherWorker = await startAgentPoolWorker({ ...fixture.options, workerId: randomUUID(), workerName: "w2" })
+  try {
+    await executeTask(await fixture.welcome(1), { runId: "lru-other-worker", agent })
+    await fixture.restart()
+    peer = await fixture.welcome(2)
+    pressure = true
+    await executeTask(peer, { runId: "lru-reclaim", agent })
+    const evictions = logs.filter(message => message.includes("LRU evicted"))
+    assert.equal(evictions.length, 2)
+    assert.ok(evictions[0].includes("w1a2"))
+    assert.ok(evictions[1].includes("w1a3"))
+    assert.ok(evictions[1].includes("36.00 GiB"))
+    for (const name of ["w1a2", "w1a3"]) await assert.rejects(fs.stat(path.join(root, name)), { code: "ENOENT" })
+    assert.equal(await fs.readFile(path.join(root, "w2a1", "result.txt"), "utf8"), "local result")
+    for (const name of ["w1", "w1a9", "worker_shared"]) {
+      assert.equal(await fs.readFile(path.join(root, name, "keep.txt"), "utf8"), "not an eviction target")
+    }
+    await executeTask(peer, { runId: "lru-recreate", agent: { id: "agent-b" } })
+    assert.equal(await fs.readFile(path.join(root, "w1a2", "result.txt"), "utf8"), "local result")
+    assert.equal(logs.filter(message => message.includes("LRU evicted")).length, 2)
+    assert.equal(await fs.readFile(path.join(fixture.source, "tracked.txt"), "utf8"), "committed")
+  } finally {
+    await otherWorker.stop()
+  }
+})
+
+test("unavailable or insufficient disk space fails before model work and allows retry after recovery", async t => {
+  let calls = 0
+  let free = null
+  class Session extends EventEmitter {
+    constructor() { super(); calls++ }
+    async write() { return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, () => new Session(), {
+    workspaceMode: "worktree", workerName: "w1",
+    diskFreeBytes: async () => {
+      if (free === null) throw new Error("disk measurement unavailable")
+      return free * 1024 ** 3
+    },
+  })
+  const peer = await fixture.welcome(0)
+  const unavailable = await executeTask(peer, { runId: "disk-unavailable", agent }, 1)
+  assert.match(unavailable.error, /disk measurement unavailable/)
+  free = 23
+  const insufficient = await executeTask(peer, { runId: "disk-insufficient", agent }, 1)
+  assert.match(insufficient.error, /23\.00 GiB free; require at least 24 GiB/)
+  assert.equal(calls, 0)
+  await assert.rejects(fs.stat(path.join(path.dirname(fixture.source), "w1a1")), { code: "ENOENT" })
+  free = 40
+  await executeTask(peer, { runId: "disk-recovered", agent })
+  assert.equal(calls, 1)
+})
+
+test("periodic disk monitoring evicts idle worktrees but protects the active assignment even below minimum", async t => {
+  const logs = []
+  let root
+  let pressure = false
+  let calls = 0
+  let started = false
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  class Session extends EventEmitter {
+    constructor(options) { super(); this.cwd = options.cwd; this.ordinal = ++calls }
+    async write() {
+      await fs.writeFile(path.join(this.cwd, "result.txt"), "active data")
+      if (this.ordinal === 2) { started = true; await gate }
+      return { exitCode: 0 }
+    }
+    interrupt() { release() }
+    dispose() {}
+  }
+  const fixture = await harness(t, options => new Session(options), {
+    workspaceMode: "worktree", workerName: "w1", diskMonitorMs: 20, log: message => logs.push(message),
+    diskFreeBytes: async () => {
+      if (!pressure) return 48 * 1024 ** 3
+      return ((await fs.readdir(root)).includes("w1a1") ? 20 : 22) * 1024 ** 3
+    },
+  })
+  root = path.dirname(fixture.source)
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, { runId: "disk-idle-setup", agent })
+  peer.send({ type: "task", runId: "disk-active", agent: { id: "agent-b" }, context: {} })
+  await waitUntil(() => started)
+  pressure = true
+  await waitUntil(() => logs.some(message => message.includes("22.00 GiB") && message.includes("new assignments are blocked")))
+  await assert.rejects(fs.stat(path.join(root, "w1a1")), { code: "ENOENT" })
+  assert.equal(await fs.readFile(path.join(root, "w1a2", "result.txt"), "utf8"), "active data")
+  assert.equal(calls, 2)
+  pressure = false
+  release()
+  await waitUntil(() => peer.messages.some(message => message.type === "result" && message.runId === "disk-active"))
+  assert.equal(peer.messages.find(message => message.type === "result" && message.runId === "disk-active").exitCode, 0)
+})
+
+test("space consumed by skill installation is checked again before starting the model", async t => {
+  let root
+  let calls = 0
+  const bundle = skillBundle()
+  const fixture = await harness(t, () => { calls++; throw new Error("Must not start model work") }, {
+    workspaceMode: "worktree", workerName: "w1", bundle,
+    diskFreeBytes: async () => {
+      try {
+        await fs.stat(path.join(root, "w1a1", ".worker", "skills"))
+        return 23 * 1024 ** 3
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error
+        return 48 * 1024 ** 3
+      }
+    },
+  })
+  root = path.dirname(fixture.source)
+  const result = await executeTask(await fixture.welcome(0),
+    { runId: "disk-after-skills", agent, skills: bundle.skills, authToken: "run-credential" }, 1)
+  assert.match(result.error, /23\.00 GiB free; require at least 24 GiB/)
+  assert.equal(bundle.downloads.length, 1)
+  assert.equal(calls, 0)
+})
+
+test("LRU cleanup refuses changed worktree ownership instead of deleting files or starting model work", async t => {
+  let low = false
+  let calls = 0
+  class Session extends EventEmitter {
+    constructor(options) { super(); this.cwd = options.cwd; calls++ }
+    async write() { await fs.writeFile(path.join(this.cwd, "keep.txt"), "keep"); return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, options => new Session(options), {
+    workspaceMode: "worktree", workerName: "w1", diskFreeBytes: async () => (low ? 20 : 48) * 1024 ** 3,
+  })
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, { runId: "lru-owned-setup", agent })
+  const workspace = path.join(path.dirname(fixture.source), "w1a1")
+  const gitDirectory = (await execFileAsync("git", ["rev-parse", "--absolute-git-dir"],
+    { cwd: workspace, windowsHide: true })).stdout.trim()
+  const file = path.join(gitDirectory, "minicode-worker.json")
+  const binding = JSON.parse(await fs.readFile(file, "utf8"))
+  await fs.writeFile(file, JSON.stringify({ ...binding, workerId: randomUUID() }))
+  low = true
+  const result = await executeTask(peer, { runId: "lru-foreign-ownership", agent: { id: "agent-b" } }, 1)
+  assert.match(result.error, /different worker, source or server/)
+  assert.equal(calls, 1)
+  assert.equal(await fs.readFile(path.join(workspace, "keep.txt"), "utf8"), "keep")
+})
+
+test("worker CLI forwards workspace mode and short name to workspace validation", async t => {
+  const fixture = await harness(t, () => { throw new Error("Must not start a session") })
+  const config = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-worktree-cli-"))
+  t.after(() => fs.rm(config, { recursive: true, force: true }))
+  for (const [mode, name, extra, expected] of [
+    ["worktree", "../escape", [], /--worker-name must be a safe folder name/],
+    ["clone", "w1", [], /--worker-name requires --workspace-mode worktree/],
+    ["worktree", "w1", ["--min-free-gib", "40", "--target-free-gib", "36"], /Worker disk thresholds require/],
+  ]) {
+    await assert.rejects(execFileAsync(process.execPath, [
+      fileURLToPath(new URL("../cli.js", import.meta.url)), "worker",
+      "--server", fixture.serverUrl,
+      "--worker-id", randomUUID(), "--repo-root", fixture.source,
+      "--workspace-mode", mode, "--worker-name", name, ...extra,
+    ], { env: { ...process.env, MINICODE_CONFIG_HOME: config }, windowsHide: true }), error => {
+      assert.match(error.stderr, expected)
+      return true
+    })
+  }
+})
+
 test("workspace preparation failure fails the run without falling back to the source checkout", async (t) => {
   let calls = 0
   const fixture = await harness(t, () => { calls++; throw new Error("Must not start a session") })
@@ -792,7 +1285,8 @@ test("an invalid existing workspace fails without overwriting its files", async 
 
 test("worker startup rejects workspace storage inside the source checkout and non-root source directories", async (t) => {
   const fixture = await harness(t, () => { throw new Error("Must not start a session") })
-  const options = { server: "http://127.0.0.1:1", workerId: randomUUID(), cwd: fixture.source, clientToken: "a".repeat(64) }
+  const options = { server: "http://127.0.0.1:1", workerId: randomUUID(), cwd: fixture.source, clientToken: "a".repeat(64),
+    workspaceMode: "clone" }
   const inside = path.join(fixture.source, "workspaces")
   await assert.rejects(startAgentPoolWorker({ ...options, workspaceRoot: inside }), /outside the source checkout/)
   await assert.rejects(fs.stat(inside), { code: "ENOENT" })
@@ -806,7 +1300,7 @@ test("worker startup rejects overlapping shared folders, including directory lin
   const fixture = await harness(t, () => { throw new Error("Must not start a session") })
   const options = {
     server: "http://127.0.0.1:1", workerId: randomUUID(), cwd: fixture.source,
-    clientToken: "a".repeat(64), workspaceRoot: fixture.workspaceRoot,
+    clientToken: "a".repeat(64), workspaceRoot: fixture.workspaceRoot, workspaceMode: "clone",
   }
   for (const workerShared of [
     fixture.source, path.dirname(fixture.source), path.join(fixture.source, "shared"),

@@ -11,6 +11,8 @@ import { startEntraProxy } from "./entra-proxy.js"
 import { createGitHubPublisher } from "./github-publisher.js"
 import { paperclipPublicationTool } from "./paperclip-publication.js"
 import { SKILL_BUNDLE, prepareWorkerSkills } from "./worker-skills.js"
+import { prepareWorkerWorktrees, siblingWorktreePath } from "./worker-worktree.js"
+import { readWorkerGuidance } from "./worker-guidance.js"
 
 const MAX_FRAME = 256 * 1024
 const PROTOCOL_VERSION = 1
@@ -85,19 +87,6 @@ async function prepareAgentWorkspace(source, root, agentId) {
   return workspace
 }
 
-async function readWorkspaceInstructions(workspace) {
-  const file = path.join(workspace, "AGENTS.md")
-  let info
-  try {
-    info = await fs.lstat(file)
-  } catch (error) {
-    if (error.code === "ENOENT") return null
-    throw error
-  }
-  if (!info.isFile()) throw new Error("Workspace AGENTS.md must be a regular file, not a directory or symbolic link")
-  return fs.readFile(file, "utf8")
-}
-
 export function agentPoolServerUrl(value) {
   const url = new URL(value)
   if (url.username || url.password || url.search || url.hash || url.pathname !== "/"
@@ -130,8 +119,9 @@ export async function loadWorkerCredential({ server, workerId, cwd, stateDir }) 
 
 export async function startAgentPoolWorker({
   server, workerId, cwd, clientToken, entraSession = null,
-  workspaceRoot = path.join(path.dirname(authFilePath()), "agent-pool", "workspaces", workerId),
+  workspaceRoot, workspaceMode = "worktree", workerName,
   workerShared,
+  minFreeGiB, targetFreeGiB, diskFreeBytes, diskMonitorMs = 60_000,
   githubRepo, githubUser,
   publisherFactory = createGitHubPublisher,
   sessionFactory = (options) => new AgentSession(options),
@@ -140,6 +130,12 @@ export async function startAgentPoolWorker({
   log = (message) => process.stderr.write(`${message}\n`),
 }) {
   if (!["normal", "verbose"].includes(outputMode)) throw new Error("Worker --output-mode must be normal or verbose")
+  if (!["worktree", "clone"].includes(workspaceMode)) throw new Error("--workspace-mode must be worktree or clone")
+  if (workspaceMode === "clone" && workerName !== undefined) throw new Error("--worker-name requires --workspace-mode worktree")
+  if (workspaceMode === "clone" && (minFreeGiB !== undefined || targetFreeGiB !== undefined)) {
+    throw new Error("Worker disk cleanup flags require --workspace-mode worktree")
+  }
+  if (!Number.isFinite(diskMonitorMs) || diskMonitorMs <= 0) throw new Error("Invalid worker disk monitor interval")
   const origin = agentPoolServerUrl(server)
   if (!(await fs.stat(cwd)).isDirectory()) throw new Error("--repo-root must be an existing directory")
   cwd = await fs.realpath(cwd)
@@ -147,10 +143,14 @@ export async function startAgentPoolWorker({
     throw new Error("AgentPool --repo-root must be the root of the source Git repository")
   }
   await git(cwd, ["rev-parse", "--verify", "HEAD"])
-  workspaceRoot = path.resolve(workspaceRoot)
+  workspaceRoot = workspaceMode === "worktree"
+    ? siblingWorktreePath(cwd, workerName ?? `w-${workerId.slice(0, 12)}`)
+    : path.resolve(workspaceRoot ?? path.join(path.dirname(authFilePath()), "agent-pool", "workspaces", workerId))
   if (isInside(cwd, workspaceRoot)) throw new Error("AgentPool workspaces must be outside the source checkout")
-  await fs.mkdir(workspaceRoot, { recursive: true, mode: 0o700 })
-  workspaceRoot = await fs.realpath(workspaceRoot)
+  if (workspaceMode === "clone") {
+    await fs.mkdir(workspaceRoot, { recursive: true, mode: 0o700 })
+    workspaceRoot = await fs.realpath(workspaceRoot)
+  }
   if (isInside(cwd, workspaceRoot)) throw new Error("AgentPool workspaces must be outside the source checkout")
   workerShared = path.resolve(workerShared ?? path.join(path.dirname(cwd), "worker_shared"))
   workerShared = path.join(await fs.realpath(path.dirname(workerShared)), path.basename(workerShared))
@@ -160,6 +160,19 @@ export async function startAgentPoolWorker({
   await fs.mkdir(workerShared, { recursive: true, mode: 0o700 })
   workerShared = await fs.realpath(workerShared)
   if (sharedOverlapsWorkspace()) throw new Error("--worker-shared must not overlap the source checkout or agent workspace storage")
+  const worktree = workspaceMode === "worktree"
+    ? await prepareWorkerWorktrees({
+      source: cwd, workspace: workspaceRoot, workerId, server: origin.origin, git,
+      minFreeGiB, targetFreeGiB, readFreeBytes: diskFreeBytes, log,
+      validateWorkspace: workspace => {
+        if (isInside(cwd, workspace) || isInside(workspace, cwd)
+          || isInside(workerShared, workspace) || isInside(workspace, workerShared)) {
+          throw new Error("Worker agent worktree must not overlap the source checkout or --worker-shared")
+        }
+      },
+    })
+    : null
+  log(`AgentPool workspace mode: ${workspaceMode}; storage: ${workspaceRoot}`)
   log(`AgentPool read-only shared folder (instruction policy): ${workerShared}`)
   const publisher = githubRepo || githubUser
     ? await publisherFactory({ repoRoot: cwd, repository: githubRepo, githubUser })
@@ -172,7 +185,8 @@ export async function startAgentPoolWorker({
   endpoint.protocol = origin.protocol === "https:" ? "wss:" : "ws:"
   endpoint.searchParams.set("workerId", workerId)
   const instanceId = randomUUID()
-  let socket, reconnectTimer, leaseTimer, heartbeatTimer
+  let socket, reconnectTimer, leaseTimer, heartbeatTimer, diskTimer
+  let diskCheck = Promise.resolve()
   let stopped = false
   let connected = false
   let active = null
@@ -184,6 +198,20 @@ export async function startAgentPoolWorker({
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value))
   }
 
+  function monitorDisk() {
+    clearTimeout(diskTimer)
+    if (!worktree || stopped || !connected) return
+    diskCheck = worktree.checkDisk().catch(error => {
+      log(`[minicode] Disk monitoring/cleanup failed: ${error.message}`)
+    }).finally(() => {
+      if (!stopped && connected) {
+        clearTimeout(diskTimer)
+        diskTimer = setTimeout(monitorDisk, diskMonitorMs)
+        diskTimer.unref()
+      }
+    })
+  }
+
   async function stop(error = null) {
     if (stopped) return
     stopped = true
@@ -191,11 +219,14 @@ export async function startAgentPoolWorker({
     clearTimeout(reconnectTimer)
     clearTimeout(leaseTimer)
     clearTimeout(heartbeatTimer)
+    clearTimeout(diskTimer)
     active?.controller.abort()
     active?.session?.interrupt()
     socket?.close(1000, "worker stopped")
     // write() settles only after its active model/tool operation unwinds.
     await active?.execution
+    await diskCheck
+    worktree?.release()
     active?.session?.dispose()
     await proxy?.close()
     settle(error)
@@ -209,6 +240,7 @@ export async function startAgentPoolWorker({
     if (completed) {
       if (!active.done || seq !== active.seq) throw new Error("AgentPool completed an unfinished execution")
       active.session?.dispose()
+      worktree?.release()
       active = null
       send({ type: "ready" })
     }
@@ -244,12 +276,18 @@ export async function startAgentPoolWorker({
     run.execution = Promise.resolve().then(async () => {
       if (stopped || run.cancelled) return { exitCode: 130 }
       const agentInstructions = readTaskInstructions(task)
-      const workspace = await prepareAgentWorkspace(cwd, workspaceRoot, task.agent?.id)
+      const workspace = worktree
+        ? await worktree.assign(task.agent?.id)
+        : await prepareAgentWorkspace(cwd, workspaceRoot, task.agent?.id)
+      if (worktree) enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Clean assignment worktree reset to source HEAD: ${workspace}\n` })
       const skills = await prepareWorkerSkills({
         workspace, skills: task.skills, apiUrl: agentApiUrl, authToken: task.authToken, runId: task.runId,
         signal: run.controller.signal, git: args => git(workspace, args),
       })
-      const repositoryInstructions = await readWorkspaceInstructions(workspace)
+      const guidance = await readWorkerGuidance({ workspace, workerShared, bundle: skills })
+      const repositoryInstructions = guidance.workspaceInstructions
+      if (stopped || run.cancelled) return { exitCode: 130 }
+      await worktree?.ensureDiskSpace()
       if (stopped || run.cancelled) return { exitCode: 130 }
       run.publication = publisher ? paperclipPublicationTool(publisher({ workspace, agentId: task.agent.id }), {
         apiUrl: agentApiUrl, authToken: task.authToken, runId: task.runId, agentId: task.agent.id,
@@ -261,7 +299,9 @@ export async function startAgentPoolWorker({
         instructions: [
           "Worker workspace and failure rules take precedence over repository AGENTS.md instructions, task context, continuation summaries, and runtime tool guidance.",
           "These built-in rules also take precedence over agent-specific instructions. Agent-specific instructions take precedence over repository instructions when they conflict.",
+          "Among local instructions and same-named skills, worker_shared overrides the worktree; the worktree overrides the downloaded bundle fallback. Local guidance and all skills remain subordinate to the built-in worker rules and managed agent-specific instructions. Override means selecting guidance, never overwriting files.",
           `Your only writable filesystem scope is your assigned agent workspace: ${workspace}.`,
+          ...(worktree ? ["This worker-agent worktree was clean-reset to committed source HEAD for this assignment. The next assignment discards local edits, ignored/untracked files and checkout-local commits; idle worktrees may also be LRU-evicted to recover disk space. Save durable results through the supplied artifact/task APIs or the enabled publication tool before finishing; never rely on local files surviving completion."] : []),
           `Your additional read-only shared folder is: ${workerShared}. Its path is also available to tools in the WORKER_SHARED environment variable (PowerShell: $env:WORKER_SHARED).`,
           "Read, search, and list files only inside your assigned workspace or the read-only shared folder. Create and modify files only inside your assigned workspace. Never create, edit, delete, rename, move, or change permissions on the shared folder or its contents.",
           "Do not traverse parent directories or follow links outside these permitted scopes. Do not access the source repository, other checkouts, home/profile folders, AppData, global skill stores, server files, or run logs outside these scopes.",
@@ -279,18 +319,27 @@ export async function startAgentPoolWorker({
             "\nRepository instructions from the assigned workspace's root AGENTS.md:",
             repositoryInstructions,
           ]),
+          ...(guidance.sharedInstructions === null ? [] : [
+            "\nHost-owned shared AGENTS.md instructions (override conflicting worktree guidance):",
+            guidance.sharedInstructions,
+          ]),
           ...(agentInstructions === null ? [] : [
             "\nAgent-specific instructions supplied inline by the control plane (not a workspace file):",
             agentInstructions.content,
           ]),
           ...(skills === null ? [] : [
-            `Verified Paperclip skill bundle SHA-256: ${skills.sha256}. Skill root: ${skills.directory}.`,
-            `Available bundled skills: ${skills.entries.join(", ")}. Read the matching SKILL.md and referenced files here when needed. Skill access grants no additional permissions.`,
-            "Resolve skill-relative references and script paths from that skill's directory, not the workspace root.",
+            `Verified Paperclip skill bundle SHA-256: ${skills.sha256}. Bundled fallback root: ${skills.directory}.`,
+          ]),
+          `Local skills are discovered in ${path.join(workerShared, ".agents", "skills")} and ${path.join(workspace, ".agents", "skills")}.`,
+          "Resolved skill catalog (worker_shared > worktree > bundle fallback):",
+          ...guidance.skills.map(skill => `${skill.name} [${skill.source}]: ${skill.file}`),
+          "Read the selected SKILL.md when its skill is requested (including /first-task for onboarding) or relevant to the task. For duplicate names use only the selected path, not an overridden copy. Skill access grants no additional permissions.",
+          "Resolve skill-relative references and script paths from the selected skill's directory, not the workspace root. Do not copy skills into worker_shared.",
+          ...(guidance.paperclipInstructions === null ? [] : [
             "For a general Run Now without a task payload, use the Paperclip skill to discover your own assignments instead of reporting missing task details. Check linked pending/completed PRs; if a PR is merged and acceptance criteria are satisfied, complete that task through the Paperclip API and verify its returned status. Reconcile the original publication commit with the harness rather than publishing a different commit or querying GitHub without credentials.",
             "Post concise, meaningful progress and waiting/completion updates into task chat using the skill's issue-comments/update APIs. A final model response or successful run is not a task comment or task-status write. Use the run audit header, and do not claim a write until its response confirms it.",
             "Paperclip operational skill (subordinate to the worker safety and permission rules above):",
-            skills.instructions,
+            guidance.paperclipInstructions,
           ]),
         ].join("\n"),
         env: {
@@ -333,6 +382,10 @@ export async function startAgentPoolWorker({
       if (repositoryInstructions !== null) {
         enqueue(run, { type: "log", stream: "stdout", data: "[minicode] Loaded workspace instructions from AGENTS.md\n" })
       }
+      if (guidance.sharedInstructions !== null) {
+        enqueue(run, { type: "log", stream: "stdout", data: "[minicode] Loaded read-only shared instructions from AGENTS.md\n" })
+      }
+      enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Resolved ${guidance.skills.length} skills (worker_shared > worktree > bundle fallback)\n` })
       if (agentInstructions !== null) {
         enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Loaded inline agent instructions (SHA-256 ${agentInstructions.contentSha256})\n` })
       }
@@ -346,7 +399,7 @@ export async function startAgentPoolWorker({
         "paperclipTurnContext", "executionContinuation",
       ].filter((key) => Object.hasOwn(task.context, key)).map((key) => [key, task.context[key]]))
       const prompt = [
-        "Execute this assigned AgentPool task in your persistent agent workspace. Treat the following JSON as task context.",
+        `Execute this assigned AgentPool task in your ${worktree ? "clean worker-agent worktree" : "persistent agent workspace"}. Treat the following JSON as task context.`,
         `Your actual tool working directory is ${workspace}. Workspace paths in serverContext describe the control-plane host, not this worker; use your local workspace for file operations.`,
         "Report failure honestly. Do not claim control-plane updates unless you performed them.",
         "Run-scoped Paperclip access is in shell environment PAPERCLIP_API_URL and PAPERCLIP_API_KEY. Runtime tool connection details are in PAPERCLIP_RUNTIME_TOOLS_JSON. Never print credentials.",
@@ -411,6 +464,7 @@ export async function startAgentPoolWorker({
             ack(message.ack, message.completed)
             for (const event of active?.events ?? []) send(event)
           } else send({ type: "ready" })
+          monitorDisk()
         } else if (!connected) throw new Error("AgentPool welcome required")
         else if (message.type === "task") execute(message)
         else if (message.type === "ack") {
@@ -445,6 +499,7 @@ export async function startAgentPoolWorker({
     current.on("close", (code) => {
       connected = false
       clearTimeout(heartbeatTimer)
+      clearTimeout(diskTimer)
       if (stopped || current.renewingEntra) return
       if (code === 1008) { void stop(new Error("AgentPool execution or credentials rejected; retry explicitly")); return }
       log("AgentPool disconnected; reconnecting without replay")
@@ -458,7 +513,7 @@ export async function startAgentPoolWorker({
   return { stop, finished }
 }
 
-const WORKER_USAGE = "Usage: minicode worker --server <origin> --worker-id <id> [--repo-root <directory>] [--worker-shared <directory>] [--github-repo <owner/repo> --github-user <account>] [--output-mode normal|verbose] [--entra-user <upn> [--clippy-auth <cli.js>]]"
+const WORKER_USAGE = "Usage: minicode worker --server <origin> --worker-id <id> [--repo-root <directory>] [--workspace-mode worktree|clone] [--worker-name <short-name>] [--worker-shared <directory>] [--min-free-gib <GiB>] [--target-free-gib <GiB>] [--github-repo <owner/repo> --github-user <account>] [--output-mode normal|verbose] [--entra-user <upn> [--clippy-auth <cli.js>]]"
 
 // A server behind Entra sign-in answers an unauthenticated probe with Easy Auth's challenge.
 async function requiresEntra(server) {
@@ -473,7 +528,7 @@ async function requiresEntra(server) {
 export async function runAgentPoolWorkerCli(argv, repoRoot) {
   const options = {}
   for (let i = 0; i < argv.length; i++) {
-    if (!["--server", "--worker-id", "--entra-user", "--clippy-auth", "--output-mode", "--worker-shared", "--github-repo", "--github-user"].includes(argv[i])
+    if (!["--server", "--worker-id", "--entra-user", "--clippy-auth", "--output-mode", "--worker-shared", "--workspace-mode", "--worker-name", "--min-free-gib", "--target-free-gib", "--github-repo", "--github-user"].includes(argv[i])
       || !argv[i + 1] || argv[i + 1].startsWith("--")) throw new Error(WORKER_USAGE)
     options[argv[i].slice(2)] = argv[++i]
   }
@@ -515,6 +570,9 @@ export async function runAgentPoolWorkerCli(argv, repoRoot) {
   const worker = await startAgentPoolWorker({
     server, workerId, cwd, clientToken: state.clientToken, entraSession, outputMode,
     workerShared: options["worker-shared"],
+    workspaceMode: options["workspace-mode"], workerName: options["worker-name"],
+    minFreeGiB: options["min-free-gib"] === undefined ? undefined : Number(options["min-free-gib"]),
+    targetFreeGiB: options["target-free-gib"] === undefined ? undefined : Number(options["target-free-gib"]),
     githubRepo: options["github-repo"], githubUser: options["github-user"],
   })
   const onSignal = () => { void worker.stop() }
