@@ -3,11 +3,12 @@ import type { Db } from "@paperclipai/db";
 import { createAgentPoolSchema, createAgentPoolWorkerSchema, pairAgentPoolWorkerSchema } from "@paperclipai/shared";
 import { z } from "zod";
 import { validate } from "../middleware/validate.js";
-import { assertBoard, assertCompanyAccess } from "./authz.js";
+import { assertBoard, assertBoardOrAgent, assertCompanyAccess } from "./authz.js";
 import { logActivity } from "../services/activity-log.js";
 import { agentPoolService } from "../services/agent-pools.js";
 import { agentPoolBroker } from "../services/agent-pool-broker.js";
-import { unauthorized } from "../errors.js";
+import { unauthorized, notFound } from "../errors.js";
+import { agentPoolSkillsArchive } from "../services/agent-pool-skills.js";
 
 export function agentPoolPairingRoutes(db: Db) {
   const router = Router();
@@ -27,9 +28,27 @@ export function agentPoolPairingRoutes(db: Db) {
   return router;
 }
 
+export function agentPoolSkillsRoutes() {
+  const router = Router();
+  router.get("/agent-pool/skills/:sha256.zip", (req, res) => {
+    assertBoardOrAgent(req);
+    if (req.actor.type === "agent") {
+      if (!req.actor.companyId) throw unauthorized("Agent company is required");
+      assertCompanyAccess(req, req.actor.companyId);
+    }
+    const hash = z.string().regex(/^[a-f0-9]{64}$/).parse(req.params.sha256);
+    const archive = agentPoolSkillsArchive(hash);
+    if (!archive) throw notFound("Skill bundle expired or unavailable; retry the assignment");
+    res.setHeader("Cache-Control", "private, no-store");
+    res.type("application/zip").send(archive);
+  });
+  return router;
+}
+
 export function agentPoolRoutes(db: Db) {
   const router = Router();
   const svc = agentPoolService(db);
+  router.use(agentPoolSkillsRoutes());
   const base = "/companies/:companyId/agent-pools";
   router.use(base, (req, _res, next) => {
     assertBoard(req);

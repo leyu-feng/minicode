@@ -6,6 +6,7 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import test from "node:test"
 import { createGitHubPublisher } from "../server/github-publisher.js"
+import { paperclipPublicationTool } from "../server/paperclip-publication.js"
 
 const exec = promisify(execFile)
 
@@ -137,4 +138,113 @@ test("an interrupted worktree registration is reconciled before its temporary di
   assert.equal(f.worktrees.length, 1)
   assert.ok(!(await f.git(f.source, "worktree", "list", "--porcelain")).includes("minicode-pr-"))
   await assert.rejects(fs.stat(path.dirname(f.worktrees[0])), { code: "ENOENT" })
+})
+
+function paperclipFixture(t, { scoped = true } = {}) {
+  const issueId = "11111111-1111-4111-8111-111111111111"
+  const agentId = "engineer"
+  const receipt = { repository: "fixture-owner/project", number: 12, state: "OPEN",
+    url: "https://github.com/fixture-owner/project/pull/12", commit: "a".repeat(40),
+    branch: `minicode/${agentId}/${"a".repeat(40)}`, reused: true, worktreeRemoved: true }
+  const products = [], comments = [], calls = []
+  let publications = 0, failure = null, loseResponse = null
+  const tool = paperclipPublicationTool({
+    name: "publish_pull_request", description: "Fixture publisher", parameters: { type: "object", properties: {} },
+    async execute(input) {
+      assert.equal(input.issueId, undefined)
+      publications++
+      return { ...receipt }
+    },
+  }, { apiUrl: "http://paperclip.test", authToken: "fixture-run-key", runId: "fixture-run-id",
+    issueId: scoped ? issueId : "", agentId, companyId: "company-a", repository: receipt.repository })
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    const route = new URL(url).pathname
+    const body = options.body ? JSON.parse(options.body) : null
+    assert.equal(options.headers.Authorization, "Bearer fixture-run-key")
+    assert.equal(options.headers["X-Paperclip-Run-Id"], "fixture-run-id")
+    assert.equal(options.redirect, "error")
+    assert.ok(options.signal)
+    calls.push({ route, method: options.method, body })
+    if (failure?.(route, options)) return new Response("private error body must not be exposed", { status: 403 })
+    let result
+    if (route === `/api/issues/${issueId}`) result = { id: issueId, assigneeAgentId: agentId, companyId: "company-a" }
+    else if (route.endsWith("/work-products")) {
+      if (body) products.push({ ...body, id: "product-1", issueId })
+      result = body ? products.at(-1) : products
+    } else if (route === "/api/work-products/product-1") {
+      Object.assign(products[0], body)
+      result = products[0]
+    } else if (route.endsWith("/comments")) {
+      if (body) comments.push({ ...body, id: `comment-${comments.length}`, issueId, authorAgentId: agentId })
+      result = body ? comments.at(-1) : comments
+    } else assert.fail(`Unexpected route ${route}`)
+    if (loseResponse?.(route, options)) throw new Error("Response lost after server commit")
+    return Response.json(result)
+  })
+  return { tool, receipt, products, comments, calls, issueId,
+    input: { commit: receipt.commit, title: "CI baseline", body: "Validated" },
+    get publications() { return publications }, fail(predicate) { failure = predicate },
+    loseResponse(predicate) { loseResponse = predicate } }
+}
+
+test("PR receipts register work products and chat links once, then refresh merge state without marking the task done", async t => {
+  const f = paperclipFixture(t)
+  const first = await f.tool.execute(f.input)
+  assert.equal(first.paperclip.workProductId, "product-1")
+  assert.equal(f.products[0].reviewState, "needs_board_review")
+  assert.equal(f.products[0].metadata.agentId, "engineer")
+  assert.equal(f.products[0].metadata.branch, f.receipt.branch)
+  await f.tool.execute({ ...f.input, issueId: f.issueId })
+  assert.equal(f.products.length, 1)
+  assert.equal(f.comments.length, 1)
+  f.receipt.state = "MERGED"
+  await f.tool.execute(f.input)
+  await f.tool.execute(f.input)
+  assert.equal(f.products.length, 1)
+  assert.equal(f.products[0].status, "merged")
+  assert.equal(f.products[0].reviewState, "none")
+  assert.equal(f.comments.length, 2)
+  assert.ok(f.comments[1].body.includes("PR merge verified"))
+  assert.ok(f.calls.filter(call => call.method !== "GET").every(call => call.route !== `/api/issues/${f.issueId}`))
+  assert.equal(f.tool.registrationError, null)
+})
+
+test("partial registration failures retain the receipt and recover committed writes without duplicates", async t => {
+  const f = paperclipFixture(t)
+  f.fail((route, options) => route.endsWith("/comments") && options.method === "POST")
+  await assert.rejects(f.tool.execute(f.input), error => {
+    assert.match(error.message, /Receipt:.*pull\/12.*HTTP 403/)
+    assert.ok(!error.message.includes("private error body"))
+    return true
+  })
+  assert.equal(f.products.length, 1)
+  assert.ok(f.tool.registrationError)
+  f.fail(null)
+  await f.tool.execute(f.input)
+  assert.equal(f.products.length, 1)
+  assert.equal(f.comments.length, 1)
+  assert.equal(f.tool.registrationError, null)
+})
+
+test("publication rejects missing or foreign issue context and unauthorized Paperclip access before GitHub writes", async t => {
+  const f = paperclipFixture(t)
+  await assert.rejects(f.tool.execute({ ...f.input, issueId: "22222222-2222-4222-8222-222222222222" }), /cannot override/)
+  f.fail(() => true)
+  await assert.rejects(f.tool.execute(f.input), /HTTP 403/)
+  assert.equal(f.publications, 0)
+  assert.equal(f.products.length, 0)
+  assert.equal(f.comments.length, 0)
+})
+
+test("a lost comment response is reconciled without reposting and general Run Now requires an explicit issue", async t => {
+  const f = paperclipFixture(t, { scoped: false })
+  await assert.rejects(f.tool.execute(f.input), /assigned Paperclip issue UUID/)
+  const input = { ...f.input, issueId: f.issueId }
+  f.loseResponse((route, options) => route.endsWith("/comments") && options.method === "POST")
+  await assert.rejects(f.tool.execute(input), /GitHub PR exists.*request failed/)
+  assert.equal(f.comments.length, 1)
+  f.loseResponse(null)
+  await f.tool.execute(input)
+  assert.equal(f.products.length, 1)
+  assert.equal(f.comments.length, 1)
 })

@@ -232,6 +232,9 @@ DELETE /api/companies/{companyId}/agent-pools/{poolId}/workers/{workerId}.
 POST /api/agent-pool/pair consumes a ten-minute, single-use server token and binds
 a worker-generated client credential. WebSocket /api/agent-pool/worker requires
 that worker's client credential, including in local-trusted mode.
+GET /api/agent-pool/skills/{sha256}.zip serves the server's built-in operational
+skill snapshot to an authenticated board or company agent, using the run-scoped
+bearer credential for workers. It exposes no worker-host paths or configuration.
 
 Agent access: `operator-only` for pool/worker administration; normal agent keys
 are denied. Minicode's `worker` CLI is the worker entry point. It receives only
@@ -243,6 +246,22 @@ The source comes from an explicit `--repo-root` or the launcher's working
 directory. Worker tests pass the full `clippy-worker` submodule path explicitly.
 Server workspace paths remain context metadata, not worker filesystem bindings.
 This working-directory separation does not sandbox shell access.
+Operational skills are `available` through the authenticated bundle URL and the
+worker's `.worker/skills` discovery path; this does not grant pool administration.
+
+With operator-configured GitHub publication, the worker harness registers its
+verified receipt using the agent's run-scoped issue work-product/comment APIs.
+It checks issue ownership before GitHub access, rejects scoped issue overrides,
+and reuses records/comments on sequential retries. General Run Now calls require
+an explicit assigned issue UUID. Registration failure preserves the receipt and
+fails the run; no board credential, automatic task completion, or merge permission
+is granted. Source and fixture controls:
+[registration](../../../minicode/server/paperclip-publication.js),
+[publisher regressions](../../../minicode/test/github-publisher.test.js),
+[worker regressions](../../../minicode/test/agent-pool-worker.test.js).
+The core skill is injected and standard task/wake/auth environment is populated
+per assignment. Agents use the existing issue comments/update APIs for task-chat
+progress and completion under their normal ownership, company and run gates.
 
 Policy: board and company access for management, pool ownership for worker
 creation/revocation; company and pool binding for dispatch. Tokens are hashed at
@@ -250,6 +269,12 @@ rest, pairing is atomic and one-time, credentials are excluded from inventories
 and diagnostics. Existing heartbeat admission, assignment, approval, known-budget
 and cancellation gates remain authoritative. Offline/busy pools and process loss
 fail visibly with explicit retry; network resumption never replays the task.
+Every assignment requires `skill_bundle_v1`. The expected ZIP hash and file
+manifest are server-supplied; Minicode rehashes the cached ZIP and freshly
+extracts verified files before model execution. Invalid archives, unsafe/linked
+or tracked caches, and failed authenticated downloads block the run. The
+Git-ignored `.worker` cache is harness-owned by instruction policy, not a
+sandbox; `worker_shared` remains exclusively host-owned.
 
 Evidence: `source-only` — [routes](../../server/src/routes/agent-pools.ts),
 [credential service](../../server/src/services/agent-pools.ts),
@@ -262,6 +287,10 @@ The CLI fixture checks that its artifact and model working directory belong to
 the agent checkout and leave the source untouched. [Worker tests](../../../minicode/test/agent-pool-worker.test.js)
 also cover real shell execution, retained edits, restart, agent separation and
 explicit workspace preparation failure.
+Focused bundle fixtures additionally cover authenticated/anonymous downloads,
+deterministic archive snapshots, reference hashes, first install/cache reuse,
+changed or corrupt ZIPs, tampered extracted files, unsafe paths, tracked/linked
+caches, extraction limits, download cancellation, and capability negotiation.
 
 Verification: `not-run` for deployed human/agent access. With disposable company
 identities, assert allowed board operations, foreign-company and agent-key

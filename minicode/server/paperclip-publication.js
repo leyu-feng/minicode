@@ -1,0 +1,95 @@
+const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i
+
+export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issueId, agentId, companyId, repository }) {
+  const failures = new Map()
+  return {
+    ...tool,
+    description: `${tool.description} Automatically registers the PR in Paperclip and posts its task-chat link. Supply issueId when this run has no assigned task. Retry the same commit if registration fails; do not publish a different commit to recover.`,
+    parameters: { ...tool.parameters, properties: { ...tool.parameters.properties,
+      issueId: { type: "string", description: "Assigned Paperclip issue UUID; required only for a general Run Now without task context." },
+    } },
+    get registrationError() { return failures.values().next().value ?? null },
+    async execute(input, options = {}) {
+      const target = input?.issueId ?? issueId
+      const key = `${target}:${input?.commit}`
+      let receipt
+      try {
+        if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("PR tool arguments must be an object")
+        if (!UUID.test(target ?? "") || (issueId && target !== issueId)) {
+          throw new Error("PR publication requires the assigned Paperclip issue UUID; task-scoped runs cannot override it")
+        }
+        if (!authToken || !runId) throw new Error("PR registration requires run-scoped Paperclip credentials")
+        const api = async (route, method = "GET", body) => {
+          let response
+          try {
+            response = await fetch(new URL(`/api${route}`, apiUrl), {
+              method, redirect: "error",
+              signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000),
+              headers: { Authorization: `Bearer ${authToken}`, "X-Paperclip-Run-Id": runId,
+                ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+              ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            })
+          } catch (cause) { throw new Error(`Paperclip ${method} ${route} request failed`, { cause }) }
+          if (!response.ok) throw new Error(`Paperclip ${method} ${route} returned HTTP ${response.status}`)
+          return response.json()
+        }
+        const issue = await api(`/issues/${target}`)
+        if (issue.id !== target || issue.assigneeAgentId !== agentId || (companyId && issue.companyId !== companyId)) {
+          throw new Error("PR publication target must be assigned to this agent in this company")
+        }
+        const { issueId: _issueId, ...publicationInput } = input
+        receipt = await tool.execute(publicationInput, options)
+        if (receipt.repository !== repository || !Number.isSafeInteger(receipt.number) || receipt.number < 1
+          || receipt.url !== `https://github.com/${repository}/pull/${receipt.number}`
+          || !["OPEN", "CLOSED", "MERGED"].includes(receipt.state)
+          || receipt.commit !== publicationInput.commit
+          || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(receipt.commit ?? "")
+          || receipt.branch !== `minicode/${agentId}/${receipt.commit}`) {
+          throw new Error("Harness returned an invalid PR receipt")
+        }
+        const products = await api(`/issues/${target}/work-products`)
+        if (!Array.isArray(products)) throw new Error("Paperclip returned an invalid work-product list")
+        const existing = products.find(product => product.type === "pull_request"
+          && product.provider === "github" && product.url?.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase() === receipt.url.toLowerCase())
+        const status = receipt.state === "OPEN"
+          ? (["approved", "changes_requested", "draft"].includes(existing?.status) ? existing.status : "ready_for_review")
+          : receipt.state.toLowerCase()
+        const payload = {
+          status, reviewState: receipt.state === "OPEN" ? existing?.reviewState ?? "needs_board_review" : "none",
+          metadata: { ...existing?.metadata, repository, number: receipt.number, branch: receipt.branch,
+            commit: receipt.commit, state: receipt.state.toLowerCase(), agentId },
+        }
+        const product = existing
+          ? await api(`/work-products/${existing.id}`, "PATCH", payload)
+          : await api(`/issues/${target}/work-products`, "POST", {
+            ...payload, type: "pull_request", provider: "github", externalId: `${repository}#${receipt.number}`,
+            title: publicationInput.title, url: receipt.url, isPrimary: true,
+          })
+        if (!product?.id || product.issueId !== target || product.url !== (existing?.url ?? receipt.url)
+          || product.status !== status || product.metadata?.commit !== receipt.commit) {
+          throw new Error("Paperclip did not confirm the saved PR work product")
+        }
+        const comments = await api(`/issues/${target}/comments`)
+        if (!Array.isArray(comments)) throw new Error("Paperclip returned an invalid comment list")
+        const marker = `<!-- minicode-pr:${repository.toLowerCase()}#${receipt.number}:${receipt.state} -->`
+        let comment = comments.find(entry => entry.authorAgentId === agentId && entry.body?.includes(marker))
+        if (!comment) {
+          comment = await api(`/issues/${target}/comments`, "POST", {
+            body: `## Pull request ${receipt.state.toLowerCase()}\n\n[${repository}#${receipt.number}](${receipt.url})\n\nCommit: \`${receipt.commit}\`\nBranch: \`${receipt.branch}\`\n\n${receipt.state === "OPEN" ? "Awaiting PR review and merge. Publication is not task completion." : receipt.state === "MERGED" ? "PR merge verified. Check the task acceptance and approval gates before completing the task." : "PR is closed without merge; task completion is not implied."}\n\n${marker}`,
+          })
+        }
+        if (!comment?.id || comment.issueId !== target || comment.authorAgentId !== agentId || !comment.body?.includes(marker)) {
+          throw new Error("Paperclip did not confirm the saved PR task-chat link")
+        }
+        failures.delete(key)
+        return { ...receipt, paperclip: { issueId: target, workProductId: product.id, commentId: comment.id } }
+      } catch (cause) {
+        const message = receipt
+          ? `GitHub PR exists, but Paperclip registration is incomplete. Retry the same commit to reconcile. Receipt: ${JSON.stringify(receipt)}. ${cause.message}`
+          : `PR publication/registration failed: ${cause.message}`
+        if (receipt) failures.set(key, message)
+        throw new Error(message, { cause })
+      }
+    },
+  }
+}

@@ -209,8 +209,8 @@ including through directory links. Workers must not follow links outside either
 permitted scope.
 
 The shared path is included in each assignment's instructions and exposed to
-shell tools as `WORKER_SHARED`. Operators can place shared configuration,
-reference files, or skills there without committing them to a repository.
+shell tools as `WORKER_SHARED`. Operators can place shared configuration
+or reference files there without committing them to a repository.
 For example, read the instance config with
 `Get-Content (Join-Path $env:WORKER_SHARED '.config\stock-trading-assistant.jsonc')`.
 Shared files are not automatically loaded as instructions or copied into agent
@@ -248,9 +248,36 @@ delivered inline with every new assignment and applied to the model's system
 instructions; no repository commit, worker file, or restart is required for
 content edits. Built-in worker rules take precedence over agent-specific
 instructions, which take precedence over repository guidance. Active runs and
-network reconnects retain their original instruction snapshot. Supporting bundle
-files are not transferred. Restart older workers once to load inline-instruction
-support; incompatible workers cannot receive assignments requiring it.
+network reconnects retain their original instruction snapshot. Supporting files
+from agent-specific instruction bundles are not transferred.
+
+Paperclip's bundled operational skills are delivered separately as an
+authenticated ZIP, **never installed in host-owned `worker_shared`**. On the first
+assignment in an agent checkout, Minicode downloads it into `.worker\skills.zip`
+and installs the files under `.worker\skills`. The harness adds `/.worker/` to the
+checkout's local `.git\info\exclude`, without changing the project's `.gitignore`.
+Tracked cache files, links, unsafe paths, malformed archives, and integrity
+failures block model execution.
+
+Each new assignment carries Paperclip's expected archive SHA-256 and file
+manifest. Minicode rehashes the cached ZIP every time, redownloads missing,
+changed, or corrupt archives, validates all files, and re-extracts into a fresh
+directory. Edits or extra files in extracted instructions cannot survive the
+next assignment. Reconnects retain their existing assignment and do not reinstall.
+The reserved `.worker` directory is harness-owned and read-only to the model by
+instruction policy, not OS-enforced isolation.
+
+The verified `paperclip` skill is loaded into the model's instructions; other
+bundled skills and their references/scripts are discoverable at the same root.
+Standard `PAPERCLIP_*` identity, task, wake, and approval variables are populated
+per run, with credentials exposed only to tools. On a general Run Now, the
+skill discovers the agent's assignments. Agents post task-chat progress through
+the comments API and complete eligible merged-PR tasks through the issue-update
+API, including the run audit header and verifying the response. Successful model
+output alone does not write comments or finish tasks.
+
+Restart older workers once to advertise `skill_bundle_v1` and inline-instruction
+support; incompatible workers cannot receive assignments from an updated server.
 
 Worker logging defaults to **normal**: raw shell/tool output still goes to the
 model, but is not streamed to Clippy's run log or counted against the public
@@ -295,6 +322,30 @@ and PR instead of overwriting a branch or creating a duplicate PR. Closed or
 merged PRs are returned with their actual state rather than reopened.
 An uncertain network outcome must be retried with the same commit. No automatic
 merge or deployment is performed. Without these flags the tool is unavailable.
+
+For AgentPool runs, publication also creates or updates the task's GitHub
+`pull_request` work product and posts a clickable task-chat link using the
+run-scoped Paperclip credential and audit header. The existing Paperclip **Pull
+requests** section displays the saved record; no separate dashboard is needed.
+The record includes repository, PR number, branch, commit, agent, and current
+GitHub state. Open PRs request review; merged/closed receipts do not complete
+the task or bypass its approval gates.
+
+A task-scoped run cannot override its issue. For a general Run Now, discover
+your assigned task using the bundled skill and supply its UUID as the tool's
+optional `issueId` argument. The harness verifies ownership before accessing
+GitHub. Reconcile a known PR with its original commit to refresh its state
+without another push or duplicate PR. The harness reuses existing work products
+and posts at most one harness comment per agent/PR/state across sequential
+retries, including a lost write response. It does not provide cross-run atomic
+deduplication against concurrent independent publishers.
+
+Registration errors retain the GitHub receipt and explicitly require retrying
+the same commit. An unresolved registration error fails the run even if the
+model subsequently claims success. Work-product/comment writes are not atomic:
+retry reconciliation repairs a partial registration without undoing a PR.
+There is no automatic merge watcher; follow-up runs must check acceptance and
+approval gates and explicitly complete the task through the Paperclip API.
 
 Worker rules prohibit direct shell pushes and PR creation; GitHub token
 environment variables are removed from model tool environments. This is a

@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const AGENT_POOL_PROTOCOL_VERSION = 1;
 export const AGENT_POOL_INLINE_INSTRUCTIONS = "inline_instructions_v1";
+export const AGENT_POOL_SKILL_BUNDLE = "skill_bundle_v1";
 
 export const agentPoolHelloSchema = z.object({
   type: z.literal("hello"),
@@ -21,12 +22,26 @@ export const agentPoolInstructionsSchema = z.object({
 
 export type AgentPoolInstructions = z.infer<typeof agentPoolInstructionsSchema>;
 
+export const agentPoolSkillsSchema = z.object({
+  version: z.literal(1),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  url: z.string().regex(/^\/api\/agent-pool\/skills\/[a-f0-9]{64}\.zip$/),
+  files: z.array(z.object({
+    path: z.string().min(1).max(240).refine(value =>
+      !/[\\:\x00-\x1f]/.test(value) && value.split("/").every(part => part && part !== "." && part !== "..")),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  })).min(1).max(256),
+});
+
+export type AgentPoolSkills = z.infer<typeof agentPoolSkillsSchema>;
+
 export const agentPoolTaskSchema = z.object({
   type: z.literal("task"),
   protocolVersion: z.literal(AGENT_POOL_PROTOCOL_VERSION),
   runId: z.string(),
-  agent: z.object({ id: z.string(), name: z.string() }),
+  agent: z.object({ id: z.string(), name: z.string(), companyId: z.string().min(1) }),
   instructions: agentPoolInstructionsSchema.nullable(),
+  skills: agentPoolSkillsSchema,
   context: z.record(z.string(), z.unknown()),
   continuation: z.unknown().nullable(),
   runtimeTools: z.unknown().nullable(),
