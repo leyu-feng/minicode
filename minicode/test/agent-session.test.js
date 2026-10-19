@@ -142,3 +142,86 @@ test("worker instructions reach the model and a reported blocker produces a fail
     session.dispose()
   }
 })
+
+test("named harness tools reach the model, execute outside the shell, and return structured receipts", async t => {
+  const calls = [], requests = []
+  const actions = [
+    { type: "tool", name: "publish_pull_request", arguments: { commit: "fixture" } },
+    { type: "final", message: "PR ready for review" },
+  ]
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] }),
+      { status: 200, headers: { "Content-Type": "application/json" } })
+  }
+  t.mock.method(childProcess, "spawn", assert.fail)
+  const session = new AgentSession({
+    id: "publisher", cwd: process.cwd(), tools: [{
+      name: "publish_pull_request", description: "Publish through the harness", parameters: { type: "object" },
+      async execute(args, { signal }) { calls.push(args); assert.equal(signal.aborted, false); return { url: "https://github.com/fixture/repo/pull/1" } },
+    }],
+  })
+  session.config = { api: "chat-completions", endpoint: "https://example.test/v1/chat/completions", apiKey: "fixture", model: "fixture" }
+  try {
+    assert.equal((await session.write("Publish the validated commit")).exitCode, 0)
+    assert.deepEqual(calls, [{ commit: "fixture" }])
+    assert.ok(requests[0].messages[0].content.includes('"name":"publish_pull_request"'))
+    assert.match(requests[1].messages.at(-1).content, /ok: true.*\nresult:.*https:\/\/github.com\/fixture\/repo\/pull\/1/)
+  } finally { session.dispose() }
+})
+
+test("disabled or ambiguous harness tools return explicit errors without running shell commands", async t => {
+  const requests = []
+  const actions = [
+    { type: "tool", name: "disabled", arguments: {} },
+    { type: "tool", name: "enabled", arguments: {}, command: "must not run" },
+    { type: "final", message: "Blocked", error: "Tool unavailable" },
+  ]
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] }),
+      { status: 200, headers: { "Content-Type": "application/json" } })
+  }
+  t.mock.method(childProcess, "spawn", assert.fail)
+  const session = new AgentSession({ id: "disabled", cwd: process.cwd(), tools: [
+    { name: "enabled", description: "Enabled", execute: assert.fail },
+  ] })
+  session.config = { api: "chat-completions", endpoint: "https://example.test/v1/chat/completions", apiKey: "fixture", model: "fixture" }
+  try {
+    assert.equal((await session.write("Publish")).exitCode, 1)
+    assert.match(requests[1].messages.at(-1).content, /not enabled/)
+    assert.match(requests[2].messages.at(-1).content, /cannot include a shell command/)
+  } finally { session.dispose() }
+})
+
+test("interrupting a harness tool forwards cancellation and waits for its cleanup", async t => {
+  let ready, release, cleaned = false
+  const started = new Promise(resolve => { ready = resolve })
+  const cleanup = new Promise(resolve => { release = resolve })
+  globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content:
+    JSON.stringify({ type: "tool", name: "publish_pull_request", arguments: {} }),
+  } }] }), { status: 200, headers: { "Content-Type": "application/json" } })
+  t.mock.method(childProcess, "spawn", assert.fail)
+  const session = new AgentSession({ id: "cancel-tool", cwd: process.cwd(), tools: [{
+    name: "publish_pull_request", description: "Publish", async execute(_args, { signal }) {
+      ready()
+      await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }))
+      await cleanup
+      cleaned = true
+      signal.throwIfAborted()
+    },
+  }] })
+  session.config = { api: "chat-completions", endpoint: "https://example.test/v1/chat/completions", apiKey: "fixture", model: "fixture" }
+  try {
+    const operation = session.write("Publish")
+    await started
+    session.interrupt()
+    let settled = false
+    operation.then(() => { settled = true })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(settled, false)
+    release()
+    assert.equal((await operation).exitCode, 130)
+    assert.equal(cleaned, true)
+  } finally { release(); session.dispose() }
+})

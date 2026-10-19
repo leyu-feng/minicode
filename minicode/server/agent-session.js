@@ -290,12 +290,20 @@ export function callModelOnce(config, messages) {
  * for the lifetime of the session.
  */
 export class AgentSession extends EventEmitter {
-  constructor({ id, cwd, env, instructions = "" }) {
+  constructor({ id, cwd, env, instructions = "", tools = [] }) {
     super()
     this.id = id
     this.kind = "agent"
     this.cwd = cwd
     this.env = env
+    this.tools = new Map()
+    for (const tool of tools) {
+      if (!/^[a-z][a-z0-9_]*$/.test(tool.name) || this.tools.has(tool.name)
+        || typeof tool.description !== "string" || typeof tool.execute !== "function") {
+        throw new Error("Invalid or duplicate harness tool")
+      }
+      this.tools.set(tool.name, tool)
+    }
     this.busy = false
     this.closed = false
     this.messages = []
@@ -313,6 +321,10 @@ export class AgentSession extends EventEmitter {
       "Do not claim you cannot access files when the tools below can read them.",
       "Respond ONLY with one JSON object, one of:",
       '{"type":"tool","command":"<shell command>","reason":"<short reason>"}',
+      ...(tools.length ? [
+        '{"type":"tool","name":"<harness tool name>","arguments":{},"reason":"<short reason>"}',
+        `Available harness tools (use their exact argument schemas): ${JSON.stringify(tools.map(({ name, description, parameters }) => ({ name, description, parameters })))}`,
+      ] : []),
       '{"type":"write","path":"<file path>","content":"<full new file contents>","reason":"<short reason>"}',
       '{"type":"edit","path":"<file path>","find":"<exact text to replace>","replace":"<new text>","reason":"<short reason>"}',
       '{"type":"final","message":"<final user-facing response>"}',
@@ -450,6 +462,38 @@ export class AgentSession extends EventEmitter {
             result.exitCode = 1
             result.error = "Stopped after max tool turns"
             this.#emitOutput("\u001b[31mStopped after max tool turns.\u001b[0m\r\n", "stderr")
+          }
+          continue
+        }
+
+        if (action.type === "tool" && Object.hasOwn(action, "name")) {
+          const label = `harness tool ${action.name}`
+          this.#emitOutput(`# ${label}\r\n`)
+          let summary, ok = true
+          try {
+            const tool = this.tools.get(action.name)
+            if (!tool) throw new Error(`Harness tool is not enabled: ${action.name}`)
+            if (Object.hasOwn(action, "command") || !action.arguments
+              || typeof action.arguments !== "object" || Array.isArray(action.arguments)) {
+              throw new Error("Harness tools require an arguments object and cannot include a shell command")
+            }
+            summary = JSON.stringify(await tool.execute(action.arguments, { signal }))
+            this.#throwIfInactive(run)
+            this.#emitOutput(`${summary}\r\n`, "command")
+            this.#emitOutput(`# ${label} completed\r\n`)
+          } catch (error) {
+            this.#throwIfInactive(run)
+            ok = false
+            summary = error.message
+            this.#emitOutput(`${summary}\r\n`, "stderr")
+          }
+          this.messages.push(
+            { role: "assistant", content: raw },
+            { role: "user", content: ["TOOL_RESULT", `action: ${label}`, `ok: ${ok}`, `result: ${truncate(summary)}`].join("\n") },
+          )
+          if (turn === MAX_TOOL_TURNS - 1) {
+            result.exitCode = 1
+            result.error = "Stopped after max tool turns"
           }
           continue
         }

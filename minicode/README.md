@@ -257,7 +257,49 @@ model, but is not streamed to Clippy's run log or counted against the public
 output limit. Command progress, exit status, errors, and the model's response
 remain visible. To retain the previous full-output behavior, start with
 `--output-mode verbose`; `--output-mode normal` is the explicit default.
+Both worker modes strip ANSI styling from public logs. Tool environments set
+`NO_COLOR=1` and `CLICOLOR=0` and remove inherited forced-color overrides;
+worker instructions also request plain-text output. Model tool results are
+unchanged by the public-log filter.
 Interactive CLI and web logging are unchanged.
+
+#### Harness-owned GitHub publication
+
+Enable publication explicitly with both worker flags:
+
+```powershell
+minicode worker --server http://localhost:3100 --worker-id <id> --repo-root <source> --github-repo owner/repo --github-user account
+```
+
+The repository must match the source checkout's GitHub `origin`. The named account
+must already be signed in through `gh`. No model-supplied repository, remote,
+branch, credential, merge, or deployment operation is accepted.
+The model commits its selected changes in its persistent checkout, then calls:
+
+```json
+{"type":"tool","name":"publish_pull_request","arguments":{"commit":"<full commit hash>","title":"CI baseline","body":"Changes, validation evidence, and approval requirements."}}
+```
+
+The harness retrieves the selected GitHub credential privately, imports the
+committed revision into the source Git object database without changing its
+checkout or branches, and creates a temporary detached, metadata-only worktree.
+It pushes a deterministic `minicode/<agent-id>/<commit>` branch using a
+create-only lease and opens a PR against the GitHub default branch. The worktree
+is removed on success, failure, or cancellation; cleanup failures are reported.
+The persistent agent checkout, uncommitted files, and local commits are retained.
+Only the selected committed revision is published, never untracked files.
+
+The returned receipt includes the PR URL, number, state, commit, branch, and
+cleanup status. Retrying the same agent/commit reconciles the existing branch
+and PR instead of overwriting a branch or creating a duplicate PR. Closed or
+merged PRs are returned with their actual state rather than reopened.
+An uncertain network outcome must be retried with the same commit. No automatic
+merge or deployment is performed. Without these flags the tool is unavailable.
+
+Worker rules prohibit direct shell pushes and PR creation; GitHub token
+environment variables are removed from model tool environments. This is a
+credential-handling boundary, **not an OS sandbox**: shell commands still run as
+the worker account, which may have other locally available credentials.
 
 Other worker implementations can use the same versioned, capability-negotiated
 [AgentPool protocol](../clippy/doc/agent-pool-protocol.md), without depending on
