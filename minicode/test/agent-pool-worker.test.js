@@ -7,6 +7,8 @@ import { createHash, randomUUID } from "node:crypto"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import test from "node:test"
+import { createServer } from "node:http"
+import { zipSync } from "fflate"
 import { WebSocketServer } from "ws"
 import { agentPoolServerUrl, loadWorkerCredential, startAgentPoolWorker } from "../server/agent-pool-worker.js"
 import { AgentSession } from "../server/agent-session.js"
@@ -27,7 +29,21 @@ function inlineInstructions(content, revisionId = "revision-1") {
     contentSha256: createHash("sha256").update(content).digest("hex") }
 }
 
+function skillBundle(contents = {
+  "paperclip/SKILL.md": "# Paperclip skill\nPost progress with the issue comments API and verify task completion.",
+  "paperclip/references/api-reference.md": "Include X-Paperclip-Run-Id on modifying requests.",
+  "paperclip/scripts/report.js": "console.log('bundled helper')",
+}) {
+  const bytes = Object.fromEntries(Object.entries(contents).map(([name, text]) => [name, Buffer.from(text)]))
+  const archive = Buffer.from(zipSync(bytes))
+  const hash = data => createHash("sha256").update(data).digest("hex")
+  const sha256 = hash(archive)
+  return { archive, downloads: [], skills: { version: 1, sha256, url: `/api/agent-pool/skills/${sha256}.zip`,
+    files: Object.entries(bytes).map(([name, data]) => ({ path: name, sha256: hash(data) })) } }
+}
+
 async function harness(t, factory, workerOptions = {}) {
+  const { bundle, ...configuredOptions } = workerOptions
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-workspace-test-"))
   const source = path.join(directory, "source repo")
   const workspaceRoot = path.join(directory, "workspaces")
@@ -37,8 +53,16 @@ async function harness(t, factory, workerOptions = {}) {
   await fs.writeFile(path.join(source, "tracked.txt"), "committed")
   await git("add", "tracked.txt")
   await git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "commit", "-m", "Fixture")
-  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 })
-  await once(server, "listening")
+  const http = createServer((req, res) => {
+    if (bundle && req.url === bundle.skills.url) {
+      bundle.downloads.push(req.headers)
+      if (bundle.hold) return
+      res.writeHead(200, { "Content-Type": "application/zip" }).end(bundle.archive)
+    } else res.writeHead(404).end()
+  })
+  const server = new WebSocketServer({ server: http })
+  http.listen(0, "127.0.0.1")
+  await once(http, "listening")
   const connections = []
   const serverInstanceId = randomUUID()
   server.on("connection", (socket) => {
@@ -50,13 +74,14 @@ async function harness(t, factory, workerOptions = {}) {
     server: `http://127.0.0.1:${server.address().port}`, workerId: randomUUID(),
     clientToken: "a".repeat(64), cwd: source, workspaceRoot, sessionFactory: factory,
     reconnectMs: 10, log: () => {},
-    ...workerOptions,
+    ...configuredOptions,
   }
   let worker = await startAgentPoolWorker(options)
   t.after(async () => {
     await worker.stop()
     for (const socket of server.clients) socket.terminate()
     await new Promise((resolve) => server.close(resolve))
+    await new Promise((resolve) => http.close(resolve))
     await fs.rm(directory, { recursive: true, force: true })
   })
   async function welcome(index, ack = 0, completed = false) {
@@ -75,6 +100,45 @@ async function harness(t, factory, workerOptions = {}) {
   }
 }
 
+test("an unresolved PR registration failure fails the run even if the model claims success", async t => {
+  const issueId = "11111111-1111-4111-8111-111111111111"
+  const commit = "a".repeat(40)
+  let published = false
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    const route = new URL(url).pathname
+    if (route === `/api/issues/${issueId}`) return Response.json({ id: issueId, assigneeAgentId: agent.id })
+    assert.ok(route.endsWith("/work-products"))
+    return options.method === "GET" ? Response.json([]) : new Response("", { status: 403 })
+  })
+  class Session extends EventEmitter {
+    constructor(options) { super(); this.tool = options.tools[0] }
+    async write() {
+      await assert.rejects(this.tool.execute({ commit, title: "CI", body: "Validated" }), /HTTP 403/)
+      return { exitCode: 0 }
+    }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, options => new Session(options), {
+    githubRepo: "fixture-owner/repo", githubUser: "fixture-owner",
+    async publisherFactory() {
+      return () => ({ name: "publish_pull_request", description: "Fixture", parameters: { type: "object", properties: {} },
+        async execute() {
+          published = true
+          return { repository: "fixture-owner/repo", number: 1, url: "https://github.com/fixture-owner/repo/pull/1",
+            commit, branch: `minicode/${agent.id}/${commit}`, state: "OPEN", worktreeRemoved: true }
+        } })
+    },
+  })
+  const peer = await fixture.welcome(0)
+  peer.send({ type: "task", runId: "registration-failure", agent, authToken: "fixture-key", context: { issueId } })
+  await waitUntil(() => peer.messages.some(message => message.type === "result"))
+  const result = peer.messages.find(message => message.type === "result")
+  assert.equal(published, true)
+  assert.equal(result.exitCode, 1)
+  assert.match(result.error, /GitHub PR exists.*Receipt:.*HTTP 403/)
+})
+
 test("inline instructions are agent-scoped snapshots applied without workspace instruction files", async (t) => {
   const sessions = []
   class Session extends EventEmitter {
@@ -84,7 +148,7 @@ test("inline instructions are agent-scoped snapshots applied without workspace i
   }
   const fixture = await harness(t, (options) => { sessions.push(options); return new Session() })
   const peer = await fixture.welcome(0)
-  assert.deepEqual(peer.messages.find(message => message.type === "hello").capabilities, ["inline_instructions_v1"])
+  assert.deepEqual(peer.messages.find(message => message.type === "hello").capabilities, ["inline_instructions_v1", "skill_bundle_v1"])
   for (const [index, content] of ["Keep reports concise.", "Updated instructions: include evidence."].entries()) {
     const runId = `inline-${index}`
     peer.send({ type: "task", protocolVersion: 1, runId, agent, context: {}, instructions: inlineInstructions(content, `revision-${index}`) })
@@ -99,6 +163,133 @@ test("inline instructions are agent-scoped snapshots applied without workspace i
   assert.ok(!sessions[0].instructions.includes("Updated instructions:"))
   assert.ok(!sessions[1].instructions.includes("Keep reports concise."))
   assert.ok(!peer.messages.some(message => message.data?.includes("Keep reports concise.")))
+})
+
+test("bundled skills download once, repair extracted files each assignment, and refresh changed archives", async (t) => {
+  const bundle = skillBundle()
+  const sessions = []
+  class Session extends EventEmitter {
+    async write() { return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, options => { sessions.push(options); return new Session() }, { bundle })
+  const peer = await fixture.welcome(0)
+  async function assign(index) {
+    const runId = `skills-${index}`
+    peer.send({ type: "task", runId, agent: { ...agent, companyId: "company-a" }, skills: bundle.skills,
+      authToken: "run-credential", context: { issueId: "task-a", wakeReason: "issue_assigned", commentId: "comment-a" } })
+    await waitUntil(() => peer.messages.some(message => message.type === "result" && message.runId === runId))
+    const result = peer.messages.find(message => message.type === "result" && message.runId === runId)
+    assert.equal(result.exitCode, 0, result.error)
+    peer.send({ type: "ack", runId, seq: result.seq, completed: true })
+    await waitUntil(() => peer.messages.filter(message => message.type === "ready").length === index + 2)
+  }
+  await assign(0)
+  const workspace = sessions[0].cwd
+  const root = path.join(workspace, ".worker", "skills")
+  assert.equal(bundle.downloads[0].authorization, "Bearer run-credential")
+  assert.equal(bundle.downloads[0]["x-paperclip-run-id"], "skills-0")
+  assert.ok(sessions[0].instructions.includes("Post progress with the issue comments API"))
+  assert.equal(sessions[0].env.PAPERCLIP_COMPANY_ID, "company-a")
+  assert.equal(sessions[0].env.PAPERCLIP_TASK_ID, "task-a")
+  assert.equal(sessions[0].env.PAPERCLIP_WAKE_REASON, "issue_assigned")
+  assert.equal(sessions[0].env.PAPERCLIP_WAKE_COMMENT_ID, "comment-a")
+  assert.ok(!sessions[0].instructions.includes("run-credential"))
+  await fs.writeFile(path.join(root, "paperclip", "references", "api-reference.md"), "tampered")
+  await fs.writeFile(path.join(root, "unexpected.md"), "unexpected instructions")
+  await assign(1)
+  assert.equal(bundle.downloads.length, 1)
+  assert.match(await fs.readFile(path.join(root, "paperclip", "references", "api-reference.md"), "utf8"), /X-Paperclip-Run-Id/)
+  await assert.rejects(fs.stat(path.join(root, "unexpected.md")), { code: "ENOENT" })
+  await fs.writeFile(path.join(workspace, ".worker", "skills.zip"), "corrupt cached ZIP")
+  await assign(2)
+  assert.equal(bundle.downloads.length, 2)
+  const next = skillBundle({ "paperclip/SKILL.md": "# Updated Paperclip instructions" })
+  bundle.skills = next.skills
+  bundle.archive = next.archive
+  await assign(3)
+  assert.equal(bundle.downloads.length, 3)
+  assert.ok(sessions[3].instructions.includes("# Updated Paperclip instructions"))
+  await assert.rejects(fs.stat(path.join(root, "paperclip", "scripts")), { code: "ENOENT" })
+  const status = await execFileAsync("git", ["status", "--porcelain"], { cwd: workspace, windowsHide: true })
+  assert.equal(status.stdout, "")
+  await assert.rejects(fs.stat(path.join(fixture.source, ".worker")), { code: "ENOENT" })
+})
+
+test("invalid skill manifests, ZIP hashes, and archive contents fail before starting the model", async (t) => {
+  const bundle = skillBundle()
+  let sessions = 0
+  const fixture = await harness(t, () => { sessions++; throw new Error("Must not create a model session") }, { bundle })
+  const peer = await fixture.welcome(0)
+  const original = structuredClone(bundle.skills)
+  const cases = [
+    { skills: { ...original, url: "https://other.example/steal-token" }, archive: bundle.archive, error: /manifest/ },
+    { skills: original, archive: Buffer.from("corrupted download"), error: /SHA-256 mismatch/ },
+    { skills: { ...original, files: [{ path: "../escape", sha256: "a".repeat(64) }] }, archive: bundle.archive, error: /Invalid.*file/ },
+    { skills: { ...original, files: [original.files[0], { ...original.files[0], path: "PAPERCLIP/skill.md" }] }, archive: bundle.archive, error: /duplicate/ },
+    { skills: { ...original, files: [original.files[0]] }, archive: bundle.archive, error: /contents.*manifest/ },
+  ]
+  const oversized = skillBundle({ "paperclip/SKILL.md": Buffer.alloc(9 * 1024 * 1024) })
+  cases.push({ ...oversized, error: /extraction limits/ })
+  for (const [index, entry] of cases.entries()) {
+    bundle.skills = entry.skills
+    bundle.archive = entry.archive
+    const runId = `bad-skills-${index}`
+    peer.send({ type: "task", runId, agent, context: {}, authToken: "run-credential", skills: entry.skills })
+    await waitUntil(() => peer.messages.some(message => message.type === "result" && message.runId === runId))
+    const result = peer.messages.find(message => message.type === "result" && message.runId === runId)
+    assert.equal(result.exitCode, 1)
+    assert.match(result.error, entry.error)
+    peer.send({ type: "ack", runId, seq: result.seq, completed: true })
+    await waitUntil(() => peer.messages.filter(message => message.type === "ready").length === index + 2)
+  }
+  assert.equal(sessions, 0)
+  await assert.rejects(fs.stat(path.join(fixture.workspaceRoot, "escape")), { code: "ENOENT" })
+})
+
+test("tracked or linked worker skill caches are rejected without changing host-owned files", async (t) => {
+  for (const variant of ["tracked", "linked"]) {
+    const bundle = skillBundle()
+    let sessions = 0
+    const fixture = await harness(t, () => { sessions++; throw new Error("Must not start model") }, { bundle })
+    if (variant === "tracked") {
+      await fs.mkdir(path.join(fixture.source, ".worker"))
+      await fs.writeFile(path.join(fixture.source, ".worker", "owned.txt"), "Preserve project files")
+      await fixture.git("add", ".worker")
+      await fixture.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+        "-c", "commit.gpgsign=false", "commit", "-m", "Existing reserved directory")
+    } else {
+      await fs.mkdir(fixture.workspaceRoot, { recursive: true })
+      const workspace = path.join(fixture.workspaceRoot, agent.id)
+      await execFileAsync("git", ["clone", fixture.source, workspace], { windowsHide: true })
+      await fs.symlink(fixture.source, path.join(workspace, ".worker"), "junction")
+    }
+    const peer = await fixture.welcome(0)
+    peer.send({ type: "task", runId: variant, agent, context: {}, authToken: "run-key", skills: bundle.skills })
+    await waitUntil(() => peer.messages.some(message => message.type === "result"))
+    const result = peer.messages.find(message => message.type === "result")
+    assert.equal(result.exitCode, 1)
+    assert.match(result.error, variant === "tracked" ? /tracked files/ : /links/)
+    assert.equal(sessions, 0)
+    assert.equal(bundle.downloads.length, 0)
+    assert.equal(await fs.readFile(path.join(fixture.source, "tracked.txt"), "utf8"), "committed")
+    assert.equal(await fixture.git("status", "--porcelain"), "")
+  }
+})
+
+test("cancellation aborts a pending skill download before creating a model session", async (t) => {
+  const bundle = skillBundle()
+  bundle.hold = true
+  let sessions = 0
+  const fixture = await harness(t, () => { sessions++; throw new Error("Must not start model") }, { bundle })
+  const peer = await fixture.welcome(0)
+  peer.send({ type: "task", runId: "cancel-download", agent, context: {}, authToken: "run-key", skills: bundle.skills })
+  await waitUntil(() => bundle.downloads.length === 1)
+  peer.send({ type: "cancel", runId: "cancel-download" })
+  await waitUntil(() => peer.messages.some(message => message.type === "result"))
+  assert.equal(peer.messages.find(message => message.type === "result").exitCode, 130)
+  assert.equal(sessions, 0)
 })
 
 test("malformed inline instructions fail before workspace or model work starts", async (t) => {
@@ -422,7 +613,25 @@ test("real model tools use committed files in an independent workspace, not the 
     { type: "final", message: "Done" },
   ]
   const requests = []
+  const issueId = "11111111-1111-4111-8111-111111111111"
+  const products = [], comments = []
   t.mock.method(globalThis, "fetch", async (_url, init) => {
+    const route = new URL(_url).pathname
+    if (route.startsWith("/api/")) {
+      assert.equal(init.headers.Authorization, "Bearer fixture-run-key")
+      assert.equal(init.headers["X-Paperclip-Run-Id"], "real-tools")
+      const body = init.body ? JSON.parse(init.body) : null
+      let result
+      if (route === `/api/issues/${issueId}`) result = { id: issueId, assigneeAgentId: agent.id }
+      else if (route.endsWith("/work-products")) {
+        if (body) products.push({ ...body, id: "product-1", issueId })
+        result = body ? products.at(-1) : products
+      } else if (route.endsWith("/comments")) {
+        if (body) comments.push({ ...body, id: "comment-1", issueId, authorAgentId: agent.id })
+        result = body ? comments.at(-1) : comments
+      } else assert.fail(`Unexpected Paperclip route ${route}`)
+      return Response.json(result)
+    }
     requests.push(JSON.parse(init.body))
     return new Response(JSON.stringify({
       choices: [{ message: { content: JSON.stringify(actions.shift()) } }],
@@ -439,7 +648,8 @@ test("real model tools use committed files in an independent workspace, not the 
         async execute(args, { signal }) {
           publication = { workspace, agentId, args }
           assert.equal(signal.aborted, false)
-          return { url: "https://github.com/fixture-owner/repo/pull/1", worktreeRemoved: true }
+          return { repository: "fixture-owner/repo", number: 1, state: "OPEN", commit: args.commit,
+            branch: `minicode/${agentId}/${args.commit}`, url: "https://github.com/fixture-owner/repo/pull/1", worktreeRemoved: true }
         },
       })
     },
@@ -458,12 +668,16 @@ test("real model tools use committed files in an independent workspace, not the 
   const sourceStatus = await fixture.git("status", "--porcelain")
   const peer = await fixture.welcome(0)
   peer.send({
-    type: "task", runId: "real-tools", agent,
+    type: "task", runId: "real-tools", agent, authToken: "fixture-run-key",
     instructions: inlineInstructions("Inline rule: describe the evidence in your final response."),
-    context: { paperclipWorkspace: { cwd: fixture.source } },
+    context: { issueId, paperclipWorkspace: { cwd: fixture.source } },
   })
   await waitUntil(() => peer.messages.some((message) => message.type === "result"))
   assert.equal(peer.messages.find((message) => message.type === "result").exitCode, 0)
+  assert.equal(products.length, 1)
+  assert.equal(comments.length, 1)
+  assert.equal(products[0].type, "pull_request")
+  assert.ok(comments[0].body.includes("https://github.com/fixture-owner/repo/pull/1"))
   assert.ok(requests.length > 0)
   assert.ok(requests.every((request) => request.messages[0].role === "system"
     && request.messages[0].content.includes("Repository-specific rule: preserve existing assessment files.")))

@@ -195,6 +195,7 @@ const execFileAsync = promisify(execFile);
       const logs: string[] = [];
       const result = await agentPoolBroker.execute({
         runId: randomUUID(), agent: { id: agentId, companyId, name: "Worker", adapterType: "agent_pool", adapterConfig: {} },
+        authToken: "fixture-run-key",
         config: { name: "e2e" }, context: {
           task: "Write a useful artifact",
           paperclipAgentInstructions: {

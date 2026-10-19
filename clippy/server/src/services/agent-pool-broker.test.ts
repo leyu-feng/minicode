@@ -33,7 +33,7 @@ async function harness(reconnectMs = 1000) {
     for (const socket of server.clients) socket.terminate();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
-  async function worker(id = randomUUID(), instanceId = randomUUID(), runId: string | null = null, ready = true, capabilities: string[] = []) {
+  async function worker(id = randomUUID(), instanceId = randomUUID(), runId: string | null = null, ready = true, capabilities: string[] = ["skill_bundle_v1"]) {
     const socket = new WebSocket(`ws://127.0.0.1:${port}?id=${id}`);
     const messages: Array<Record<string, unknown>> = [];
     socket.on("message", (data) => messages.push(JSON.parse(data.toString())));
@@ -63,6 +63,16 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("does not dispatch any assignment to a worker without skill integrity support", async () => {
+    const { broker, worker } = await harness();
+    const legacy = await worker(randomUUID(), randomUUID(), null, true, []);
+    const ctx = context();
+    await expect(broker.execute(ctx)).rejects.toThrow("skill_bundle_v1");
+    expect(ctx.onDispatch).not.toHaveBeenCalled();
+    expect(legacy.messages).toEqual([]);
+    expect(broker.status(legacy.id)).toBe("idle");
+  });
+
   it("requires inline capability, selects a compatible worker, and sends one bounded instruction snapshot", async () => {
     const { broker, worker } = await harness();
     const legacy = await worker();
@@ -75,10 +85,13 @@ describe("AgentPool execution channel", () => {
     await expect(broker.execute(ctx)).rejects.toThrow("inline_instructions_v1");
     expect(legacy.messages).toEqual([]);
     expect(ctx.onDispatch).not.toHaveBeenCalled();
-    const compatible = await worker(randomUUID(), randomUUID(), null, true, ["inline_instructions_v1", "future_extension"]);
+    const compatible = await worker(randomUUID(), randomUUID(), null, true, ["inline_instructions_v1", "skill_bundle_v1", "future_extension"]);
     const result = broker.execute(ctx);
     const task = await compatible.take("task");
-    expect(task).toMatchObject({ protocolVersion: 1, agent: { id: ctx.agent.id }, instructions });
+    expect(task).toMatchObject({
+      protocolVersion: 1, agent: { id: ctx.agent.id, companyId: ctx.agent.companyId }, instructions,
+      skills: { version: 1, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+    });
     expect(task.context).not.toHaveProperty("paperclipAgentInstructions");
     instructions.content = "A subsequent edit";
     expect(task.instructions).toMatchObject({ content: "Agent-specific operating instructions" });
@@ -89,7 +102,7 @@ describe("AgentPool execution channel", () => {
 
   it("rejects oversized instructions without reserving or dispatching the worker", async () => {
     const { broker, worker } = await harness();
-    const client = await worker(randomUUID(), randomUUID(), null, true, ["inline_instructions_v1"]);
+    const client = await worker(randomUUID(), randomUUID(), null, true, ["inline_instructions_v1", "skill_bundle_v1"]);
     const ctx = context();
     ctx.context.paperclipAgentInstructions = {
       version: 1, format: "markdown", content: "x".repeat(256 * 1024),

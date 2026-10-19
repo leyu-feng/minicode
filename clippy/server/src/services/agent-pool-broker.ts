@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { z } from "zod";
 import {
-  AGENT_POOL_INLINE_INSTRUCTIONS, AGENT_POOL_PROTOCOL_VERSION,
+  AGENT_POOL_INLINE_INSTRUCTIONS, AGENT_POOL_PROTOCOL_VERSION, AGENT_POOL_SKILL_BUNDLE,
   agentPoolHelloSchema, agentPoolInstructionsSchema, agentPoolNameSchema, agentPoolTaskSchema,
 } from "@paperclipai/shared";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../adapters/types.js";
+import { readAgentPoolSkills } from "./agent-pool-skills.js";
 
 export const AGENT_POOL_RECONNECT_MS = 60_000;
 export const AGENT_POOL_MAX_FRAME = 256 * 1024;
@@ -212,17 +213,20 @@ export class AgentPoolBroker {
     if (ctx.signal?.aborted) throw new Error("AgentPool run was cancelled before dispatch");
     const instructions = ctx.context.paperclipAgentInstructions == null
       ? null : agentPoolInstructionsSchema.parse(ctx.context.paperclipAgentInstructions);
+    const skills = await readAgentPoolSkills();
+    if (ctx.signal?.aborted) throw new Error("AgentPool run was cancelled before dispatch");
     const available = [...this.peers.values()].filter((candidate) =>
       candidate.identity.companyId === ctx.agent.companyId && candidate.identity.poolName === name
       && candidate.ready && !candidate.run && candidate.socket?.readyState === WebSocket.OPEN);
     if (!available.length) throw new Error(`AgentPool '${name}' has no available connected worker; connect a worker and retry`);
-    const peer = available.find(candidate => !instructions || candidate.capabilities.includes(AGENT_POOL_INLINE_INSTRUCTIONS));
-    if (!peer) throw new Error(`AgentPool '${name}' has no available worker supporting ${AGENT_POOL_INLINE_INSTRUCTIONS}; upgrade or connect a compatible worker and retry`);
+    const required = [AGENT_POOL_SKILL_BUNDLE, ...(instructions ? [AGENT_POOL_INLINE_INSTRUCTIONS] : [])];
+    const peer = available.find(candidate => required.every(capability => candidate.capabilities.includes(capability)));
+    if (!peer) throw new Error(`AgentPool '${name}' has no available worker supporting ${required.join(", ")}; upgrade or connect a compatible worker and retry`);
     const { paperclipAgentInstructions: _instructions, ...context } = ctx.context;
     const task = JSON.stringify(agentPoolTaskSchema.parse({
       type: "task", protocolVersion: AGENT_POOL_PROTOCOL_VERSION, runId: ctx.runId,
-      agent: { id: ctx.agent.id, name: ctx.agent.name },
-      instructions,
+      agent: { id: ctx.agent.id, name: ctx.agent.name, companyId: ctx.agent.companyId },
+      instructions, skills,
       context,
       continuation: ctx.executionContinuation ?? null,
       runtimeTools: ctx.runtimeTools ?? null,

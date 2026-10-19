@@ -46,6 +46,21 @@ for workers, and inspect or revoke them. Hire an agent with AgentPool and select
 the pool name. Follow [worker setup](../../../minicode/README.md#connect-as-an-agentpool-worker)
 on the worker machine.
 
+Updated workers download Paperclip's bundled operational skills into the assigned
+checkout's Git-ignored `.worker/skills`, not the host-owned shared folder. Confirm
+the run records a verified ZIP hash before model work, and inspect the next
+assignment after editing an extracted reference: it must restore the expected
+content or fail explicitly, never run with changed instructions. On Run Now,
+the core skill supplies assignment discovery and authenticated task-chat/status
+updates; successful console output alone is not task completion.
+
+With harness GitHub publication enabled, the PR receipt is registered as a task
+work product and linked in task chat. Inspect the task's existing **Pull requests**
+section rather than a separate dashboard. Retrying the original commit refreshes
+its saved state without another publication; incomplete Paperclip registration
+fails the run and retains the receipt for recovery. Neither publication nor a
+merged record automatically completes a task or bypasses approval gates.
+
 ## Driving it with Playwright and the Paperclip CLI
 
 Preconditions: follow the [baseline](./README.md#before-driving-a-journey). Record adapter, model, account, native/legacy runtime, and environment. Capabilities vary; one harness result is not a matrix-wide qualification.

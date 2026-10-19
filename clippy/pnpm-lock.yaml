@@ -1040,6 +1040,9 @@ importers:
       express:
         specifier: ^5.1.0
         version: 5.2.1
+      fflate:
+        specifier: 0.8.3
+        version: 0.8.3
       heif2jpeg:
         specifier: 0.1.6
         version: 0.1.6
