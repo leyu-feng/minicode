@@ -44,9 +44,9 @@ export async function prepareWorkerSkills({ workspace, skills, apiUrl, authToken
   if (await git(["ls-files", "--", ":(icase).worker"])) throw new Error("Reserved .worker cache must not contain tracked files")
   const cache = path.join(workspace, ".worker")
   if (!await existing(cache, true)) await fs.mkdir(cache)
-  const info = path.join(workspace, ".git", "info")
+  const exclude = path.resolve(workspace, await git(["rev-parse", "--git-path", "info/exclude"]))
+  const info = path.dirname(exclude)
   if (!await existing(info, true)) await fs.mkdir(info)
-  const exclude = path.join(info, "exclude")
   if (await existing(exclude)) {
     const text = await fs.readFile(exclude, "utf8")
     if (!text.split(/\r?\n/).includes("/.worker/")) await fs.appendFile(exclude, "\n/.worker/\n")

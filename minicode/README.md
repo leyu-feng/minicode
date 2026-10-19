@@ -175,21 +175,79 @@ pair a new worker to change either. Protect this file with your user account's
 filesystem permissions, especially on Windows.
 
 Multiple workers can join a pool. Each assignment goes to one idle worker, with
-a fresh AgentSession and the worker's model configuration. Its actual tool
-working directory is a persistent, independent Git clone for that agent, under
-`agent-pool\workspaces\<worker-id>\<agent-id>` in Minicode's configuration
-directory. Workspaces must be outside the source checkout. The first assignment
-clones committed files from the source's current `HEAD`; uncommitted changes,
-untracked files and installed dependencies are not copied. Later runs on that
-worker retain the agent's edits without resetting or pulling. Different agents
-and workers do not share these checkouts. Repositories listed as submodules are
-not initialized automatically.
+a fresh AgentSession and the worker's model configuration. Every worker in a
+pool must be able to serve every agent connected to that pool. Use different
+pools when worker setup differs; workers are not pinned to particular agents.
+
+`--workspace-mode worktree` is the default. The worker creates a detached Git
+worktree beside `--repo-root` for each worker/agent pair. `--worker-name` is its
+short prefix, or `w-<first 12 worker-id characters>` if omitted. An `a<slot>`
+suffix identifies that worker's agent; final folder names use at most 24 safe
+filename characters, so leave room for the suffix. For example:
+
+```powershell
+node .\minicode\cli.js worker --server http://localhost:3100 --worker-id <id> --repo-root C:\repos\my-project\main --workspace-mode worktree --worker-name w1
+```
+
+The assigned tool directories are `C:\repos\my-project\w1a1`, `w1a2`, etc.; another
+worker uses `w2a1`, `w2a2`, etc. Slots are allocated as each worker first sees an
+agent and remain stable across restarts; `a1` is not a global agent number.
+The worker/agent registry is kept in the common Git administrative directory,
+with ownership metadata in each worktree's Git directory, not tracked files.
+Unmanaged directories and another worker's worktrees are never adopted or reset.
+Existing old `w1`-style directories are left untouched, not migrated.
+
+Before **every new assignment**, Minicode detaches the selected worktree and
+hard-resets it to the source checkout's current committed `HEAD`, then removes
+untracked and ignored files with `git clean -ffdx`. This includes installed
+dependencies and the `.worker` skill cache, which is downloaded and verified
+again. Source dirty files and `worker_shared` are untouched. This does not fetch
+or pull remote changes. A network reconnect does not reset or replay an active
+assignment. Save durable results through artifact/task APIs or the enabled
+publication tool before finishing; local changes do not survive reassignment.
+Minicode also checks free space on the worktree volume when connected, every
+60 seconds, and before/after assignment checkout preparation. Below **24 GiB**
+it evicts this worker's **idle** owned worktrees in least-recently-used order,
+trying to recover to **36 GiB**. Override these defaults with
+`--min-free-gib <GiB>` and `--target-free-gib <GiB>` (target must exceed minimum).
+Last-use timestamps and agent slots survive restarts; evicted slots are
+recreated at the same short path on demand. Cleanup continues toward the target
+once triggered, but model work is allowed if at least the minimum is available.
+Disk measurement or cleanup errors are reported; insufficient space fails the
+assignment before model work, not by falling back to source or a different disk.
+Periodic checks log pressure, recovery, and actual evictions without repeating
+unchanged healthy status.
+
+LRU eviction uses Git's worktree removal only after validating the exact
+worker/server/source/agent binding and checking source/shared boundaries again.
+The active assignment remains protected until completion is acknowledged, even
+if disk space stays low. Another worker's checkouts, old `w1`-style folders,
+legacy clones, unmanaged directories, source/common Git storage, and
+`worker_shared` are never cleanup targets. Idle local results may be evicted
+without waiting for another assignment: upload/publish durable results first.
+Worktrees share Git objects, refs, repository configuration, and local exclusions
+with the source; they are not independent clones. Do not remove the source's
+common Git storage while a worker depends on it.
+
+`--workspace-mode clone` retains the old behavior: a persistent independent clone
+per agent under `agent-pool\workspaces\<worker-id>\<agent-id>` in Minicode's
+configuration directory. Use this flag when restarting older workers to keep
+using their existing checkouts; changing modes does **not** migrate edits.
+This mode can serve different agents without sharing their checkouts and does
+not accept `--worker-name`.
+
+Both modes start from committed source `HEAD`; uncommitted changes, untracked
+files and installed dependencies are not copied. Only legacy clone mode retains
+edits on later runs without resetting or pulling. Repositories listed as
+submodules are not initialized automatically.
 
 The actual local workspace path is recorded in the run log. Workspace paths
 from Clippy's server-side context are metadata, not worker filesystem paths.
 Existing files left in the old shared worker root are not migrated. Agent
 workspaces remain on disk after a run, worker restart or revocation so their
-results can be inspected; no automatic cleanup or cross-worker migration occurs.
+latest results can be inspected. In worktree mode the next assignment for that
+worker/agent pair resets those results, and idle worktrees can be LRU-evicted
+under disk pressure; there is no cross-worker migration.
 Workspace preparation failures fail the run without falling back to the source
 checkout. These are trusted coding agents, **not sandboxes**: assignments can execute shell
 commands with the worker account's privileges. Run-scoped Paperclip credentials
@@ -213,9 +271,12 @@ shell tools as `WORKER_SHARED`. Operators can place shared configuration
 or reference files there without committing them to a repository.
 For example, read the instance config with
 `Get-Content (Join-Path $env:WORKER_SHARED '.config\stock-trading-assistant.jsonc')`.
-Shared files are not automatically loaded as instructions or copied into agent
-clones. Workers are instructed never to create, modify, delete, move, or change
-permissions on shared files. **Read-only access is instruction policy, not an
+The shared root's `AGENTS.md`, if present, is loaded on every assignment alongside
+the worktree's root `AGENTS.md`. Shared guidance overrides conflicting worktree
+guidance. Neither can override built-in worker rules or Paperclip-managed
+agent-specific instructions. Other shared files are not automatically injected
+or copied into agent checkouts. Workers are instructed never to create, modify,
+delete, move, or change permissions on shared files. **Read-only access is instruction policy, not an
 OS permission or sandbox**; the worker account still has its normal privileges.
 No Windows ACLs or operator write permissions are changed. Use a restricted
 identity or sandbox if writes must be prevented independently of the model.
@@ -229,18 +290,44 @@ with an `error` marks the run failed. These are model instructions, not OS-enfor
 filesystem isolation; use a sandbox or restricted account for that guarantee.
 Restart running workers to load instruction changes.
 
-Before each assignment, the worker loads the assigned clone's root `AGENTS.md`,
+Before each assignment, the worker loads the assigned checkout's root `AGENTS.md`,
 if present, into the model's system instructions. It reads the current workspace
-copy on every run, so edits apply to the next assignment without restarting the
-worker. Built-in worker workspace and failure rules take precedence. Only that
-root file is loaded; parent directories, nested `AGENTS.md` files, and skill
-directories are not scanned. A missing file is optional; an unreadable file or
+copy on every run after workspace preparation. In worktree mode commit guidance
+and local skills to source so the next clean assignment receives them; local
+uncommitted overrides are discarded. Shared guidance can change between
+assignments without a worker restart. Built-in worker workspace and failure rules
+take precedence. Only the two
+root `AGENTS.md` files are loaded; parent directories and nested `AGENTS.md` files
+are not scanned. A missing file is optional; an unreadable file or
 a directory/symbolic link named `AGENTS.md` fails the run before the model starts.
 The run log records when the file is loaded, without logging its contents.
-Commit instructions to the source repository for new clones; existing clones
-retain their own files and do not automatically receive source updates.
+In legacy clone mode, edits to the checkout's guidance affect the next assignment;
+commit instructions to source for new clones, while existing clones retain their
+own files and do not automatically receive source updates.
 This automatic loading applies only to worker mode; interactive CLI and web
 sessions are unchanged.
+
+### Local skills and bundled fallbacks
+
+Before each new assignment, the harness discovers
+`.agents\skills\<name>\SKILL.md` under both `worker_shared` and the assigned
+checkout. For each name it selects **worker_shared > worktree > downloaded
+bundle fallback**, case-insensitively. It supplies the selected names and exact
+paths to the model, which reads the relevant/requested skill (including
+`/first-task` for the onboarding task) and resolves references relative to that
+selected skill. The selected `paperclip` operational skill is also injected
+automatically. Shared overrides do not overwrite worktree or bundled files.
+Whole skill directories are selected, not merged. A directory without `SKILL.md`
+is not a skill; an unreadable entry fails preparation. Missing companion files
+in a selected override are blockers, not permission to mix lower-priority files.
+
+Local skill catalogs and root instructions are reread per assignment, not on a
+network reconnect. Missing local roots are optional; linked instruction files,
+skill roots/directories, or `SKILL.md` files fail preparation rather than
+following paths outside the permitted roots. Duplicate case-insensitive names
+within one source fail explicitly. Local content is host/repository-owned and
+is not covered by the downloaded bundle's integrity hash. No skills are installed
+in `worker_shared`.
 
 For instructions specific to an agent rather than its repository, use that
 agent's **Instructions** tab in Clippy. The saved managed entry document is
@@ -251,13 +338,18 @@ instructions, which take precedence over repository guidance. Active runs and
 network reconnects retain their original instruction snapshot. Supporting files
 from agent-specific instruction bundles are not transferred.
 
-Paperclip's bundled operational skills are delivered separately as an
+Paperclip's bundled operational and onboarding skills are delivered separately as an
 authenticated ZIP, **never installed in host-owned `worker_shared`**. On the first
 assignment in an agent checkout, Minicode downloads it into `.worker\skills.zip`
 and installs the files under `.worker\skills`. The harness adds `/.worker/` to the
 checkout's local `.git\info\exclude`, without changing the project's `.gitignore`.
 Tracked cache files, links, unsafe paths, malformed archives, and integrity
 failures block model execution.
+The ZIP includes `first-task` and all future onboarding skills placed under
+Paperclip's `server\src\onboarding-assets\<flow>\skills\<name>`, including each
+skill's references and scripts. Non-skill onboarding templates and personas are
+not bundled. These server-provided files are fallbacks, not overrides for local
+skills.
 
 Each new assignment carries Paperclip's expected archive SHA-256 and file
 manifest. Minicode rehashes the cached ZIP every time, redownloads missing,
@@ -267,8 +359,8 @@ next assignment. Reconnects retain their existing assignment and do not reinstal
 The reserved `.worker` directory is harness-owned and read-only to the model by
 instruction policy, not OS-enforced isolation.
 
-The verified `paperclip` skill is loaded into the model's instructions; other
-bundled skills and their references/scripts are discoverable at the same root.
+The resolved `paperclip` skill is loaded into the model's instructions; other
+skills and their references/scripts are discoverable through the selected catalog.
 Standard `PAPERCLIP_*` identity, task, wake, and approval variables are populated
 per run, with credentials exposed only to tools. On a general Run Now, the
 skill discovers the agent's assignments. Agents post task-chat progress through
@@ -301,7 +393,7 @@ minicode worker --server http://localhost:3100 --worker-id <id> --repo-root <sou
 The repository must match the source checkout's GitHub `origin`. The named account
 must already be signed in through `gh`. No model-supplied repository, remote,
 branch, credential, merge, or deployment operation is accepted.
-The model commits its selected changes in its persistent checkout, then calls:
+The model commits its selected changes in its assigned checkout, then calls:
 
 ```json
 {"type":"tool","name":"publish_pull_request","arguments":{"commit":"<full commit hash>","title":"CI baseline","body":"Changes, validation evidence, and approval requirements."}}
@@ -313,7 +405,9 @@ checkout or branches, and creates a temporary detached, metadata-only worktree.
 It pushes a deterministic `minicode/<agent-id>/<commit>` branch using a
 create-only lease and opens a PR against the GitHub default branch. The worktree
 is removed on success, failure, or cancellation; cleanup failures are reported.
-The persistent agent checkout, uncommitted files, and local commits are retained.
+Publication does not reset the assigned checkout or remove its local edits.
+In default worktree mode the next assignment resets it, so publish or upload
+durable results before finishing. Legacy clone mode retains local state.
 Only the selected committed revision is published, never untracked files.
 
 The returned receipt includes the PR URL, number, state, commit, branch, and

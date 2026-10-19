@@ -46,13 +46,38 @@ for workers, and inspect or revoke them. Hire an agent with AgentPool and select
 the pool name. Follow [worker setup](../../../minicode/README.md#connect-as-an-agentpool-worker)
 on the worker machine.
 
-Updated workers download Paperclip's bundled operational skills into the assigned
+Updated workers download Paperclip's bundled operational and onboarding skills into the assigned
 checkout's Git-ignored `.worker/skills`, not the host-owned shared folder. Confirm
 the run records a verified ZIP hash before model work, and inspect the next
 assignment after editing an extracted reference: it must restore the expected
 content or fail explicitly, never run with changed instructions. On Run Now,
 the core skill supplies assignment discovery and authenticated task-chat/status
 updates; successful console output alone is not task completion.
+
+The ZIP includes `first-task` and every future onboarding `<flow>/skills/<name>/`
+tree, including references/scripts but not unrelated templates or personas.
+Minicode loads root `AGENTS.md` and discovers `.agents/skills/<name>/SKILL.md`
+in both shared and assigned checkouts per assignment. Shared guidance wins
+local conflicts; skills select shared > worktree > bundle fallback, including
+the injected core skill. Harness and managed-agent instructions remain higher.
+Every pool worker can serve every pool agent; different setup requires a
+different pool. Default worktree mode uses stable short worker/agent sibling
+folders such as `w1a1` and `w1a2`, clean-reset to current committed source `HEAD`
+before every new assignment. Legacy `--workspace-mode clone` retains persistent
+independent per-agent clones. These filesystem
+boundaries are instruction policy, not an OS sandbox.
+Default workers monitor disk space every 60 seconds and at assignment setup.
+Below 24 GiB, verify idle owned worktrees are evicted in persisted LRU order
+toward 36 GiB, with active/source/shared/other-worker/legacy/unmanaged paths
+preserved. Reassign an evicted agent and verify the same short slot is recreated.
+Insufficient space must fail before model work; idle local results are not
+durable artifact storage.
+
+For a disposable assignment, place a same-named skill in both local roots and
+confirm the shared path and injected core content. Remove it to select worktree,
+then bundle fallback. Change shared `AGENTS.md` between assignments and observe
+updated guidance without restarting the worker. Verify `first-task` is available
+from the bundle without a shared copy; linked discovery paths must fail.
 
 With harness GitHub publication enabled, the PR receipt is registered as a task
 work product and linked in task chat. Inspect the task's existing **Pull requests**
@@ -147,10 +172,15 @@ repositories. Pass the full `clippy-worker` submodule path as `--repo-root` to
 the worker CLI or CMD launcher; entry points retain their current-directory
 behavior rather than selecting this submodule automatically.
 Assign a task and verify that exactly one worker writes its useful
-output in an independent per-agent checkout, not the source repository, and
+output in its worker/agent checkout, not the source repository, and
 Clippy records the result and actual worker workspace path. Source dirty files
-must not be copied. Run the same agent again and after a worker restart to verify
-its edits persist; another agent must receive a separate checkout.
+must not be copied. In default worktree mode run the same agent again, including
+after a worker restart, to verify its short path is stable but tracked edits,
+local checkout commits and untracked/ignored leftovers are reset before the next
+assignment. Confirm current committed source updates arrive, source/shared
+files remain unchanged, and another agent gets another short checkout on the
+same worker. Legacy clones must retain their edits. Upload/publish results
+before another assignment resets the worktree.
 Disconnect only the network during a live run and
 verify the same execution resumes without replay. Restart a worker/server or
 exceed the 60-second lease: verify visible failure and no automatic retry. Revoke
