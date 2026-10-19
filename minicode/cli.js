@@ -53,6 +53,8 @@ Options:
   --tenant <id>           Select the Entra tenant (with 'auth add --entra-user')
   --clippy-auth <cli.js>  Override the Easy Auth helper (with 'worker' only)
   --worker-shared <dir>   Worker read-only shared folder (default: sibling worker_shared)
+  --github-repo <owner/repo>  Enable harness PR publication for this source GitHub repo
+  --github-user <account>    Existing GitHub CLI login used only by the publisher
   --output-mode <mode>   Worker logs: normal (default) or verbose (includes raw tool output)
 
 REPL commands:

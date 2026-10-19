@@ -164,9 +164,9 @@ for (const outputMode of ["normal", "verbose"]) {
     const raw = outputMode === "normal" ? "raw tool output\n".repeat(150_000) : "raw tool output\n"
     class Session extends EventEmitter {
       async write() {
-        this.emit("output", { stream: "command", data: raw })
-        this.emit("output", { stream: "stderr", data: "A useful error\n" })
-        this.emit("output", { stream: "stdout", data: "Model summary of results\n" })
+        this.emit("output", { stream: "command", data: `\u001b[32m${raw}\u001b[0m` })
+        this.emit("output", { stream: "stderr", data: "\u001b[31mA useful error\u001b[0m\n" })
+        this.emit("output", { stream: "stdout", data: "\u001b[36mModel summary of results\u001b[0m\n" })
         return { exitCode: 0 }
       }
       interrupt() {}
@@ -180,6 +180,7 @@ for (const outputMode of ["normal", "verbose"]) {
     assert.equal(output.includes("raw tool output"), outputMode === "verbose")
     assert.ok(output.includes("A useful error"))
     assert.ok(output.includes("Model summary of results"))
+    assert.ok(!output.includes("\u001b"))
     assert.equal(peer.messages.find(message => message.type === "result").exitCode, 0)
   })
 }
@@ -247,6 +248,17 @@ test("cancellation waits for the active operation, not the immediate done event"
 
 test("run credentials stay in the per-session tool environment rather than the model prompt", async (t) => {
   const inheritedApiKey = process.env.PAPERCLIP_API_KEY
+  const githubTokens = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+  const inheritedEnv = Object.fromEntries(["FORCE_COLOR", "CLICOLOR_FORCE", ...githubTokens].map(key => [key, process.env[key]]))
+  process.env.FORCE_COLOR = "1"
+  process.env.CLICOLOR_FORCE = "1"
+  for (const key of githubTokens) process.env[key] = "publisher-token-fixture"
+  t.after(() => {
+    for (const [key, value] of Object.entries(inheritedEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
   let options, prompt
   class Session extends EventEmitter {
     async write(value) { prompt = value; return { exitCode: 0 } }
@@ -282,6 +294,12 @@ test("run credentials stay in the per-session tool environment rather than the m
   })
   await waitUntil(() => peer.messages.some((message) => message.type === "result"))
   assert.equal(options.env.PAPERCLIP_API_KEY, "run-jwt-fixture")
+  assert.equal(options.env.NO_COLOR, "1")
+  assert.equal(options.env.CLICOLOR, "0")
+  assert.equal(options.env.FORCE_COLOR, undefined)
+  assert.equal(options.env.CLICOLOR_FORCE, undefined)
+  for (const key of githubTokens) assert.equal(options.env[key], undefined)
+  assert.deepEqual(options.tools, [])
   assert.ok(options.instructions.includes(options.cwd))
   assert.match(options.instructions, /Read, search, and list files only inside your assigned workspace or the read-only shared folder/)
   assert.match(options.instructions, /Create and modify files only inside your assigned workspace/)
@@ -295,6 +313,7 @@ test("run credentials stay in the per-session tool environment rather than the m
   assert.ok(!prompt.includes("tool-token-fixture"))
   assert.ok(!prompt.includes("managed-mcp-token-fixture"))
   assert.ok(!prompt.includes("future-token-fixture"))
+  assert.ok(!prompt.includes("publisher-token-fixture"))
   assert.ok(prompt.includes(runtimeTools.guidance))
   const modelContext = JSON.parse(prompt.split("\n\n").at(-1))
   assert.deepEqual(modelContext.serverContext, taskContext)
@@ -396,9 +415,10 @@ test("real model tools use committed files in an independent workspace, not the 
   })
   const actions = [
     { type: "tool", command: process.platform === "win32"
-      ? "Write-Output RAW_TOOL_SENTINEL; Get-Location; Get-ChildItem -Name; git rev-parse --show-toplevel; Get-Content -LiteralPath (Join-Path $env:WORKER_SHARED 'shared.txt')"
-      : 'echo RAW_TOOL_SENTINEL; pwd; ls; git rev-parse --show-toplevel; cat "$WORKER_SHARED/shared.txt"' },
+      ? 'Write-Output ("{0}[31mRAW_TOOL_SENTINEL{0}[0m" -f [char]27); Get-Location; Get-ChildItem -Name; git rev-parse --show-toplevel; Get-Content -LiteralPath (Join-Path $env:WORKER_SHARED \'shared.txt\')'
+      : 'printf "\\033[31mRAW_TOOL_SENTINEL\\033[0m\\n"; pwd; ls; git rev-parse --show-toplevel; cat "$WORKER_SHARED/shared.txt"' },
     { type: "write", path: "tracked.txt", content: "agent-edit" },
+    { type: "tool", name: "publish_pull_request", arguments: { commit: "a".repeat(40), title: "CI", body: "Validated" } },
     { type: "final", message: "Done" },
   ]
   const requests = []
@@ -408,8 +428,22 @@ test("real model tools use committed files in an independent workspace, not the 
       choices: [{ message: { content: JSON.stringify(actions.shift()) } }],
     }), { status: 200, headers: { "Content-Type": "application/json" } })
   })
-  let cwd
-  const fixture = await harness(t, (options) => { cwd = options.cwd; return new AgentSession(options) })
+  let cwd, publication
+  const fixture = await harness(t, (options) => { cwd = options.cwd; return new AgentSession(options) }, {
+    githubRepo: "fixture-owner/repo", githubUser: "publisher-fixture",
+    async publisherFactory(config) {
+      assert.equal(config.repository, "fixture-owner/repo")
+      assert.equal(config.githubUser, "publisher-fixture")
+      return ({ workspace, agentId }) => ({
+        name: "publish_pull_request", description: "Publish the committed revision", parameters: { type: "object" },
+        async execute(args, { signal }) {
+          publication = { workspace, agentId, args }
+          assert.equal(signal.aborted, false)
+          return { url: "https://github.com/fixture-owner/repo/pull/1", worktreeRemoved: true }
+        },
+      })
+    },
+  })
   const shared = path.join(path.dirname(await fs.realpath(fixture.source)), "worker_shared")
   await fs.writeFile(path.join(shared, "shared.txt"), "SHARED_CONFIG_SENTINEL")
   await fs.writeFile(path.join(fixture.source, "AGENTS.md"), "Repository-specific rule: preserve existing assessment files.")
@@ -435,13 +469,17 @@ test("real model tools use committed files in an independent workspace, not the 
     && request.messages[0].content.includes("Repository-specific rule: preserve existing assessment files.")))
   assert.ok(requests.every(request => request.messages[0].content.includes("Inline rule: describe the evidence in your final response.")))
   assert.ok(requests[1].messages.at(-1).content.split("output:\n")[1].includes("RAW_TOOL_SENTINEL"))
+  assert.ok(requests[1].messages.at(-1).content.includes("\u001b[31mRAW_TOOL_SENTINEL\u001b[0m"))
   assert.ok(requests[1].messages.at(-1).content.split("output:\n")[1].includes("SHARED_CONFIG_SENTINEL"))
   assert.equal(cwd, path.join(await fs.realpath(fixture.workspaceRoot), agent.id))
+  assert.deepEqual(publication, { workspace: cwd, agentId: agent.id, args: { commit: "a".repeat(40), title: "CI", body: "Validated" } })
+  assert.match(requests.at(-1).messages.at(-1).content, /https:\/\/github.com\/fixture-owner\/repo\/pull\/1/)
   const output = peer.messages.filter((message) => message.type === "log").map((message) => message.data).join("")
   assert.ok(output.includes(cwd))
   assert.ok(output.includes("tracked.txt"))
   assert.ok(!output.includes("\r\nRAW_TOOL_SENTINEL\r\n"))
   assert.ok(!output.includes("SHARED_CONFIG_SENTINEL"))
+  assert.ok(!output.includes("\u001b"))
   assert.ok(requests.every(request => request.messages[0].content.includes(shared)))
   assert.equal(await fs.readFile(path.join(shared, "shared.txt"), "utf8"), "SHARED_CONFIG_SENTINEL")
   assert.ok(!output.includes("local-only.txt"))
