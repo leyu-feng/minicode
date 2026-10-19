@@ -4,18 +4,22 @@ import { EventEmitter } from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import timers from "node:timers/promises"
 import test, { after, before } from "node:test"
-import { AgentSession } from "../server/agent-session.js"
+import { AgentSession, callModelOnce } from "../server/agent-session.js"
 import {
   addAzureDeployment,
+  addCopilotAuth,
   authFilePath,
   clearAuth,
   getActiveAzureDeployment,
   getActiveAuthSummary,
   getAzureAccessToken,
   listAzureDeployments,
+  listAuthConfigs,
   readAuth,
   setActiveAzureDeployment,
+  setActiveAuth,
   resolveModelConfig,
   loginActiveDeployment,
 } from "../server/auth.js"
@@ -62,7 +66,7 @@ test("clears deployment configuration without requiring an existing file", async
   assert.equal(await clearAuth(), false)
 })
 
-test("removes legacy Copilot credentials without changing Azure deployments", async () => {
+test("preserves legacy Copilot credentials and Azure deployments without rewriting configuration", async () => {
   await fs.writeFile(
     authFilePath(),
     JSON.stringify({
@@ -76,17 +80,278 @@ test("removes legacy Copilot credentials without changing Azure deployments", as
           },
         },
       },
-      "github-copilot": { refresh: "legacy-token" },
+      "github-copilot": { refresh: "legacy-token", model: "legacy-picked-model" },
     }),
   )
 
+  const saved = await fs.readFile(authFilePath(), "utf8")
   const auth = await readAuth()
-  assert.equal(auth["github-copilot"], undefined)
-  assert.deepEqual(auth.active, { provider: "azure-entra", name: "primary-resource" })
+  assert.equal(auth["github-copilot"].refresh, "legacy-token")
+  assert.equal((await getActiveAuthSummary()).name, "@copilot")
+  assert.equal((await listAuthConfigs()).find(item => item.name === "@copilot").active, true)
+  assert.equal(auth["azure-entra"].deployments["primary-resource"].model, "gpt-5.6-sol")
+  assert.equal(await fs.readFile(authFilePath(), "utf8"), saved)
+})
 
-  const persisted = JSON.parse(await fs.readFile(authFilePath(), "utf8"))
-  assert.equal(persisted["github-copilot"], undefined)
-  assert.equal(persisted["azure-entra"].deployments["primary-resource"].model, "gpt-5.6-sol")
+function mockCopilot(t, {
+  polls = [{ access_token: "fixture-copilot-secret" }],
+  device = {},
+  account = { login: "octocat" },
+  catalog = { data: [{ id: "gpt-5.4", supported_endpoints: ["/responses"] }] },
+  catalogStatus = 200,
+  credentialStatus = 200,
+  credential,
+} = {}) {
+  const requests = [], waits = []
+  let now = Date.now()
+  t.mock.method(Date, "now", () => now)
+  t.mock.method(timers, "setTimeout", async ms => { waits.push(ms); now += ms })
+  t.mock.method(childProcess, "execFile", assert.fail)
+  t.mock.method(childProcess, "spawn", assert.fail)
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    requests.push({ url, init })
+    let data, status = 200
+    if (url === "https://github.com/login/device/code") {
+      data = { device_code: "fixture-device", user_code: "ABCD-EFGH",
+        verification_uri: "https://github.com/login/device", expires_in: 900, interval: 1, ...device }
+    } else if (url === "https://github.com/login/oauth/access_token") {
+      data = polls.shift() || { error: "authorization_pending" }
+    } else if (url === "https://api.github.com/user") {
+      assert.equal(init.headers.Authorization, "token fixture-copilot-secret")
+      assert.equal(init.headers["X-GitHub-Api-Version"], "2022-11-28")
+      data = account
+    } else if (url === "https://api.github.com/copilot_internal/v2/token") {
+      assert.equal(init.headers.Authorization, "token fixture-copilot-secret")
+      assert.equal(init.headers["X-GitHub-Api-Version"], "2022-11-28")
+      data = credential ?? { token: "fixture-copilot-api-token", expires_at: Math.floor(now / 1000) + 3600, refresh_in: 1800 }
+      status = credentialStatus
+    } else if (url === "https://api.githubcopilot.com/models") {
+      assert.equal(init.headers.Authorization, "Bearer fixture-copilot-api-token")
+      data = catalog
+      status = catalogStatus
+    } else if (url === "https://api.githubcopilot.com/responses" || url === "https://api.githubcopilot.com/chat/completions") {
+      data = { output_text: "Copilot response", choices: [{ message: { content: "Copilot response" } }] }
+    } else assert.fail(`Unexpected URL: ${url}`)
+    return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } })
+  })
+  return { requests, waits, advance(ms) { now += ms } }
+}
+
+test("Copilot device sign-in honors polling, preserves Azure profiles, and pins model credentials across auth switches", async t => {
+  await clearAuth()
+  await addAzureDeployment({ name: "kept-azure" })
+  const azure = (await readAuth())["azure-entra"]
+  const { requests, waits } = mockCopilot(t, { polls: [
+    { error: "authorization_pending" }, { error: "slow_down", interval: 4 }, { access_token: "fixture-copilot-secret" },
+  ] })
+  const prompts = []
+  const added = await addCopilotAuth({ onPrompt: prompt => prompts.push(prompt), selectModel: models => {
+    assert.deepEqual(models, [{ id: "gpt-5.4", name: "gpt-5.4" }])
+    return models[0].id
+  } })
+  assert.equal(added.name, "@copilot")
+  assert.equal(added.user, "octocat@github.com")
+  assert.deepEqual(prompts, [{ verificationUri: "https://github.com/login/device", userCode: "ABCD-EFGH" }])
+  assert.deepEqual(waits, [4000, 4000, 9000])
+  assert.deepEqual((await readAuth())["azure-entra"], azure)
+  assert.equal((await getActiveAuthSummary()).provider, "github-copilot")
+  const entries = await listAuthConfigs()
+  assert.equal(entries.find(item => item.name === "@copilot").active, true)
+  assert.equal(entries.find(item => item.name === "kept-azure").active, false)
+  assert.ok(!JSON.stringify(entries).includes("fixture-copilot-secret"))
+  assert.ok(!JSON.stringify(await getActiveAuthSummary()).includes("fixture-copilot-secret"))
+  const config = await resolveModelConfig()
+  assert.equal(config.api, "responses")
+  assert.equal(config.deployment, "@copilot")
+  await setActiveAuth("kept-azure")
+  assert.equal(await callModelOnce(config, [{ role: "user", content: "hello" }]), "Copilot response")
+  const request = requests.at(-1)
+  assert.equal(request.init.headers.Authorization, "Bearer fixture-copilot-api-token")
+  assert.equal(request.init.headers["Copilot-Integration-Id"], "vscode-chat")
+  assert.equal(request.init.headers["Editor-Version"], "vscode/1.104.3")
+  assert.match(request.init.headers["X-Request-Id"], /^[0-9a-f-]{36}$/)
+  assert.equal(request.init.headers["x-initiator"], "user")
+  assert.equal(request.init.headers["Openai-Intent"], "conversation-panel")
+  assert.equal(request.init.headers["User-Agent"], "GitHubCopilotChat/0.26.7")
+  assert.equal(request.init.headers["Editor-Plugin-Version"], "copilot-chat/0.26.7")
+  assert.equal(request.init.headers["X-GitHub-Api-Version"], "2025-04-01")
+  assert.equal((await getActiveAuthSummary()).name, "kept-azure")
+  await setActiveAuth("@copilot")
+  assert.equal((await getActiveAuthSummary()).name, "@copilot")
+})
+
+test("Copilot auth HTTP errors expose provider details without credentials or changing saved auth", async t => {
+  await clearAuth()
+  await addAzureDeployment({ name: "kept-azure" })
+  const saved = await fs.readFile(authFilePath(), "utf8")
+  mockCopilot(t, {
+    catalogStatus: 400,
+    catalog: { message: "Bad Request", errors: "Unsupported API version; fixture-copilot-api-token" },
+  })
+  await assert.rejects(addCopilotAuth({ model: "gpt-5.4", onPrompt() {} }), error => {
+    assert.match(error.message, /HTTP 400.*https:\/\/api\.githubcopilot\.com\/models/)
+    assert.match(error.message, /Bad Request; Unsupported API version; \[redacted\]/)
+    assert.ok(!error.message.includes("fixture-copilot-api-token"))
+    return true
+  })
+  assert.equal(await fs.readFile(authFilePath(), "utf8"), saved)
+})
+
+test("Copilot renews API credentials on demand and never falls back to an expired token", async t => {
+  await clearAuth()
+  const { requests, advance } = mockCopilot(t)
+  await addCopilotAuth({ model: "gpt-5.4", onPrompt() {} })
+  const config = await resolveModelConfig()
+  const exchanges = () => requests.filter(request => request.url.endsWith("/copilot_internal/v2/token")).length
+  assert.equal(exchanges(), 1)
+  advance(1_739_000)
+  await callModelOnce(config, [{ role: "user", content: "cached" }])
+  assert.equal(exchanges(), 1)
+  advance(2_000)
+  await callModelOnce(config, [{ role: "user", content: "renewed" }])
+  assert.equal(exchanges(), 2)
+  advance(1_741_000)
+  t.mock.method(globalThis, "fetch", url => {
+    if (url.endsWith("/copilot_internal/v2/token")) {
+      return Promise.resolve(new Response(JSON.stringify({ message: "Authorization revoked" }), { status: 401 }))
+    }
+    assert.fail(`Must not send a model request after failed renewal: ${url}`)
+  })
+  await assert.rejects(callModelOnce(config, [{ role: "user", content: "must fail" }]), /HTTP 401[\s\S]*Authorization revoked/)
+})
+
+test("Copilot credential caches and resolved sessions stay bound to their GitHub account", async t => {
+  await clearAuth()
+  mockCopilot(t)
+  await addCopilotAuth({ model: "gpt-5.4", onPrompt() {} })
+  const first = await resolveModelConfig()
+  const auth = await readAuth()
+  auth["github-copilot"].refresh = "another-github-credential"
+  await fs.writeFile(authFilePath(), JSON.stringify(auth))
+  const authorizations = []
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (url.endsWith("/copilot_internal/v2/token")) {
+      assert.equal(init.headers.Authorization, "token another-github-credential")
+      return Response.json({ token: "another-api-credential", expires_at: Math.floor(Date.now() / 1000) + 3600, refresh_in: 1800 })
+    }
+    if (url.endsWith("/models")) {
+      assert.equal(init.headers.Authorization, "Bearer another-api-credential")
+      return Response.json({ data: [{ id: "gpt-5.4", supported_endpoints: ["/responses"] }] })
+    }
+    authorizations.push(init.headers.Authorization)
+    return Response.json({ output_text: "OK" })
+  })
+  const second = await resolveModelConfig()
+  await callModelOnce(first, [{ role: "user", content: "first account" }])
+  await callModelOnce(second, [{ role: "user", content: "second account" }])
+  assert.deepEqual(authorizations, ["Bearer fixture-copilot-api-token", "Bearer another-api-credential"])
+})
+
+test("Copilot process selection overrides API keys and Azure settings without changing the shared selection", async t => {
+  await clearAuth()
+  await addAzureDeployment({ name: "shared-azure" })
+  mockCopilot(t, { polls: [{ access_token: "fixture-copilot-secret" }, { access_token: "fixture-copilot-secret" }], catalog: { data: [
+    { id: "gpt-4.1", supported_endpoints: ["/chat/completions"] },
+  ] } })
+  await addCopilotAuth({ model: "gpt-4.1", onPrompt() {}, activate: false })
+  const saved = await fs.readFile(authFilePath(), "utf8")
+  const keys = ["MINICODE_AUTH_ENTRY", "OPENCODE_API_KEY", "AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_MODEL"]
+  const originals = keys.map(key => process.env[key])
+  t.after(() => keys.forEach((key, index) => {
+    if (originals[index] === undefined) delete process.env[key]
+    else process.env[key] = originals[index]
+  }))
+  Object.assign(process.env, {
+    MINICODE_AUTH_ENTRY: "@copilot", OPENCODE_API_KEY: "unused-api-key",
+    AZURE_OPENAI_DEPLOYMENT: "shared-azure", AZURE_OPENAI_ENDPOINT: "https://unused.test",
+    AZURE_OPENAI_MODEL: "unused-azure-model",
+  })
+  const config = await resolveModelConfig()
+  assert.equal(config.api, "chat-completions")
+  assert.equal(config.model, "gpt-4.1")
+  assert.equal(config.endpoint, "https://api.githubcopilot.com/chat/completions")
+  assert.equal((await getActiveAuthSummary()).user, "octocat@github.com")
+  assert.equal(await callModelOnce(config, [{ role: "user", content: "hello" }]), "Copilot response")
+  assert.equal(await fs.readFile(authFilePath(), "utf8"), saved)
+  await loginActiveDeployment({ onPrompt() {} })
+  assert.deepEqual((await readAuth()).active, { provider: "azure-entra", name: "shared-azure" })
+})
+
+test("Copilot authorization, identity, entitlement and model failures do not overwrite saved auth", async t => {
+  for (const [options, expected] of [
+    [{ polls: [{ error: "access_denied" }] }, /access_denied/],
+    [{ polls: [{ error: "expired_token" }] }, /expired_token/],
+    [{ polls: [{}], device: { expires_in: 1 } }, /device code expired/],
+    [{ device: { device_code: undefined } }, /invalid device-authorization/],
+    [{ polls: [{ access_token: 123 }] }, /invalid authorization response/],
+    [{ account: {} }, /account login/],
+    [{ credentialStatus: 403, credential: { message: "Copilot access denied" } }, /HTTP 403[\s\S]*Copilot access denied/],
+    [{ credential: { token: "", expires_at: 1, refresh_in: 1800 } }, /invalid or expired API credential/],
+    [{ credential: { token: "fixture-copilot-api-token", expires_at: 1, refresh_in: 1800 } }, /invalid or expired API credential/],
+    [{ catalogStatus: 403 }, /HTTP 403/],
+    [{ catalog: {} }, /invalid model catalog/],
+    [{ catalog: { data: [] } }, /not available/],
+    [{ catalog: { data: [{ id: "gpt-5.4", policy: { state: "disabled" } }] } }, /disabled/],
+    [{ catalog: { data: [{ id: "gpt-5.4", supported_endpoints: ["/v1/messages"] }] } }, /does not support/],
+  ]) {
+    await t.test(expected.source, async t => {
+      await clearAuth()
+      await addAzureDeployment({ name: "preserved" })
+      const saved = await fs.readFile(authFilePath(), "utf8")
+      mockCopilot(t, options)
+      await assert.rejects(addCopilotAuth({ model: "gpt-5.4", onPrompt() {} }), error => {
+        assert.match(error.message, expected)
+        assert.ok(!error.message.includes("fixture-copilot-secret"))
+        return true
+      })
+      assert.equal(await fs.readFile(authFilePath(), "utf8"), saved)
+    })
+  }
+})
+
+test("Copilot model selection uses the account catalog without a default and leaves auth unchanged on failed selection", async t => {
+  for (const [selectModel, expected] of [
+    [models => {
+      assert.deepEqual(models, [{ id: "account-model", name: "Account Model" }])
+      return "account-model"
+    }, undefined],
+    [() => "", /No Copilot model selected/],
+    [() => "hidden-model", /not in the available model list/],
+    [undefined, /Select a Copilot model interactively/],
+  ]) {
+    await t.test(expected?.source || "selected account model", async t => {
+      await clearAuth()
+      await addAzureDeployment({ name: "preserved" })
+      const saved = await fs.readFile(authFilePath(), "utf8")
+      mockCopilot(t, { catalog: { data: [
+        { id: "account-model", name: "Account Model", supported_endpoints: ["/chat/completions"] },
+        { id: "hidden-model", model_picker_enabled: false },
+        { id: "disabled-model", policy: { state: "disabled" } },
+        { id: "messages-only", supported_endpoints: ["/v1/messages"] },
+        null,
+      ] } })
+      if (expected) {
+        await assert.rejects(addCopilotAuth({ onPrompt() {}, selectModel }), expected)
+        assert.equal(await fs.readFile(authFilePath(), "utf8"), saved)
+      } else {
+        const added = await addCopilotAuth({ onPrompt() {}, selectModel })
+        assert.equal(added.model, "account-model")
+        assert.equal((await readAuth())["github-copilot"].model, "account-model")
+        assert.equal((await resolveModelConfig()).api, "chat-completions")
+      }
+    })
+  }
+})
+
+test("Copilot profiles without a selected model require setup instead of silently choosing a model", async t => {
+  await clearAuth()
+  await fs.writeFile(authFilePath(), JSON.stringify({
+    active: { provider: "github-copilot", name: "@copilot" },
+    "github-copilot": { refresh: "fixture-copilot-secret" },
+  }))
+  t.mock.method(globalThis, "fetch", assert.fail)
+  await assert.rejects(getActiveAuthSummary(), /no selected model.*auth add --copilot/)
+  await assert.rejects(resolveModelConfig(), /no selected model.*auth add --copilot/)
 })
 
 const TENANT = "11111111-1111-1111-1111-111111111111"

@@ -62,6 +62,61 @@ test("reports the endpoint when a model request cannot connect", async () => {
   )
 })
 
+test("model HTTP errors include safe provider details, model, endpoint and request ID", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    error: { message: "Unsupported parameter; fixture-secret", code: "unsupported_parameter", param: "instructions" },
+    access_token: "must-not-be-printed",
+  }), { status: 400, headers: { "x-github-request-id": "request-123" } })
+  await assert.rejects(callModelOnce({
+    api: "responses", endpoint: "https://api.githubcopilot.com/responses",
+    apiKey: "fixture-secret", model: "selected-model",
+  }, [{ role: "user", content: "hello" }]), error => {
+    assert.match(error.message, /400.*https:\/\/api\.githubcopilot\.com\/responses.*selected-model/)
+    assert.match(error.message, /Unsupported parameter; \[redacted\]; unsupported_parameter; instructions/)
+    assert.match(error.message, /x-github-request-id: request-123/)
+    assert.ok(!error.message.includes("fixture-secret"))
+    assert.ok(!error.message.includes("must-not-be-printed"))
+    return true
+  })
+})
+
+test("empty HTTP errors explicitly report missing provider details", async () => {
+  globalThis.fetch = async () => new Response(null, { status: 400 })
+  await assert.rejects(callModelOnce({
+    api: "responses", endpoint: "https://example.test/responses", apiKey: "fixture", model: "selected",
+  }, [{ role: "user", content: "hello" }]), /400[\s\S]*Provider returned no error details/)
+})
+
+test("Copilot requests retain provider headers and distinguish user turns from automated continuations", async t => {
+  const requests = []
+  const actions = [
+    { type: "tool", name: "inspect", arguments: {} },
+    { type: "final", message: "done" },
+    { type: "final", message: "follow-up done" },
+  ]
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    requests.push(init)
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] }),
+      { headers: { "Content-Type": "application/json" } })
+  })
+  const session = new AgentSession({ id: "copilot", cwd: process.cwd(),
+    tools: [{ name: "inspect", description: "Read task metadata", execute: async () => "metadata" }] })
+  session.config = {
+    api: "chat-completions", endpoint: "https://api.githubcopilot.com/chat/completions",
+    apiKey: "fixture-only", model: "gpt-5-mini", provider: "github-copilot",
+    headers: { "Openai-Intent": "conversation-edits", "User-Agent": "minicode/0.1.0" },
+  }
+  t.after(() => session.dispose())
+  assert.equal((await session.write("Inspect metadata")).exitCode, 0)
+  assert.equal((await session.write("One more question")).exitCode, 0)
+  assert.deepEqual(requests.map(request => request.headers["x-initiator"]), ["user", "agent", "user"])
+  for (const request of requests) {
+    assert.equal(request.headers["Openai-Intent"], "conversation-edits")
+    assert.equal(request.headers.Authorization, "Bearer fixture-only")
+    assert.equal(JSON.parse(request.body).temperature, undefined)
+  }
+})
+
 test("AgentSession returns a failed result when the model request fails", async () => {
   const originalKey = process.env.OPENCODE_API_KEY
   const originalUrl = process.env.OPENCODE_BASE_URL

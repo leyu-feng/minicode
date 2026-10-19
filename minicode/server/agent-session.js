@@ -2,8 +2,10 @@ import childProcess from "node:child_process"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { EventEmitter } from "node:events"
+import { randomUUID } from "node:crypto"
 import { resolveModelConfig } from "./auth.js"
 import { killTree } from "./kill-tree.js"
+import { httpErrorDetails } from "./http-error.js"
 
 const MAX_TOOL_TURNS = 1000
 const MAX_OUTPUT_CHARS = 12000
@@ -238,7 +240,7 @@ function runShellCommand(command, { cwd, onData, signal, env }) {
   })
 }
 
-async function callModel(config, messages, systemPrompt, signal) {
+async function callModel(config, messages, systemPrompt, signal, initiator = "user") {
   const apiKey = config.getAccessToken ? await config.getAccessToken() : config.apiKey
   const isResponses = config.api === "responses"
   let response
@@ -247,6 +249,8 @@ async function callModel(config, messages, systemPrompt, signal) {
       method: "POST",
       signal,
       headers: {
+        ...config.headers,
+        ...(config.provider === "github-copilot" ? { "x-initiator": initiator, "X-Request-Id": randomUUID() } : {}),
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
@@ -259,7 +263,7 @@ async function callModel(config, messages, systemPrompt, signal) {
             }
           : {
               model: config.model,
-              temperature: 0.2,
+              ...(config.provider === "github-copilot" ? {} : { temperature: 0.2 }),
               messages: systemPrompt ? [{ role: "system", content: systemPrompt }, ...messages] : messages,
             },
       ),
@@ -271,7 +275,8 @@ async function callModel(config, messages, systemPrompt, signal) {
   }
 
   if (!response.ok) {
-    throw new Error(`Model request failed (${response.status}): ${await response.text()}`)
+    const detail = await httpErrorDetails(response, [apiKey])
+    throw new Error(`Model request failed (${response.status}) at ${config.endpoint} [model: ${config.model}]:\n${detail}`)
   }
 
   const data = await response.json()
@@ -387,7 +392,7 @@ export class AgentSession extends EventEmitter {
 
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         this.#throwIfInactive(run)
-        const raw = await callModel(this.config, this.messages, this.systemPrompt, signal)
+        const raw = await callModel(this.config, this.messages, this.systemPrompt, signal, turn === 0 ? "user" : "agent")
         this.#throwIfInactive(run)
         const action = parseJsonAction(raw)
 

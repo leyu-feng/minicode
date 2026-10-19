@@ -6,10 +6,12 @@ import { AgentSession, callModelOnce } from "./server/agent-session.js"
 import { runAgentPoolWorkerCli } from "./server/agent-pool-worker.js"
 import {
   DEFAULT_AZURE_MODEL,
+  COPILOT_AUTH_NAME,
   addAzureDeployment,
+  addCopilotAuth,
   authFilePath,
   clearAuth,
-  getActiveAzureDeployment,
+  getActiveAuthSummary,
   listAuthConfigs,
   loginActiveDeployment,
   resolveModelConfig,
@@ -34,8 +36,9 @@ Usage:
   minicode "<prompt>"            Run one prompt, print the answer, exit
   minicode --no-tools "<prompt>" Answer without running any shell commands
   minicode web [port]            Start the browser portal
-  minicode auth login            Sign in with the active deployment's credential CLI
-  minicode auth add [deployment] Add an Azure deployment
+  minicode auth login            Sign in with the selected auth provider
+  minicode auth add [name]       Add an Azure deployment
+  minicode auth add --copilot    Add/sign in to the @copilot entry
   minicode auth use <name>       Select the active auth
   minicode auth list             List configured auth options
   minicode auth clear            Clear deployment configuration
@@ -48,6 +51,7 @@ Options:
   --repo-root <dir>       Working directory for shell commands
   --model <name>          Override the model for this run
   --auth <entry>          Use a saved auth entry without changing the active one
+  --copilot               Select @copilot; with 'auth add', add/sign in
   --endpoint <url>        Responses endpoint (with 'auth add')
   --entra-user <upn>      Sign in with an isolated Azure CLI identity (with 'auth add')
   --tenant <id>           Select the Entra tenant (with 'auth add --entra-user')
@@ -83,6 +87,7 @@ function parseArgs(argv) {
     if (arg === "--help" || arg === "-h") options.help = true
     else if (arg === "--version" || arg === "-v") options.version = true
     else if (arg === "--no-tools") options.noTools = true
+    else if (arg === "--copilot") options.copilot = true
     else if ((arg === "--repo-root" || arg === "-repo_root") && argv[i + 1]) options.repoRoot = argv[++i]
     else if (arg === "--model" && argv[i + 1]) options.model = argv[++i]
     else if (arg === "--auth") {
@@ -99,6 +104,9 @@ function parseArgs(argv) {
       options[key] = argv[++i]
     }
     else options.positional.push(arg)
+  }
+  if (options.copilot && options.auth && options.auth !== COPILOT_AUTH_NAME) {
+    throw new Error("--copilot cannot be combined with a different --auth entry.")
   }
   return options
 }
@@ -122,7 +130,8 @@ if (options.version) {
 
 // --model applies before anything resolves configuration.
 if (options.model) process.env.OPENCODE_MODEL = options.model
-if (options.auth) process.env.MINICODE_AUTH_ENTRY = options.auth
+if (options.copilot) process.env.MINICODE_AUTH_ENTRY = COPILOT_AUTH_NAME
+else if (options.auth) process.env.MINICODE_AUTH_ENTRY = options.auth
 
 /* ------------------------------------------------------------------ auth */
 
@@ -131,42 +140,47 @@ async function runAuth(argv) {
   if (action !== "add" && (options.entraUser || options.tenant)) {
     throw new Error("--entra-user and --tenant are only supported with auth add.")
   }
+  if (options.copilot && ["add", "use"].includes(action) && argv[1] && argv[1] !== COPILOT_AUTH_NAME) {
+    throw new Error("--copilot cannot be combined with a different auth name.")
+  }
+  const name = options.copilot ? COPILOT_AUTH_NAME : argv[1]
 
   if (action === "login") {
-    await ensureAzureDeployment()
-    const deployment = await loginActiveDeployment()
+    const added = await ensureAuthConfigured()
+    const deployment = added?.provider === "github-copilot"
+      ? added : await loginActiveDeployment({ onPrompt: promptForCopilotSignIn })
     console.log(`${C.green}Signed in: ${deployment.name} · ${deployment.model} · ${deployment.user}${C.reset}`)
     return 0
   }
 
   if (action === "add") {
-    const deployment = await promptForAzureDeployment(argv[1])
+    const deployment = await promptForAuth(name)
     console.log(`${C.green}Active auth: ${deployment.name} · ${deployment.model} · ${deployment.user || "login@az.cli"}${C.reset}`)
     console.log(`${C.dim}${authFilePath()}${C.reset}`)
     return 0
   }
 
   if (action === "use") {
-    if (!argv[1]) throw new Error("Usage: minicode auth use <name>")
-    const deployment = await setActiveAuth(argv[1])
+    if (!name) throw new Error("Usage: minicode auth use <name> or minicode auth use --copilot")
+    const deployment = await setActiveAuth(name)
     console.log(`${C.green}Active auth: ${deployment.name} · ${deployment.model} · ${deployment.user || "login@az.cli"}${C.reset}`)
     return 0
   }
 
   if (action === "ensure") {
-    await ensureAzureDeployment()
+    await ensureAuthConfigured()
     return 0
   }
 
   if (action === "list") {
     const deployments = await listAuthConfigs()
     if (!deployments.length) {
-      console.log("No Azure deployments configured.")
+      console.log("No auth options configured.")
       console.log(`${C.dim}run: minicode auth add${C.reset}`)
       return 0
     }
     for (const deployment of deployments) {
-      console.log(`${deployment.active ? "*" : " "} ${deployment.name} · ${deployment.model} · ${deployment.user} (${deployment.credentialProvider || "azure-cli"})`)
+      console.log(`${deployment.active ? "*" : " "} ${deployment.name} · ${deployment.model} · ${deployment.user} (${deployment.credentialProvider || (deployment.provider === "github-copilot" ? "github-copilot" : "azure-cli")})`)
       if (deployment.endpoint) console.log(`  ${C.dim}${deployment.endpoint}${C.reset}`)
     }
     console.log(`${C.dim}${authFilePath()}${C.reset}`)
@@ -176,12 +190,12 @@ async function runAuth(argv) {
   if (action === "clear") {
     const removed = await clearAuth()
     console.log(removed ? "Cleared minicode auth configuration." : "Minicode auth configuration is already empty.")
-    console.log(`${C.dim}Azure CLI and WAM sign-ins were not changed.${C.reset}`)
+    console.log(`${C.dim}Azure CLI and WAM sign-ins were not changed. GitHub OAuth grants were not revoked.${C.reset}`)
     return 0
   }
 
   if (action === "logout") {
-    console.log("Credentials are managed outside minicode. Azure CLI: az logout. WAM: manage accounts in Windows Settings.")
+    console.log("Use minicode auth clear to remove saved Minicode credentials. Azure CLI: az logout. WAM: manage accounts in Windows Settings. Revoke Copilot authorization in GitHub Settings > Applications.")
     return 0
   }
 
@@ -190,23 +204,57 @@ async function runAuth(argv) {
   return 1
 }
 
-async function promptForAzureDeployment(initialName) {
+function promptForCopilotSignIn({ verificationUri, userCode }) {
+  console.log(`Sign in to GitHub Copilot: ${verificationUri}`)
+  console.log(`Enter code: ${userCode}`)
+}
+
+async function promptForCopilotModel(models) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("Copilot model selection requires a terminal. Use: minicode auth add --copilot --model <id>")
+  }
+  console.log("Available Copilot models:")
+  models.forEach((model, index) => console.log(`  ${index + 1}. ${model.name} (${model.id})`))
+  const prompt = readlinePromises.createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    for (;;) {
+      const answer = (await prompt.question("Select model (number or ID): ")).trim()
+      const selected = models.find(model => model.id === answer)
+        || (/^[1-9]\d*$/.test(answer) ? models[Number(answer) - 1] : undefined)
+      if (selected) return selected.id
+      console.error("Select a listed model number or ID.")
+    }
+  } finally {
+    prompt.close()
+  }
+}
+
+async function promptForAuth(initialName) {
   let name = initialName?.trim()
   let model = options.model?.trim()
   const interactive = process.stdin.isTTY && process.stdout.isTTY
   let prompt
   try {
-    if ((!name || !model) && interactive) {
+    if ((!name || (!model && name !== COPILOT_AUTH_NAME)) && interactive) {
       prompt = readlinePromises.createInterface({ input: process.stdin, output: process.stdout })
-      if (!name) name = (await prompt.question("Azure deployment name: ")).trim()
-      if (!model) {
+      if (!name) name = (await prompt.question("Azure deployment name (or @copilot): ")).trim()
+      if (!model && name !== COPILOT_AUTH_NAME) {
         model = (await prompt.question(`Model [${DEFAULT_AZURE_MODEL}]: `)).trim() || DEFAULT_AZURE_MODEL
       }
     }
   } finally {
     prompt?.close()
   }
-  if (!name) throw new Error("Azure deployment name is required. Run: minicode auth add <name>")
+  if (!name) throw new Error("Auth name is required. Run: minicode auth add <deployment> or minicode auth add --copilot")
+  if (name === COPILOT_AUTH_NAME) {
+    if (options.entraUser || options.tenant || options.endpoint) {
+      throw new Error("--entra-user, --tenant, and --endpoint are only supported with Azure deployments, not @copilot.")
+    }
+    if (!model && !interactive) {
+      throw new Error("Copilot model selection requires a terminal. Use: minicode auth add --copilot --model <id>")
+    }
+    return addCopilotAuth({ model, selectModel: promptForCopilotModel, onPrompt: promptForCopilotSignIn })
+  }
   return addAzureDeployment({
     name,
     model: model || DEFAULT_AZURE_MODEL,
@@ -216,16 +264,16 @@ async function promptForAzureDeployment(initialName) {
   })
 }
 
-async function ensureAzureDeployment() {
+async function ensureAuthConfigured() {
   if (process.env.MINICODE_AUTH_ENTRY) {
-    await getActiveAzureDeployment()
+    await getActiveAuthSummary()
     return
   }
   if (process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY) return
   const deployments = await listAuthConfigs()
   if (deployments.length) return
-  console.log(`${C.cyan}First-run Azure setup${C.reset}`)
-  await promptForAzureDeployment()
+  console.log(`${C.cyan}First-run auth setup${C.reset}`)
+  return promptForAuth()
 }
 
 const AUTH_COMMANDS = new Set(["auth", "providers"])
@@ -247,7 +295,7 @@ if (options.positional[0] === "web") {
     if (port !== undefined && Number(port) > 65535) throw new Error("Web port must be between 0 and 65535.")
     process.env.MINICODE_REPO_ROOT = path.resolve(options.repoRoot || process.env.MINICODE_REPO_ROOT || process.cwd())
     process.env.MINICODE_WEB_PORT = port ?? process.env.MINICODE_WEB_PORT ?? "0"
-    await ensureAzureDeployment()
+    await ensureAuthConfigured()
     await import("./server/index.js")
   } catch (error) {
     console.error(`Minicode web: ${error.message}`)
@@ -264,7 +312,7 @@ if (options.positional[0] === "web") {
 
 /* ----------------------------------------------------------------- agent */
 
-await ensureAzureDeployment()
+await ensureAuthConfigured()
 
 const cwd = path.resolve(options.repoRoot || process.env.MINICODE_REPO_ROOT || process.cwd())
 

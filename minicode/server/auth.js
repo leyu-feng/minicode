@@ -1,11 +1,31 @@
 import childProcess from "node:child_process"
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import timers from "node:timers/promises"
+import { httpErrorDetails } from "./http-error.js"
 
 const AZURE_OPENAI_RESOURCE = "https://cognitiveservices.azure.com"
 export const DEFAULT_AZURE_MODEL = "gpt-5.6-sol"
+export const COPILOT_AUTH_NAME = "@copilot"
+const COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98"
+// Check https://github.com/ericc-ch/copilot-api/blob/master/src/lib/api-config.ts for version updates.
+const COPILOT_VERSION = "0.26.7"
+const EDITOR_PLUGIN_VERSION = `copilot-chat/${COPILOT_VERSION}`
+const USER_AGENT = `GitHubCopilotChat/${COPILOT_VERSION}`
+const API_VERSION = "2025-04-01"
+const GITHUB_REST_API_VERSION = "2022-11-28"
+const VSCODE_COMPATIBILITY_VERSION = "1.104.3"
+const COPILOT_HEADERS = {
+  "Copilot-Integration-Id": "vscode-chat",
+  "Editor-Version": `vscode/${VSCODE_COMPATIBILITY_VERSION}`,
+  "Editor-Plugin-Version": EDITOR_PLUGIN_VERSION,
+  "User-Agent": USER_AGENT,
+  "X-GitHub-Api-Version": API_VERSION,
+  "Openai-Intent": "conversation-panel",
+  "X-Vscode-User-Agent-Library-Version": "electron-fetch",
+}
 const TOKEN_EXPIRY_MARGIN_MS = 5 * 60 * 1000
 const DEPLOYMENT_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i
 
@@ -58,15 +78,6 @@ export async function readAuth() {
   }
   if (!parsed.active && parsed["azure-entra"].active) {
     parsed.active = { provider: "azure-entra", name: parsed["azure-entra"].active }
-  }
-  if (parsed["github-copilot"]) {
-    delete parsed["github-copilot"]
-    if (parsed.active?.provider !== "azure-entra") {
-      parsed.active = parsed["azure-entra"].active
-        ? { provider: "azure-entra", name: parsed["azure-entra"].active }
-        : null
-    }
-    await writeAuth(parsed)
   }
   return parsed
 }
@@ -192,11 +203,194 @@ export async function getActiveAzureDeployment() {
 }
 
 export async function setActiveAuth(name) {
+  if (name === COPILOT_AUTH_NAME) {
+    const auth = await readAuth()
+    const profile = copilotSummary(auth)
+    auth.active = { provider: "github-copilot", name: COPILOT_AUTH_NAME }
+    await writeAuth(auth)
+    return { ...profile, active: true }
+  }
   return setActiveAzureDeployment(name)
 }
 
 export async function listAuthConfigs() {
-  return listAzureDeployments()
+  const auth = await readAuth()
+  return [
+    ...await listAzureDeployments(),
+    ...(auth["github-copilot"] ? [{
+      ...copilotSummary(auth),
+      active: auth.active?.provider === "github-copilot",
+    }] : []),
+  ]
+}
+
+function selectedAuthName(auth) {
+  return process.env.MINICODE_AUTH_ENTRY || process.env.AZURE_OPENAI_DEPLOYMENT
+    || (auth.active?.provider === "github-copilot" ? COPILOT_AUTH_NAME : auth.active?.name)
+    || auth["azure-entra"].active
+}
+
+function copilotSummary(auth) {
+  const entry = auth["github-copilot"]
+  if (typeof entry?.refresh !== "string" || !entry.refresh.trim()) {
+    throw new Error("Copilot is not configured. Run: minicode auth add --copilot")
+  }
+  if (entry.enterpriseUrl) {
+    throw new Error("Legacy enterprise Copilot profiles are not supported. Run: minicode auth add --copilot")
+  }
+  if (typeof entry.model !== "string" || !entry.model.trim()) {
+    throw new Error("Copilot has no selected model. Run: minicode auth add --copilot")
+  }
+  return {
+    name: COPILOT_AUTH_NAME,
+    model: entry.model,
+    user: entry.user || "login@github.com",
+    provider: "github-copilot",
+  }
+}
+
+async function copilotRequest(url, options) {
+  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(30_000) })
+  if (!response.ok) {
+    const secrets = [options.headers?.Authorization?.replace(/^(?:Bearer|token)\s+/i, "")]
+    if (options.body) secrets.push(JSON.parse(options.body).device_code)
+    const detail = await httpErrorDetails(response, secrets)
+    throw new Error(`Copilot authentication request failed (HTTP ${response.status}) at ${url}:\n${detail}\nRun: minicode auth login`)
+  }
+  return response.json()
+}
+
+async function getCopilotAccessToken(entry) {
+  const key = `copilot:${createHash("sha256").update(entry.refresh).digest("hex")}`
+  const cached = tokenCache.get(key)
+  if (cached && cached.expires > Date.now()) return cached.token
+  const now = Date.now()
+  const credential = await copilotRequest("https://api.github.com/copilot_internal/v2/token", {
+    headers: { ...COPILOT_HEADERS, Accept: "application/json",
+      "X-GitHub-Api-Version": GITHUB_REST_API_VERSION,
+      Authorization: `token ${entry.refresh}` },
+  })
+  if (typeof credential?.token !== "string" || !credential.token.trim()
+    || !Number.isFinite(credential.expires_at) || credential.expires_at * 1000 <= Date.now()
+    || !Number.isFinite(credential.refresh_in) || credential.refresh_in <= 0) {
+    throw new Error("Copilot returned an invalid or expired API credential. Run: minicode auth login --copilot")
+  }
+  tokenCache.set(key, {
+    token: credential.token,
+    expires: Math.min(credential.expires_at * 1000, now + credential.refresh_in * 1000) - 60_000,
+  })
+  return credential.token
+}
+
+async function copilotModels(entry) {
+  const headers = { ...COPILOT_HEADERS, "X-Request-Id": randomUUID(),
+    Authorization: `Bearer ${await getCopilotAccessToken(entry)}` }
+  const catalog = await copilotRequest("https://api.githubcopilot.com/models", { headers })
+  if (!Array.isArray(catalog?.data)) throw new Error("Copilot returned an invalid model catalog.")
+  return catalog.data
+}
+
+function copilotModelApi(remote) {
+  const endpoints = remote.supported_endpoints
+  if (endpoints !== undefined) {
+    if (!Array.isArray(endpoints)) return undefined
+    if (endpoints.includes("/responses")) return "responses"
+    if (endpoints.includes("/chat/completions")) return "chat-completions"
+    return undefined
+  }
+  // Older catalogs omit endpoints; match the existing OpenCode Copilot routing.
+  const gpt = /^gpt-(\d+)/.exec(remote.id)
+  return gpt && Number(gpt[1]) >= 5 && !remote.id.startsWith("gpt-5-mini") ? "responses" : "chat-completions"
+}
+
+async function copilotModelConfig(entry, model, models) {
+  models ||= await copilotModels(entry)
+  const remote = models.find(item => item?.id === model)
+  if (!remote) throw new Error(`Copilot model "${model}" is not available for this account. Select an available model with --model.`)
+  if (remote.policy?.state === "disabled") throw new Error(`Copilot model "${model}" is disabled. Enable it in GitHub Copilot settings.`)
+  const api = copilotModelApi(remote)
+  if (!api) {
+    throw new Error(`Copilot model "${model}" does not support Responses or Chat Completions. Select another model with --model.`)
+  }
+  return {
+    api,
+    endpoint: `https://api.githubcopilot.com/${api === "responses" ? "responses" : "chat/completions"}`,
+    getAccessToken: () => getCopilotAccessToken(entry),
+    deployment: COPILOT_AUTH_NAME,
+    provider: "github-copilot",
+    model,
+    user: entry.user || "login@github.com",
+    headers: COPILOT_HEADERS,
+  }
+}
+
+export async function addCopilotAuth({ model, selectModel, onPrompt, activate = true } = {}) {
+  if (model !== undefined && (typeof model !== "string" || !model.trim())) throw new Error("Copilot model name is required.")
+  if (model === undefined && typeof selectModel !== "function") {
+    throw new Error("Select a Copilot model interactively or use: minicode auth add --copilot --model <id>")
+  }
+  if (typeof onPrompt !== "function") throw new Error("Copilot sign-in requires a device-code prompt.")
+  const headers = { Accept: "application/json", "Content-Type": "application/json" }
+  const device = await copilotRequest("https://github.com/login/device/code", {
+    method: "POST", headers, body: JSON.stringify({ client_id: COPILOT_CLIENT_ID, scope: "read:user" }),
+  })
+  if (typeof device?.device_code !== "string" || !device.device_code
+    || typeof device.user_code !== "string" || !device.user_code
+    || device.verification_uri !== "https://github.com/login/device"
+    || !Number.isFinite(device.expires_in) || device.expires_in <= 0
+    || (device.interval !== undefined && (!Number.isFinite(device.interval) || device.interval <= 0))) {
+    throw new Error("GitHub returned an invalid device-authorization response.")
+  }
+  const expires = Date.now() + device.expires_in * 1000
+  let interval = device.interval ?? 5
+  await onPrompt({ verificationUri: device.verification_uri, userCode: device.user_code })
+  while (Date.now() < expires) {
+    await timers.setTimeout(Math.min(interval * 1000 + 3000, expires - Date.now()))
+    if (Date.now() >= expires) break
+    const token = await copilotRequest("https://github.com/login/oauth/access_token", {
+      method: "POST", headers,
+      body: JSON.stringify({
+        client_id: COPILOT_CLIENT_ID, device_code: device.device_code,
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      }),
+    })
+    if (typeof token?.access_token === "string" && token.access_token.trim()) {
+      const account = await copilotRequest("https://api.github.com/user", {
+        headers: { "User-Agent": USER_AGENT, Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": GITHUB_REST_API_VERSION,
+          Authorization: `token ${token.access_token}` },
+      })
+      if (typeof account?.login !== "string" || !account.login.trim()) throw new Error("GitHub did not return an account login.")
+      const entry = { type: "oauth", refresh: token.access_token, user: `${account.login}@github.com` }
+      const models = await copilotModels(entry)
+      const selectable = models.filter(item => typeof item?.id === "string" && item.id
+        && item.policy?.state !== "disabled" && item.model_picker_enabled !== false && copilotModelApi(item))
+        .map(item => ({ id: item.id, name: typeof item.name === "string" ? item.name : item.id }))
+      if (model === undefined && !selectable.length) {
+        throw new Error("No enabled Copilot models support Responses or Chat Completions for this account.")
+      }
+      const selected = model === undefined ? await selectModel(selectable) : model.trim()
+      if (typeof selected !== "string" || !selected.trim()) throw new Error("No Copilot model selected.")
+      if (model === undefined && !selectable.some(item => item.id === selected.trim())) {
+        throw new Error("The selected Copilot model is not in the available model list.")
+      }
+      const config = await copilotModelConfig(entry, selected.trim(), models)
+      entry.model = config.model
+      const auth = await readAuth()
+      auth["github-copilot"] = entry
+      if (activate || !auth.active) auth.active = { provider: "github-copilot", name: COPILOT_AUTH_NAME }
+      await writeAuth(auth)
+      return { ...copilotSummary(auth), active: auth.active?.provider === "github-copilot" }
+    }
+    if (token?.error === "slow_down") {
+      interval = Math.max(interval + 5, Number.isFinite(token.interval) ? token.interval : 0)
+      continue
+    }
+    if (token?.error === "authorization_pending") continue
+    const reason = ["access_denied", "expired_token"].includes(token?.error) ? token.error : "invalid authorization response"
+    throw new Error(`GitHub Copilot sign-in failed: ${reason}. Run: minicode auth add --copilot`)
+  }
+  throw new Error("GitHub Copilot device code expired. Run: minicode auth add --copilot")
 }
 
 export async function getActiveAuthSummary() {
@@ -207,6 +401,11 @@ export async function getActiveAuthSummary() {
       user: "API key",
       provider: "api-key",
     }
+  }
+  const auth = await readAuth()
+  if (selectedAuthName(auth) === COPILOT_AUTH_NAME) {
+    const profile = copilotSummary(auth)
+    return { ...profile, model: process.env.OPENCODE_MODEL || profile.model }
   }
   const azure = await getActiveAzureDeployment()
   return {
@@ -384,7 +583,11 @@ export async function loginAzureCli(profile = {}) {
   await getAzureAccessToken(profile)
 }
 
-export async function loginActiveDeployment() {
+export async function loginActiveDeployment({ onPrompt } = {}) {
+  const auth = await readAuth()
+  if (selectedAuthName(auth) === COPILOT_AUTH_NAME) {
+    return addCopilotAuth({ model: copilotSummary(auth).model, onPrompt, activate: false })
+  }
   const profile = await getActiveAzureDeployment()
   await loginAzureCli(profile)
   return { ...profile, user: profile.user || "login@az.cli" }
@@ -406,6 +609,11 @@ export async function resolveModelConfig() {
     }
   }
 
+  const auth = await readAuth()
+  if (selectedAuthName(auth) === COPILOT_AUTH_NAME) {
+    const profile = copilotSummary(auth)
+    return copilotModelConfig(auth["github-copilot"], process.env.OPENCODE_MODEL || profile.model)
+  }
   const deployment = await getActiveAzureDeployment()
   const getAccessToken = () => getAzureAccessToken(deployment)
   await getAccessToken()

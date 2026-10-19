@@ -38,13 +38,73 @@ az login
 .\minicode.ps1 auth clear
 ```
 
-Minicode requests an Entra token for Azure Cognitive Services from the active
+For Azure profiles, Minicode requests an Entra token for Azure Cognitive Services from the active
 Azure CLI account. Tokens remain managed by Azure CLI and are never written to
 minicode configuration files. On first run, minicode asks for an Azure
 deployment name and default model. Named deployments are stored in
 `auth.json`; add more with `auth add` and switch with `auth use`.
 Use `auth clear` to remove all saved minicode auth options and return to
 first-run setup without signing out of Azure CLI.
+
+### GitHub Copilot
+
+Use **`--copilot`** on the command line. The saved entry is named **`@copilot`**:
+
+```powershell
+.\minicode.ps1 auth add --copilot
+.\minicode.ps1 auth add --copilot --model gpt-5.4
+.\minicode.ps1 auth use --copilot
+.\minicode.ps1 --copilot "explain this repo"
+.\minicode.ps1 web --copilot
+```
+
+The interactive `auth add` prompt also accepts `@copilot`. The `--copilot`
+flag avoids PowerShell's splatting syntax; the quoted name remains supported
+with `auth add '@copilot'`, `auth use '@copilot'`, and `--auth '@copilot'`.
+Do not combine `--copilot` with a different auth name or `--auth` entry.
+Minicode prints GitHub's device sign-in URL and code, verifies the GitHub
+account, then lists its enabled, picker-visible models supported by this agent.
+Select a model by number or exact ID; there is no hardcoded Copilot model or
+automatic first-model selection. The chosen model is saved with `@copilot`.
+Pass `--model <id>` to skip the picker (required without an interactive terminal);
+the model is still checked against the account's catalog. `auth login` retains
+the entry's previously selected model.
+A failed sign-in or access check leaves existing auth configuration unchanged.
+Failed auth and model HTTP requests report the endpoint, provider error details
+(when supplied), and available request IDs. Credentials are redacted; request
+headers and prompt bodies are not logged.
+Copilot models must expose Responses or Chat Completions; models exposing only
+the Anthropic Messages API are not supported by this agent.
+
+Copilot compatibility headers use version `0.26.7`, plugin
+`copilot-chat/0.26.7`, user agent `GitHubCopilotChat/0.26.7`, and API version
+`2025-04-01`. When maintaining these settings, check
+[`ericc-ch/copilot-api`'s API configuration](https://github.com/ericc-ch/copilot-api/blob/master/src/lib/api-config.ts)
+for updates. This is a version-header reference, not an automatic dependency.
+GitHub REST requests separately use their supported `2022-11-28` API
+version; the Copilot API version is not valid for that endpoint.
+Requests also carry the VS Code integration headers; the editor compatibility
+version is pinned to upstream's `1.104.3` fallback rather than fetched from a
+third-party package registry.
+
+Unlike Azure profiles, Copilot stores its GitHub OAuth credential in Minicode's
+`auth.json`. Protect this file with your user account's filesystem permissions.
+Following upstream's login flow, Minicode exchanges this credential at GitHub's
+`/copilot_internal/v2/token` endpoint for a short-lived Copilot API token. Model
+discovery and inference use that API token, cached only in memory and renewed
+on demand before its expiry or advertised refresh interval.
+It does not read or change Copilot CLI, Azure CLI, or other applications' logins.
+`auth login` repeats device sign-in for the selected Copilot entry when needed;
+runtime requests never start interactive login. `auth clear` removes the saved
+credential but does not revoke the GitHub OAuth grant; revoke it separately in
+GitHub Settings > Applications if required.
+
+Azure entries remain available through `auth use <deployment>`. The CLI and
+web toolbar display **`@copilot` · model · GitHub-login`@github.com`** without
+exposing credentials. `--copilot` selects it only for that process (except
+`auth add` and `auth use`, which save the active selection);
+changing the saved active entry does not switch already-running workers
+launched with an explicit `--auth <entry>`.
 
 ### Sign in as a specific user
 
@@ -64,7 +124,7 @@ saving the profile. A different account or failed login does not replace the sav
 profile. Azure CLI must be installed, and the account must have model-resource
 permissions. This does not use a username/password login.
 
-Minicode stores only the deployment, endpoint, model, credential provider, UPN,
+For Azure profiles, Minicode stores only the deployment, endpoint, model, credential provider, UPN,
 tenant, and Azure CLI cache directory in `auth.json`, **not access or refresh
 tokens**. Each identity uses its own `AZURE_CONFIG_DIR` under Minicode's
 `azure-cli` configuration directory. Only the child Azure CLI process receives
