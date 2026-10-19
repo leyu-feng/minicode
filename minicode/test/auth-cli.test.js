@@ -80,6 +80,118 @@ test("model auth rejects the removed helper flag and identity flags outside auth
   assert.match(wrongLogin.output, /only supported with auth add/)
 })
 
+test("Copilot can be added, selected and used from the CLI and web without leaking credentials", { timeout: 20_000 }, async t => {
+  const app = await fixture(t)
+  const hook = path.join(path.dirname(app.config), "copilot fixture.cjs")
+  await fs.writeFile(hook, `
+require("node:timers/promises").setTimeout = async () => {}
+if (process.env.FIXTURE_COPILOT_TTY === "1") {
+  Object.defineProperty(process.stdin, "isTTY", { value: true })
+  Object.defineProperty(process.stdout, "isTTY", { value: true })
+}
+globalThis.fetch = async (url, init) => {
+  const rest = url.startsWith("https://api.github.com/")
+  const copilot = url.startsWith("https://api.githubcopilot.com/")
+  if ((rest || copilot) && (init.headers["User-Agent"] !== "GitHubCopilotChat/0.26.7"
+    || init.headers["X-GitHub-Api-Version"] !== (rest ? "2022-11-28" : "2025-04-01"))) {
+    throw new Error("Incorrect Copilot compatibility headers")
+  }
+  if (copilot && (init.headers["Editor-Plugin-Version"] !== "copilot-chat/0.26.7"
+    || init.headers["Copilot-Integration-Id"] !== "vscode-chat"
+    || init.headers.Authorization !== "Bearer fixture-api-token")) throw new Error("Incorrect Copilot API headers")
+  let data
+  if (url === "https://github.com/login/device/code") {
+    if (JSON.parse(init.body).client_id !== "Iv1.b507a08c87ecfe98") throw new Error("Incorrect OAuth client")
+    data = { device_code: "fixture-device", user_code: "ABCD-EFGH",
+      verification_uri: "https://github.com/login/device", expires_in: 900, interval: 1 }
+  } else if (url === "https://github.com/login/oauth/access_token") {
+    data = { access_token: "fixture-secret" }
+  } else if (url === "https://api.github.com/user") {
+    if (init.headers.Authorization !== "token fixture-secret") throw new Error("Incorrect GitHub authorization")
+    data = { login: "octocat" }
+  } else if (url === "https://api.github.com/copilot_internal/v2/token") {
+    if (init.headers.Authorization !== "token fixture-secret") throw new Error("Incorrect token exchange")
+    data = { token: "fixture-api-token", expires_at: Math.floor(Date.now() / 1000) + 3600, refresh_in: 1800 }
+  } else if (url === "https://api.githubcopilot.com/models") {
+    data = { data: [
+      { id: "gpt-5.4", supported_endpoints: ["/responses"] },
+      { id: "catalog-choice", name: "Catalog Choice", supported_endpoints: ["/responses"] },
+    ] }
+  } else if (url === "https://api.githubcopilot.com/responses") {
+    if (init.headers.Authorization !== "Bearer fixture-api-token" || init.headers["x-initiator"] !== "user") {
+      throw new Error("Incorrect Copilot model authorization")
+    }
+    data = { output_text: "Copilot fixture reply" }
+  } else throw new Error("Unexpected fixture URL: " + url)
+  return new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } })
+}
+`)
+  app.env.NODE_OPTIONS = `${app.env.NODE_OPTIONS || ""} --require ${JSON.stringify(hook)}`
+  await app.cli(["auth", "add", "kept-azure"])
+  app.env.FIXTURE_COPILOT_TTY = "1"
+  const selected = await app.cli(["auth", "add", "--copilot"], "2\n")
+  assert.match(selected, /Available Copilot models:/)
+  assert.match(selected, /Catalog Choice/)
+  assert.match(selected, /@copilot · catalog-choice · octocat@github.com/)
+  assert.equal(JSON.parse(await fs.readFile(path.join(app.config, "auth.json"), "utf8"))["github-copilot"].model, "catalog-choice")
+  delete app.env.FIXTURE_COPILOT_TTY
+  const added = await app.cli(["auth", "add", "--copilot", "--model", "gpt-5.4"])
+  const label = "@copilot · gpt-5.4 · octocat@github.com"
+  assert.ok(added.includes(label))
+  assert.match(added, /https:\/\/github.com\/login\/device/)
+  assert.match(added, /ABCD-EFGH/)
+  assert.ok((await app.cli(["auth", "list"])).includes(`${label} (github-copilot)`))
+  assert.ok((await app.cli(["auth", "login", "--copilot"])).includes(label))
+  await app.cli(["auth", "use", "kept-azure"])
+  const file = path.join(app.config, "auth.json")
+  const saved = await fs.readFile(file, "utf8")
+  assert.equal(JSON.parse(saved)["github-copilot"].model, "gpt-5.4")
+  assert.match(await app.cli(["--copilot", "--no-tools", "hello"]), /Copilot fixture reply/)
+  assert.match(await app.cli(["--auth", "@copilot", "--no-tools", "hello"]), /Copilot fixture reply/)
+  assert.ok((await app.cli(["--auth", "@copilot"], "/model\nexit\n")).includes(label))
+  if (process.platform === "win32") {
+    const result = await app.start(LAUNCHER, ["--copilot", "--no-tools", "hello"]).closed
+    assert.equal(result.code, 0, result.output)
+    assert.match(result.output, /Copilot fixture reply/)
+  }
+  assert.equal(await fs.readFile(file, "utf8"), saved)
+  const noninteractive = await app.start(CLI, ["auth", "add", "--copilot"]).closed
+  assert.equal(noninteractive.code, 1)
+  assert.match(noninteractive.output, /model selection requires a terminal.*--model <id>/)
+  assert.equal(await fs.readFile(file, "utf8"), saved)
+  const portal = app.start(CLI, ["web", "--copilot", "0"])
+  const origin = await portalOrigin(portal)
+  const info = await (await fetch(`${origin}/api/info`)).json()
+  assert.equal(info.deployment, "@copilot")
+  assert.equal(info.model, "gpt-5.4")
+  assert.equal(info.user, "octocat@github.com")
+  assert.ok(!JSON.stringify(info).includes("fixture-secret"))
+  assert.equal(await fs.readFile(file, "utf8"), saved)
+  for (const args of [
+    ["--entra-user", "alice@contoso.com"], ["--tenant", TENANT], ["--endpoint", "https://example.test"],
+  ]) {
+    const result = await app.start(CLI, ["auth", "add", "--copilot", ...args]).closed
+    assert.equal(result.code, 1)
+    assert.match(result.output, /only supported with Azure deployments, not @copilot/)
+    assert.equal(await fs.readFile(file, "utf8"), saved)
+  }
+  for (const args of [
+    ["auth", "add", "kept-azure", "--copilot"],
+    ["auth", "use", "--copilot", "kept-azure"],
+    ["--copilot", "--auth", "kept-azure", "--no-tools", "hello"],
+  ]) {
+    const result = await app.start(CLI, args).closed
+    assert.equal(result.code, 1)
+    assert.match(result.output, /--copilot cannot be combined with a different/)
+    assert.equal(await fs.readFile(file, "utf8"), saved)
+  }
+  assert.ok((await app.cli(["auth", "use", "--copilot"])).includes(label))
+  assert.deepEqual(JSON.parse(await fs.readFile(file, "utf8")).active, { provider: "github-copilot", name: "@copilot" })
+  assert.ok((await app.cli(["auth", "use", "@copilot"])).includes(label))
+  await app.cli(["auth", "clear"])
+  assert.match(await app.cli(["auth", "list"]), /No auth options configured/)
+})
+
 test("web API and toolbar show the selected UPN or Azure CLI marker without obtaining a token", { timeout: 15_000 }, async (t) => {
   const app = await fixture(t)
   await app.cli(["auth", "add", "azure-resource"])
