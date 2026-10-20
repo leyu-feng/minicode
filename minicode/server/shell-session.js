@@ -15,7 +15,7 @@ function trimLinePadding(text) {
 
 function shellLauncher() {
   if (process.platform === "win32") {
-    return { file: "powershell.exe", args: ["-NoProfile", "-NoLogo", "-Command", "-"] }
+    return { file: "pwsh.exe", args: ["-NoProfile", "-NoLogo", "-NonInteractive", "-Command", "-"] }
   }
   return { file: "bash", args: ["-s"] }
 }
@@ -52,7 +52,12 @@ export class ShellSession extends EventEmitter {
 
     this.proc.stdout.on("data", (chunk) => this.#handleChunk(chunk.toString(), "stdout"))
     this.proc.stderr.on("data", (chunk) => this.emit("output", { stream: "stderr", data: trimLinePadding(chunk.toString()) }))
-    this.proc.on("error", (error) => this.emit("output", { stream: "stderr", data: `${error.message}\n` }))
+    this.proc.on("error", (error) => {
+      const message = process.platform === "win32" && error.code === "ENOENT"
+        ? "PowerShell 7 (pwsh) is required on Windows. Install it and make pwsh.exe available on PATH."
+        : error.message
+      this.emit("output", { stream: "stderr", data: `${message}\n` })
+    })
     this.proc.on("close", (code) => {
       this.closed = true
       this.emit("exit", { code: typeof code === "number" ? code : 0 })

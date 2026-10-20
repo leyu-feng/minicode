@@ -173,7 +173,7 @@ async function editFileAction(cwd, action) {
 function runShellCommand(command, { cwd, onData, signal, env }) {
   return new Promise((resolve) => {
     const isWindows = process.platform === "win32"
-    const file = isWindows ? "powershell.exe" : "bash"
+    const file = isWindows ? "pwsh.exe" : "bash"
     const args = isWindows ? ["-NoProfile", "-NonInteractive", "-Command", command] : ["-lc", command]
     const proc = childProcess.spawn(file, args, {
       cwd,
@@ -234,7 +234,10 @@ function runShellCommand(command, { cwd, onData, signal, env }) {
     proc.on("exit", (code) => armFallback(typeof code === "number" ? code : 1))
     proc.on("close", (code) => finish(code))
     proc.on("error", (error) => {
-      output = `${output}\n${error.message}`.trim()
+      const message = isWindows && error.code === "ENOENT"
+        ? "PowerShell 7 (pwsh) is required on Windows. Install it and make pwsh.exe available on PATH."
+        : error.message
+      output = `${output}\n${message}`.trim()
       finish(1)
     })
   })
@@ -336,8 +339,10 @@ export class AgentSession extends EventEmitter {
       'For a task you cannot complete, return {"type":"final","message":"<blocker and required next step>","error":"<short failure reason>"} instead of claiming success.',
       "To change files, ALWAYS prefer the write/edit actions over shell commands — they take plain strings and need no shell escaping.",
       "Paths are relative to the working directory. For edit, 'find' must appear exactly once (set \"all\":true to replace every occurrence).",
-      "For shell commands: they are already executed via powershell.exe -Command, so NEVER wrap a command in another 'powershell -Command'.",
-      "Escape quotes inside PowerShell strings with a backtick (`\"), never a backslash, and avoid && (this is Windows PowerShell 5.1).",
+      ...(process.platform === "win32" ? [
+        "Shell commands already execute directly in PowerShell 7 (pwsh.exe -NoProfile -NonInteractive -Command). Do not wrap them in another pwsh/powershell command or switch to Windows PowerShell 5.1.",
+        "Escape quotes inside PowerShell strings with a backtick (`\"), never a backslash.",
+      ] : ["Shell commands already execute in bash -lc; use Bash syntax."]),
       // Scheduled tasks outlive the session, so keep every one Minicode creates in one folder the
       // user can review and clean up, and make sure the user hears about it.
       "If you create a Windows scheduled task, register it in the \\Minicode\\ task folder (for example Register-ScheduledTask -TaskPath '\\Minicode\\' -TaskName '<descriptive name>' ...), never in the root folder or another one,",
