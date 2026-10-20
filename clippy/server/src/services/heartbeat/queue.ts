@@ -18,7 +18,8 @@ import {
   hasWorkspaceRestoreFailure,
 } from "@paperclipai/shared";
 import { nonIdleSlackIssueCondition } from "../slack-conversation-state.js";
-import { readQueuedInteractionResponse } from "../queued-interaction-response.js";
+import { queuedInteractionId, readQueuedInteractionResponse } from "../queued-interaction-response.js";
+import { projectHumanInteractionResponse } from "../execution-continuation.js";
 import {
   isConversation,
   isConversationExecutionWake,
@@ -2183,7 +2184,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           companyId: failed.companyId, runId: failed.id, actorId: opts.requestedByActorId,
         } });
       }
-      if (isConversationAdapter(agent.adapterType) || agent.adapterType === "paperclip_runner") {
+      if (isConversationAdapter(agent.adapterType) || agent.adapterType === "paperclip_runner" ||
+          agent.adapterType === "agent_pool") {
         enrichedContextSnapshot.previousRunId = failed.id;
         enrichedContextSnapshot.forceFreshSession = true;
       }
@@ -2679,9 +2681,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   : eq(agentWakeupRequests.requestedByActorId, opts.requestedByActorId ?? ""),
               sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
             ));
+            const savedResponse = pending && agent.adapterType === "agent_pool"
+              ? await readQueuedInteractionResponse(tx as unknown as Db, agent.companyId, issueId, pending.payload) : null;
+            const savedHumanResponse = opts.requestedByActorType === "user" && savedResponse &&
+              projectHumanInteractionResponse(savedResponse.interaction) &&
+              savedResponse.comment.authorUserId === opts.requestedByActorId &&
+              savedResponse.interaction.id === queuedInteractionId(payload);
             // The issue lock serializes cleanup callbacks and periodic workers.
             // An adopted, discarded, or edited receipt is no longer authority.
             if (!pending || (!(wakeCommentId && queuedCommentIdsFromWakePayload(pending.payload).includes(wakeCommentId)) &&
+                !savedHumanResponse &&
                 !(opts.queuedCommentInterruptId && await readQueuedInteractionResponse(tx as unknown as Db,
                   agent.companyId, issueId, pending.payload)))) {
               return { kind: "deferred" as const };
@@ -3159,6 +3168,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             commentId: wakeCommentId ?? null, failedRunId: opts.failedRunId, successorRunId: explicitContinuationRunId,
             queuedCommentInterruptId: opts.queuedCommentInterruptId,
             queuedCommentRequestId: opts.queuedCommentRequestId,
+            interactionPayload: payload,
             dryRun: true,
             onBlocked: (reason, message) => { continuationWait = { reason, message }; },
           }))) return deferBlockedExecution(executionBlocker);
@@ -3929,6 +3939,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             commentId: wakeCommentId ?? null, failedRunId: opts.failedRunId, successorRunId: explicitContinuationRunId,
             queuedCommentInterruptId: opts.queuedCommentInterruptId,
             queuedCommentRequestId: opts.queuedCommentRequestId,
+            interactionPayload: payload,
           });
           if (!explicitContinuation && executionBlocker) return deferBlockedExecution(executionBlocker);
           if (explicitContinuation) {

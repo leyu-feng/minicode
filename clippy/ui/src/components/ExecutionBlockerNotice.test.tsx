@@ -39,6 +39,17 @@ describe("stopped task recovery notice", () => {
     expect(notice.classList.contains("task-context-notice")).toBe(true);
     expect(notice.querySelector("a")?.getAttribute("href")).toBe("/agents/agent/runs/failed-run");
   });
+  it("does not override a backend retry denial for a failed legacy worker run", async () => {
+    await act(async () => root.render(<QueryClientProvider client={client}>
+      <ExecutionBlockerNotice companyId="company" issueId="task" onRetried={onRetried} blocker={{
+        recoveryActionId: "recovery", runId: "failed-run", agentId: "agent",
+        cause: "legacy_execution_requires_reconciliation", canRetry: false,
+        nextAction: "The previous worker has no verified stop receipt.",
+      }} />
+    </QueryClientProvider>));
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.querySelector("a")?.textContent).toBe("Inspect run");
+  });
   it.each([false, true])("explains cancelled runs and saved input; continue eligibility %s", async canContinue => {
     await act(async () => root.render(<QueryClientProvider client={client}>
       <ExecutionBlockerNotice companyId="company" issueId="task" onRetried={onRetried} blocker={{

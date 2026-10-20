@@ -169,6 +169,27 @@ result uses a nonzero exit code and optional sanitized `error` (up to 2,000
 characters). The server acknowledges events with `ack`, `runId`, `seq`, and
 `completed`. Retain unacknowledged events and the final result until acknowledged.
 Send `ready` only after completion is acknowledged and tool work has stopped.
+The broker settles the assignment only after this final `ready`, and records a
+server-owned stop receipt bound to the run, company, worker process and result
+sequence. A result without `ready`, a lost process, an expired reconnect lease,
+or unacknowledged cancellation is not evidence of a stopped assignment.
+
+If no idle compatible worker is available, the broker fails the run with
+`agent_pool_worker_unavailable` and records bootstrap evidence that no assignment
+was dispatched. This remains a failed, explicitly retriable run, not an
+unknown-action reconciliation hold, even after repeated availability failures.
+Connect an eligible worker and retry to start a fresh assignment. A failure
+after dispatch does not receive this no-dispatch evidence.
+
+When human input is needed, save the question, progress and durable artifacts
+through the task APIs, leave the task waiting/blocked, and finish the assignment
+normally without an error. Do not hold the worker or poll for an answer.
+A saved human answer or explicit retry starts a fresh assignment for the same
+agent on any available worker, with the original task, conversation, human
+responses and recorded completed actions. Never replay prior tool calls or
+infer the outcome of an uncertain mutation. Actual execution/publication failures
+remain failures; a new user turn can retire their execution hold only after the
+broker's stop receipt and normal authority, decision and cleanup gates pass.
 
 Raw tool output is model input, not a required public log event. Workers may
 offer normal/verbose logging; normal should retain meaningful progress,

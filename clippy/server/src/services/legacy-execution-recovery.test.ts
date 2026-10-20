@@ -10,6 +10,19 @@ const stopped = {
   },
 };
 
+it("keeps worker-unavailable failures retriable after repeated attempts only with no-dispatch proof", () => {
+  const run = { runtimeMode: "legacy", status: "failed", errorCode: "agent_pool_worker_unavailable",
+    scheduledRetryAttempt: 5, resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } };
+  expect(legacyExecutionNeedsReconciliation(run)).toBe(false);
+  expect(legacyExecutionNeedsReconciliation({ ...run, resultJson: {} })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...run, resultJson: {
+    executionRecovery: { kind: "bootstrap", providerWorkStarted: true },
+  } })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...run, resultJson: {
+    ...run.resultJson, workspaceRestoreFailure: "restore_unsafe_archive",
+  } })).toBe(true);
+});
+
 it.each(["workspace_git_scan_timeout", "workspace_git_scan_saturated"])("does not invent unknown provider actions after exhausted %s bootstrap retries", (errorCode) => {
   const run = { runtimeMode: "legacy", status: "failed", errorCode, scheduledRetryAttempt: 2,
     resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } };

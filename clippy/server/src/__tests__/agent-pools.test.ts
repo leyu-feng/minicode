@@ -177,7 +177,7 @@ const execFileAsync = promisify(execFile);
     const origin = `http://127.0.0.1:${address.port}`;
     const worker = spawn(process.execPath, [
       fileURLToPath(new URL("../../../../minicode/cli.js", import.meta.url)),
-      "worker", "--server", origin, "--worker-id", pairing.workerId, "--repo-root", source,
+      "worker", "--server", origin, "--worker-id", pairing.workerId, "--repo-root", source, "--workspace-mode", "clone",
     ], {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, MINICODE_CONFIG_HOME: path.join(directory, "config"),
@@ -206,7 +206,12 @@ const execFileAsync = promisify(execFile);
         runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
         onLog: async (_stream, data) => { logs.push(data); },
       });
+      expect(result.errorMessage).toBeUndefined();
       expect(result.exitCode).toBe(0);
+      expect(result.resultJson).toMatchObject({ agentPoolStop: {
+        schema: "agent_pool_stop_v1", companyId, workerId: pairing.workerId,
+      } });
+      expect(agentPoolBroker.status(pairing.workerId)).toBe("idle");
       expect(await readFile(path.join(workspace, "proof.txt"), "utf8")).toBe("AgentPool completed this assignment");
       await expect(stat(path.join(source, "proof.txt"))).rejects.toMatchObject({ code: "ENOENT" });
       expect(modelCalls).toBe(2);
