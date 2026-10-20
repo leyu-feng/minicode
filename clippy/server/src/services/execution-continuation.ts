@@ -16,6 +16,7 @@ import { hasConversationContinuationPolicy } from "./conversation-continuation.j
 import { queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
 import { childReviewOutcomes } from "./native-runtime/child-review-outcomes.js";
 import { isCompletedOnboardingHandoffWake } from "./chat-completion-delivery.js";
+import { readQueuedInteractionResponse } from "./queued-interaction-response.js";
 
 export class StaleExecutionContinuationError extends Error {
   constructor(readonly code: "continuation_task_ownership_changed") {
@@ -391,11 +392,21 @@ export async function buildExecutionContinuation(input: {
         sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is not null`,
         input.runId ? eq(agentWakeupRequests.runId, input.runId) : undefined,
       )) : [];
+    const responseInteraction = interactions.find(row => row.id === explicitContinuation.interactionId);
+    const response = responseInteraction ? await readQueuedInteractionResponse(db, companyId, issueId, {
+      mutation: "interaction", interactionId: responseInteraction.id, interactionStatus: responseInteraction.status,
+    }) : null;
     const authorization = continuationAuthorizations.find(value => failedRunId
           ? value.failedRunId === failedRunId && retryWakes.some(wake =>
               wake.runId === value.runId && wake.requestedByActorId === value.actorId &&
               priorRuns.some(run => run.id === wake.runId && run.retryOfRunId === failedRunId))
-          : rows.some(comment => comment.id === value.commentId &&
+          : value.interactionId
+            ? response && projectHumanInteractionResponse(response.interaction) &&
+              response.comment.authorUserId === value.actorId &&
+              value.interactionId === response.source.interactionId &&
+              value.interactionUpdatedAt === response.comment.updatedAt.toISOString() &&
+              value.interactionBodyHash === createHash("sha256").update(response.comment.body).digest("hex")
+            : rows.some(comment => comment.id === value.commentId &&
               comment.authorType === "user" &&
               (!("commentUpdatedAt" in value || "commentBodyHash" in value || value.automaticRetry) || (
                 value.commentUpdatedAt === comment.updatedAt.toISOString() &&

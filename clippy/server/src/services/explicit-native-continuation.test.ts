@@ -22,6 +22,9 @@ import { admitExplicitNativeContinuation } from "./explicit-native-continuation.
 import { adapterExecutionControls, createAdapterExecutionControl } from "./adapter-execution-control.js";
 import { CONVERSATION_CONTINUATION_POLICY } from "./conversation-continuation.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
+import { AgentPoolBroker } from "./agent-pool-broker.js";
+import { terminalizeLegacyExecution } from "./legacy-execution-recovery.js";
+import { canRetryStoppedRun } from "./cancelled-native-startup.js";
 import { heartbeatService, persistHeartbeatRunProcessMetadata, type HeartbeatEnvironmentRuntime } from "./heartbeat.js";
 import { getExecutionBlocker } from "./execution-blocker.js";
 import { createDurableChatWakeupRequest } from "./durable-chat-wakeup.js";
@@ -54,6 +57,212 @@ const support = await getEmbeddedPostgresTestSupport();
       actorType: "user", actorId: "board", reason: "issue_commented" };
   }
   type Fixture = Awaited<ReturnType<typeof seed>>;
+  async function seedPool() {
+    const f = await seed();
+    await db.update(agents).set({ adapterType: "agent_pool" }).where(eq(agents.id, f.agentId));
+    await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+    const stop = {
+      schema: "agent_pool_stop_v1", runId: f.sourceRunId, companyId: f.companyId,
+      workerId: randomUUID(), instanceId: randomUUID(), resultSequence: 3,
+      stoppedAt: "2026-09-11T10:00:00.000Z",
+    };
+    await db.update(heartbeatRuns).set({
+      runtimeMode: "legacy", nativeIssueId: null, processPid: null,
+      runnerProfileJson: { adapterDispatch: { adapterType: "agent_pool" } },
+      resultJson: { agentPoolStop: stop, apiToolReceipts: {
+        saved: { state: "completed", operationId: "save_progress", result: { commentId: f.commentId } },
+      } },
+    }).where(eq(heartbeatRuns.id, f.sourceRunId));
+    await db.update(issueRecoveryActions).set({ cause: "legacy_execution_requires_reconciliation" })
+      .where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    return { ...f, stop };
+  }
+
+  it("persists a no-worker failure without a reconciliation hold and admits one explicit fresh retry", async () => {
+    const f = await seedPool();
+    await db.delete(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    const [source] = await db.update(heartbeatRuns).set({
+      status: "running", finishedAt: null, resultJson: null, scheduledRetryAttempt: 5,
+    }).where(eq(heartbeatRuns.id, f.sourceRunId)).returning();
+    const result = await new AgentPoolBroker().execute({
+      runId: f.sourceRunId,
+      agent: { id: f.agentId, name: "Pool agent", companyId: f.companyId, adapterType: "agent_pool", adapterConfig: {} },
+      config: { name: "default" }, context: { issueId: f.issueId },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: f.issueId },
+      onLog: vi.fn(async () => {}), onDispatch: vi.fn(),
+    });
+    const failed = await terminalizeLegacyExecution({
+      db, run: source, status: "failed", reconcileIfNeeded: true,
+      patch: { finishedAt: new Date(), errorCode: result.errorCode, error: result.errorMessage,
+        exitCode: result.exitCode, resultJson: { executionRecovery: {
+          ...result.executionRecovery, providerDiagnostics: "not needed for retry admission",
+        } } },
+    });
+    expect(failed).toMatchObject({ status: "failed", errorCode: "agent_pool_worker_unavailable" });
+    expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
+    const heartbeat = heartbeatService(db);
+    const projected = await heartbeat.getRun(f.sourceRunId, { includeExecutionEvidence: true });
+    expect(projected?.resultJson?.executionRecovery).toEqual({ kind: "bootstrap", providerWorkStarted: false });
+    expect(await canRetryStoppedRun(db, projected!)).toBe(true);
+    await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "running" });
+    const opts = {
+      source: "on_demand" as const, triggerDetail: "manual" as const, reason: "retry_failed_run",
+      failedRunId: f.sourceRunId, requestedByActorType: "user" as const, requestedByActorId: "board",
+      idempotencyKey: `no-worker-retry:${f.sourceRunId}`,
+      payload: { issueId: f.issueId }, contextSnapshot: { issueId: f.issueId },
+    };
+    const retry = await heartbeat.wakeup(f.agentId, opts);
+    expect(retry).toMatchObject({ status: "queued", contextSnapshot: {
+      forceFreshSession: true, previousRunId: f.sourceRunId,
+    } });
+    await heartbeat.wakeup(f.agentId, opts);
+    expect(await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, f.companyId), eq(heartbeatRuns.status, "queued"),
+    ))).toHaveLength(1);
+  });
+
+  it.each(["message", "retry", "answer", "early_answer"])("starts exactly one fresh AgentPool turn with preserved context for %s", async kind => {
+    const f = await seedPool();
+    const interactionId = randomUUID();
+    const answered = kind.endsWith("answer");
+    const resolvedAt = new Date(kind === "early_answer" ? "2026-09-11T09:59:59Z" : "2026-09-11T11:00:00Z");
+    if (answered) await db.insert(issueThreadInteractions).values({
+      id: interactionId, companyId: f.companyId, issueId: f.issueId, sourceRunId: f.sourceRunId,
+      createdByAgentId: f.agentId, kind: "ask_user_questions", status: "answered",
+      resolvedByUserId: "board", resolvedAt, createdAt: new Date("2026-09-11T09:59:00Z"), updatedAt: resolvedAt,
+      payload: { version: 1, questions: [{ id: "access", prompt: "Which API?", selectionMode: "single", options: [] }] },
+      result: { version: 1, answers: [{ questionId: "access", optionIds: [], otherText: "Use the authorized read-only deployed API." }] },
+    });
+    // Keep admission real, without launching a provider while inspecting its queued context.
+    await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "running" });
+    const heartbeat = heartbeatService(db);
+    const opts = {
+      source: kind === "retry" ? "on_demand" as const : "automation" as const,
+      triggerDetail: "manual" as const,
+      reason: kind === "retry" ? "retry_failed_run" : "issue_commented",
+      ...(kind === "retry" ? { failedRunId: f.sourceRunId } : {}),
+      requestedByActorType: "user" as const, requestedByActorId: "board",
+      idempotencyKey: `pool-continuation:${f.sourceRunId}`,
+      payload: { issueId: f.issueId, ...(answered
+        ? { mutation: "interaction", interactionId, interactionStatus: "answered" }
+        : kind === "message" ? { commentId: f.commentId } : {}) },
+      contextSnapshot: { issueId: f.issueId, ...(answered
+        ? { interactionId, interactionStatus: "answered", sourceRunId: f.sourceRunId }
+        : kind === "message" ? { wakeCommentId: f.commentId } : {}) },
+    };
+    const successor = await heartbeat.wakeup(f.agentId, opts);
+    expect(successor).toMatchObject({ status: "queued", agentId: f.agentId, contextSnapshot: {
+      forceFreshSession: true, previousRunId: f.sourceRunId,
+      explicitUserContinuation: { previousRunId: f.sourceRunId, ...(answered ? { interactionId } : {}) },
+    } });
+    await heartbeat.wakeup(f.agentId, opts);
+    expect(await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, f.companyId),
+      eq(heartbeatRuns.status, "queued")))).toHaveLength(1);
+    expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
+    const envelope = await buildExecutionContinuation({ db, companyId: f.companyId, issueId: f.issueId,
+      agentId: f.agentId, runId: successor!.id, context: successor!.contextSnapshot!, summary: null, exposeLowTrustRaw: false });
+    expect(envelope.objective).toBe("What happened?");
+    expect(envelope.completedActions).toEqual([expect.objectContaining({ operationId: "save_progress" })]);
+    if (answered) expect(envelope.humanResponses).toEqual([expect.objectContaining({
+      id: interactionId, result: { answers: [{ questionId: "access", optionIds: [], otherText: "Use the authorized read-only deployed API." }] },
+    })]);
+    const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId));
+    expect(source).toMatchObject({ status: "failed", resultJson: { agentPoolStop: f.stop } });
+    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    expect(action.evidence.automaticRecovery).toMatchObject({ replay: "explicit_user_continuation", actionOutcome: "unknown" });
+    if (kind === "answer") {
+      await db.update(issueThreadInteractions).set({ result: { version: 1, answers: [
+        { questionId: "access", optionIds: [], otherText: "A different answer after admission." },
+      ] } }).where(eq(issueThreadInteractions.id, interactionId));
+      await expect(buildExecutionContinuation({ db, companyId: f.companyId, issueId: f.issueId,
+        agentId: f.agentId, runId: successor!.id, context: successor!.contextSnapshot!, summary: null, exposeLowTrustRaw: false }))
+        .rejects.toThrow("continuation_user_authorization_missing");
+    }
+  });
+
+  it.each([true, false])("resumes an already saved AgentPool answer only after stop is proven (%s)", async stopped => {
+    const f = await seedPool(), interactionId = randomUUID();
+    await db.update(heartbeatRuns).set({ resultJson: null }).where(eq(heartbeatRuns.id, f.sourceRunId));
+    await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "running" });
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId, companyId: f.companyId, issueId: f.issueId, sourceRunId: f.sourceRunId,
+      kind: "ask_user_questions", status: "answered", resolvedByUserId: "board",
+      resolvedAt: new Date("2026-09-11T09:59:59Z"),
+      payload: { version: 1, questions: [] },
+      result: { version: 1, answers: [{ questionId: "access", optionIds: [], otherText: "Use the read-only API." }] },
+    });
+    const heartbeat = heartbeatService(db);
+    await heartbeat.wakeup(f.agentId, {
+      source: "automation", reason: "issue_commented", requestedByActorType: "user", requestedByActorId: "board",
+      payload: { issueId: f.issueId, mutation: "interaction", interactionId, interactionStatus: "answered" },
+      contextSnapshot: { issueId: f.issueId, interactionId, interactionStatus: "answered", sourceRunId: f.sourceRunId },
+    });
+    const [saved] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId));
+    expect(saved).toMatchObject({ status: "deferred_issue_execution", runId: null });
+    if (stopped) await db.update(heartbeatRuns).set({ resultJson: { agentPoolStop: f.stop } })
+      .where(eq(heartbeatRuns.id, f.sourceRunId));
+    await db.update(agentWakeupRequests).set({ updatedAt: new Date(0) }).where(eq(agentWakeupRequests.id, saved.id));
+    await Promise.all([heartbeat.resumeExecutionWaitComments(), heartbeat.resumeExecutionWaitComments()]);
+    const runs = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, f.companyId), eq(heartbeatRuns.status, "queued")));
+    const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, saved.id));
+    expect(runs, JSON.stringify(receipt)).toHaveLength(stopped ? 1 : 0);
+    expect(receipt).toMatchObject(stopped ? { status: "coalesced", runId: runs[0].id } : { status: "deferred_issue_execution", runId: null });
+    if (stopped) expect(runs[0].contextSnapshot).toMatchObject({
+      forceFreshSession: true, previousRunId: f.sourceRunId, explicitUserContinuation: { interactionId },
+    });
+  });
+
+  it.each(["other_human", "agent", "run"])("does not treat an AgentPool %s response as this user's continuation authority", async resolver => {
+    const f = await seedPool();
+    const interactionId = randomUUID();
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId, companyId: f.companyId, issueId: f.issueId, sourceRunId: f.sourceRunId,
+      kind: "ask_user_questions", status: "answered", resolvedAt: new Date(),
+      resolvedByUserId: resolver === "other_human" ? "another-user" : "board",
+      resolvedByAgentId: resolver === "agent" ? f.agentId : null,
+      resolvedByRunId: resolver === "run" ? f.sourceRunId : null,
+      payload: { version: 1, questions: [] }, result: { version: 1, answers: [] },
+    });
+    expect(await db.transaction(tx => admitExplicitNativeContinuation({
+      ...f, commentId: null, db: tx as unknown as typeof db,
+      interactionPayload: { mutation: "interaction", interactionId, interactionStatus: "answered" },
+    }))).toBeNull();
+    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    expect(action.evidence.automaticRecovery).toMatchObject({ replay: "blocked" });
+  });
+
+  it.each(["missing", "foreign_run", "foreign_company", "changed_adapter", "running", "pending_question", "pause", "changed_owner"])(
+    "keeps AgentPool execution held with %s evidence", async kind => {
+      const f = await seedPool();
+      if (["missing", "foreign_run", "foreign_company"].includes(kind)) await db.update(heartbeatRuns).set({
+        resultJson: kind === "missing" ? null : { agentPoolStop: { ...f.stop,
+          ...(kind === "foreign_run" ? { runId: randomUUID() } : { companyId: randomUUID() }) } },
+      }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      if (kind === "changed_adapter") await db.update(heartbeatRuns).set({
+        runnerProfileJson: { adapterDispatch: { adapterType: "process" } },
+      }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      if (kind === "running") await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      if (kind === "pending_question") await db.insert(issueThreadInteractions).values({
+        companyId: f.companyId, issueId: f.issueId, createdByAgentId: f.agentId,
+        kind: "ask_user_questions", status: "pending", payload: { version: 1, questions: [] },
+      });
+      if (kind === "changed_owner") await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, f.issueId));
+      if (kind === "pause") {
+        const holdId = randomUUID();
+        await db.insert(issueTreeHolds).values({ id: holdId, companyId: f.companyId, rootIssueId: f.issueId, mode: "pause", status: "active" });
+        await db.insert(issueTreeHoldMembers).values({ companyId: f.companyId, holdId, issueId: f.issueId, depth: 0, issueTitle: "Deploy", issueStatus: "blocked" });
+      }
+      await heartbeatService(db).wakeup(f.agentId, {
+        source: "automation", reason: "issue_commented", requestedByActorType: "user", requestedByActorId: "board",
+        payload: { issueId: f.issueId, commentId: f.commentId },
+        contextSnapshot: { issueId: f.issueId, wakeCommentId: f.commentId },
+      });
+      expect(await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, f.companyId),
+        eq(heartbeatRuns.status, "queued")))).toHaveLength(0);
+      const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+      expect(action.evidence.automaticRecovery).toMatchObject({ replay: "blocked", actionOutcome: "unknown" });
+    },
+  );
   it.each(["handoff", "foreign_task", "running_source", "different_owner", "mention", "interaction", "chat"])("adopts former-owner comments only during an authorized handoff (%s)", async kind => {
     const f = await seed(), nextAgentId = randomUUID(), queueId = randomUUID();
     await db.delete(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));

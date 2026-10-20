@@ -45,7 +45,7 @@ export async function readQueuedInteractionResponse(db: Db, companyId: string, i
     kind: "interaction", interactionId: interaction.id, interactionKind: interaction.kind,
     requiresFreshSession: record(record(payload)._paperclipWakeContext).forceFreshSession === true,
   };
-  return { comment, source };
+  return { comment, source, interaction };
 }
 
 /** A saved answer is a live continuation, even though its card is no longer pending. */

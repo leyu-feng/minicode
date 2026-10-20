@@ -320,6 +320,10 @@ const heartbeatRunExecutionEvidenceColumn = sql<Record<string, unknown> | null>`
     'cancelledByActorType', ${heartbeatRuns.resultJson} -> 'cancelledByActorType',
     'cancelledByUserId', ${heartbeatRuns.resultJson} -> 'cancelledByUserId',
     'conversationContinuation', ${heartbeatRuns.resultJson} -> 'conversationContinuation',
+    'agentPoolStop', ${heartbeatRuns.resultJson} -> 'agentPoolStop',
+    'executionRecovery', case when ${heartbeatRuns.resultJson} -> 'executionRecovery'
+      @> '{"kind":"bootstrap","providerWorkStarted":false}'::jsonb
+      then '{"kind":"bootstrap","providerWorkStarted":false}'::jsonb end,
     'cancellation', ${heartbeatRuns.resultJson} -> 'cancellation',
     'acpToolInventoryComplete', ${heartbeatRuns.resultJson} -> 'acpToolInventoryComplete',
     'acpPendingToolCount', ${heartbeatRuns.resultJson} -> 'acpPendingToolCount'

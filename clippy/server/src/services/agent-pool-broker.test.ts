@@ -72,9 +72,9 @@ describe("AgentPool execution channel", () => {
       const result = broker.execute(ctx);
       expect(await client.take("task")).toMatchObject({ agent: { id: agentId }, runId: ctx.runId });
       client.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
-      await result;
       await client.take("ack");
       client.send({ type: "ready" });
+      await result;
       await vi.waitFor(() => expect(broker.status(client.id)).toBe("idle"));
     }
   });
@@ -83,7 +83,10 @@ describe("AgentPool execution channel", () => {
     const { broker, worker } = await harness();
     const legacy = await worker(randomUUID(), randomUUID(), null, true, []);
     const ctx = context();
-    await expect(broker.execute(ctx)).rejects.toThrow("skill_bundle_v1");
+    expect(await broker.execute(ctx)).toMatchObject({
+      exitCode: 1, errorMessage: expect.stringContaining("skill_bundle_v1"),
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+    });
     expect(ctx.onDispatch).not.toHaveBeenCalled();
     expect(legacy.messages).toEqual([]);
     expect(broker.status(legacy.id)).toBe("idle");
@@ -98,7 +101,10 @@ describe("AgentPool execution channel", () => {
       revisionId: "saved-revision", contentSha256: createHash("sha256").update("Agent-specific operating instructions").digest("hex"),
     };
     ctx.context.paperclipAgentInstructions = instructions;
-    await expect(broker.execute(ctx)).rejects.toThrow("inline_instructions_v1");
+    expect(await broker.execute(ctx)).toMatchObject({
+      exitCode: 1, errorMessage: expect.stringContaining("inline_instructions_v1"),
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+    });
     expect(legacy.messages).toEqual([]);
     expect(ctx.onDispatch).not.toHaveBeenCalled();
     const compatible = await worker(randomUUID(), randomUUID(), null, true, ["inline_instructions_v1", "skill_bundle_v1", "future_extension"]);
@@ -113,6 +119,8 @@ describe("AgentPool execution channel", () => {
     expect(task.instructions).toMatchObject({ content: "Agent-specific operating instructions" });
     expect(legacy.messages).toEqual([]);
     compatible.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await compatible.take("ack");
+    compatible.send({ type: "ready" });
     await result;
   });
 
@@ -149,6 +157,8 @@ describe("AgentPool execution channel", () => {
     const resumed = await worker(client.id, client.instanceId, ctx.runId);
     expect(broker.hasConnectedWorker("company-a", "default")).toBe(true);
     resumed.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await resumed.take("ack");
+    resumed.send({ type: "ready" });
     await result;
     broker.revoke(client.id);
     expect(broker.hasConnectedWorker("company-a", "default")).toBe(false);
@@ -156,19 +166,32 @@ describe("AgentPool execution channel", () => {
 
   it("fails offline, isolates companies, and assigns each run to exactly one idle worker", async () => {
     const { broker, worker } = await harness();
-    await expect(broker.execute(context())).rejects.toThrow("no available");
+    const unavailable = {
+      exitCode: 1, errorCode: "agent_pool_worker_unavailable",
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+    };
+    const offline = context();
+    expect(await broker.execute(offline)).toMatchObject(unavailable);
+    expect(offline.onDispatch).not.toHaveBeenCalled();
     const first = await worker();
     const second = await worker();
-    await expect(broker.execute(context(randomUUID(), "company-b"))).rejects.toThrow("no available");
+    const foreign = context(randomUUID(), "company-b");
+    expect(await broker.execute(foreign)).toMatchObject(unavailable);
+    expect(foreign.onDispatch).not.toHaveBeenCalled();
     const one = context();
     const two = context();
     const results = [broker.execute(one), broker.execute(two)];
-    await expect(broker.execute(context())).rejects.toThrow("no available");
+    const busy = context();
+    expect(await broker.execute(busy)).toMatchObject(unavailable);
+    expect(busy.onDispatch).not.toHaveBeenCalled();
     const tasks = await Promise.all([first.take("task"), second.take("task")]);
     expect(new Set(tasks.map((task) => task.runId))).toEqual(new Set([one.runId, two.runId]));
     expect(one.onDispatch).toHaveBeenCalledOnce();
+    expect(two.onDispatch).toHaveBeenCalledOnce();
     for (const [index, client] of [first, second].entries()) {
       client.send({ type: "result", runId: tasks[index]!.runId, seq: 1, exitCode: 0 });
+      await client.take("ack");
+      client.send({ type: "ready" });
     }
     expect((await Promise.all(results)).map((result) => result.exitCode)).toEqual([0, 0]);
   });
@@ -189,6 +212,8 @@ describe("AgentPool execution channel", () => {
     resumed.send({ type: "log", runId: ctx.runId, seq: 2, stream: "stderr", data: "after" });
     await resumed.take("ack");
     resumed.send({ type: "result", runId: ctx.runId, seq: 3, exitCode: 1, error: "model failed" });
+    await resumed.take("ack");
+    resumed.send({ type: "ready" });
     await expect(result).resolves.toMatchObject({ exitCode: 1, errorMessage: "model failed" });
     expect(ctx.onLog).toHaveBeenCalledTimes(2);
     expect(resumed.messages.some((message) => message.type === "task")).toBe(false);
@@ -201,11 +226,15 @@ describe("AgentPool execution channel", () => {
     const result = broker.execute(ctx);
     await first.take("task");
     first.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
-    await result;
+    await first.take("ack");
     await first.disconnect();
     const resumed = await worker(first.id, first.instanceId, ctx.runId);
     expect(resumed.welcome).toMatchObject({ ack: 1, completed: true, runId: ctx.runId });
     resumed.send({ type: "ready" });
+    await expect(result).resolves.toMatchObject({ resultJson: { agentPoolStop: {
+      schema: "agent_pool_stop_v1", runId: ctx.runId, workerId: first.id,
+      instanceId: first.instanceId, resultSequence: 1,
+    } } });
     await vi.waitFor(() => expect(broker.status(first.id)).toBe("idle"));
     expect(resumed.messages.some((message) => message.type === "task")).toBe(false);
   });
@@ -248,6 +277,9 @@ describe("AgentPool execution channel", () => {
     expect(await client.take("cancel")).toMatchObject({ runId: ctx.runId });
     expect(settled).toBe(false);
     client.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 130 });
+    await client.take("ack");
+    expect(settled).toBe(false);
+    client.send({ type: "ready" });
     await expect(result).resolves.toMatchObject({ exitCode: 130 });
     expect(ctx.onCancellationReady).toHaveBeenCalledOnce();
   });
@@ -262,5 +294,22 @@ describe("AgentPool execution channel", () => {
     client.send({ type: "result", runId: ctx.runId, seq: 2, exitCode: 0 });
     await rejected;
     expect(ctx.onLog).not.toHaveBeenCalled();
+  });
+
+  it.each(["no_ready", "disconnect", "restart"])("does not certify a stopped assignment after result without ready (%s)", async kind => {
+    const { broker, worker } = await harness(100);
+    const first = await worker();
+    const ctx = context();
+    const resolved = vi.fn();
+    const result = broker.execute(ctx).then(resolved);
+    const rejected = expect(result).rejects.toThrow(/ready|lease expired|process restarted/);
+    await first.take("task");
+    first.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await first.take("ack");
+    expect(resolved).not.toHaveBeenCalled();
+    if (kind !== "no_ready") await first.disconnect();
+    if (kind === "restart") await worker(first.id);
+    await rejected;
+    expect(resolved).not.toHaveBeenCalled();
   });
 });

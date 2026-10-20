@@ -17,6 +17,7 @@ import {
 } from "../run-cancellation.js";
 import { settleSlackConversation } from "../slack-conversation-lifecycle.js";
 import { readQueuedInteractionResponse } from "../queued-interaction-response.js";
+import { hasAgentPoolExecutionStop } from "../agent-pool-execution-stop.js";
 import {
   isAcknowledgedNativeStop,
   acknowledgedNativeStopExecutionHasStopped,
@@ -414,6 +415,8 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
 
   async function resumeRemoteStopComments(run: typeof heartbeatRuns.$inferSelect, requestId?: string) {
     if (!isHeartbeatRunTerminalStatus(run.status) || adapterExecutionControls.has(run.id)) return;
+    const legacyRun = run.runtimeMode === "legacy" ? await getRun(run.id, { includeExecutionEvidence: true }) : null;
+    const stoppedPool = legacyRun && hasAgentPoolExecutionStop(legacyRun);
     const [preparationCoordinator] = run.runtimeMode === "legacy" && run.status === "cancelled" && !run.runtimeModeResolvedAt
       ? await db.select().from(nativeRunFinalizations).where(and(
           eq(nativeRunFinalizations.companyId, run.companyId), eq(nativeRunFinalizations.runId, run.id),
@@ -422,7 +425,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       await isCancelledNativeStartup(db, run, preparationCoordinator);
     if (run.runtimeMode !== "native" && !cancelledPreparation &&
         parseObject(run.resultJson?.startupCancellation).beforeNativeSelection !== true &&
-        !(await remoteExecutionHasStopped(db, run.companyId, run.id))) return;
+        !stoppedPool && !(await remoteExecutionHasStopped(db, run.companyId, run.id))) return;
     const issueId = run.nativeIssueId ?? (typeof run.contextSnapshot?.issueId === "string" ? run.contextSnapshot.issueId : null);
     if (!issueId) return;
     const currentRun = run.runtimeMode === "native" ? await getRun(run.id, { includeExecutionEvidence: true }) : null;
@@ -440,7 +443,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       await acknowledgedNativeStopExecutionHasStopped(db, currentRun) &&
       !(await getExecutionBlocker(db, run.companyId, issueId));
     const legacyContinuation = run.runtimeMode === "legacy" &&
-      hasConversationContinuationPolicy((await getRun(run.id, { includeExecutionEvidence: true }))?.resultJson) &&
+      hasConversationContinuationPolicy(legacyRun?.resultJson) &&
       !(await getExecutionBlocker(db, run.companyId, issueId));
     if (run.runtimeMode !== "native" && run.runtimeMode !== "legacy") return;
     const pending = await db.select().from(agentWakeupRequests).where(and(
@@ -490,7 +493,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         let wait = { reason: "execution_recovery", message: "Waiting for execution recovery. Your message is saved." };
         const admitted = await admitExplicitNativeContinuation({ db, companyId: run.companyId, issueId,
           agentId: run.agentId, actorType: wake.requestedByActorType, actorId: requestedByActorId,
-          reason, commentId, successorRunId: randomUUID(), dryRun: true,
+          reason, commentId, interactionPayload: payload, successorRunId: randomUUID(), dryRun: true,
           ...((run.runtimeMode === "native" || cancelledPreparation) ? { queuedCommentRequestId: wake.id } : {}),
           onBlocked: (reason, message) => { wait = { reason, message }; },
         });

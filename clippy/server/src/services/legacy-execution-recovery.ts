@@ -35,6 +35,8 @@ export function legacyExecutionNeedsReconciliation(
   if (normalizeMaxTurnStopReason(run.resultJson?.stopReason) ?? normalizeMaxTurnStopReason(run.errorCode)) return false;
   const evidence = run.resultJson?.executionRecovery as
     Record<string, unknown> | undefined;
+  if (run.errorCode === "agent_pool_worker_unavailable" &&
+      evidence?.kind === "bootstrap" && evidence.providerWorkStarted === false) return false;
   if (run.status === "cancelled" && evidence?.kind === "interrupted"
       && evidence.providerStopped === true && evidence.sessionPreserved === true
       && evidence.actionOutcomes === "settled"

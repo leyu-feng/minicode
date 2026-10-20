@@ -7,6 +7,7 @@ import {
 } from "@paperclipai/shared";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../adapters/types.js";
 import { readAgentPoolSkills } from "./agent-pool-skills.js";
+import { AGENT_POOL_STOP_SCHEMA } from "./agent-pool-execution-stop.js";
 
 export const AGENT_POOL_RECONNECT_MS = 60_000;
 export const AGENT_POOL_MAX_FRAME = 256 * 1024;
@@ -30,6 +31,8 @@ interface Run {
   bytes: number;
   cancelled: boolean;
   completed: boolean;
+  result?: AdapterExecutionResult;
+  completionTimer?: ReturnType<typeof setTimeout>;
   ctx: AdapterExecutionContext;
   resolve: (result: AdapterExecutionResult) => void;
   reject: (error: Error) => void;
@@ -74,7 +77,7 @@ export class AgentPoolBroker {
   }
 
   private fail(peer: Peer, message: string) {
-    if (peer.run && !peer.run.completed) {
+    if (peer.run) {
       peer.run.cleanup();
       peer.run.reject(new Error(message));
     }
@@ -148,8 +151,21 @@ export class AgentPoolBroker {
         if (!peer || peer.socket !== socket) return;
         if (readySchema.safeParse(value).success) {
           if (peer.run && !peer.run.completed) throw new Error("Worker cannot become idle during a run");
+          const run = peer.run;
           peer.run = null;
           peer.ready = true;
+          if (run?.result) {
+            run.cleanup();
+            run.resolve({
+              ...run.result,
+              resultJson: { agentPoolStop: {
+                schema: AGENT_POOL_STOP_SCHEMA,
+                runId: run.id, companyId: identity.companyId,
+                workerId: identity.id, instanceId: peer.instanceId,
+                resultSequence: run.seq, stoppedAt: new Date().toISOString(),
+              } },
+            });
+          }
           return;
         }
         const event = eventSchema.parse(value);
@@ -167,11 +183,14 @@ export class AgentPoolBroker {
         } else {
           run.completed = true;
           run.cleanup();
-          run.resolve({
+          run.result = {
             exitCode: run.cancelled ? 130 : event.exitCode, signal: null, timedOut: false,
             ...(event.error ? { errorMessage: event.error, errorCode: "agent_pool_worker_error" } : {}),
             summary: run.cancelled ? "AgentPool run cancelled" : `AgentPool worker ${identity.id} finished`,
-          });
+          };
+          run.completionTimer = setTimeout(() => this.revoke(identity.id,
+            "AgentPool completion was not followed by ready; worker quarantined"), this.reconnectMs);
+          run.completionTimer.unref();
         }
         run.seq = event.seq;
         this.send(peer, { type: "ack", runId: run.id, seq: run.seq, completed: run.completed });
@@ -218,10 +237,14 @@ export class AgentPoolBroker {
     const available = [...this.peers.values()].filter((candidate) =>
       candidate.identity.companyId === ctx.agent.companyId && candidate.identity.poolName === name
       && candidate.ready && !candidate.run && candidate.socket?.readyState === WebSocket.OPEN);
-    if (!available.length) throw new Error(`AgentPool '${name}' has no available connected worker; connect a worker and retry`);
+    const unavailable = (errorMessage: string): AdapterExecutionResult => ({
+      exitCode: 1, signal: null, timedOut: false, errorCode: "agent_pool_worker_unavailable", errorMessage,
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+    });
+    if (!available.length) return unavailable(`AgentPool '${name}' has no available connected worker; connect a worker and retry`);
     const required = [AGENT_POOL_SKILL_BUNDLE, ...(instructions ? [AGENT_POOL_INLINE_INSTRUCTIONS] : [])];
     const peer = available.find(candidate => required.every(capability => candidate.capabilities.includes(capability)));
-    if (!peer) throw new Error(`AgentPool '${name}' has no available worker supporting ${required.join(", ")}; upgrade or connect a compatible worker and retry`);
+    if (!peer) return unavailable(`AgentPool '${name}' has no available worker supporting ${required.join(", ")}; upgrade or connect a compatible worker and retry`);
     const { paperclipAgentInstructions: _instructions, ...context } = ctx.context;
     const task = JSON.stringify(agentPoolTaskSchema.parse({
       type: "task", protocolVersion: AGENT_POOL_PROTOCOL_VERSION, runId: ctx.runId,
@@ -244,13 +267,15 @@ export class AgentPoolBroker {
         cancelTimer.unref();
       };
       peer.ready = false;
-      peer.run = {
+      const run: Run = {
         id: ctx.runId, seq: 0, bytes: 0, cancelled: false, completed: false, ctx, resolve, reject,
         cleanup: () => {
           ctx.signal?.removeEventListener("abort", cancel);
           if (cancelTimer) clearTimeout(cancelTimer);
+          if (run.completionTimer) clearTimeout(run.completionTimer);
         },
       };
+      peer.run = run;
       ctx.signal?.addEventListener("abort", cancel, { once: true });
       try {
         ctx.onDispatch?.();

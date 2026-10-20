@@ -6,6 +6,7 @@ import { PROCESS_IDENTITY_RECORDED, PROCESS_START_REQUESTED } from "./native-loc
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { canContinueCancelledRun } from "./run-cancellation.js";
 import { legacyControllerBootId } from "./legacy-controller-lease.js";
+import { hasAgentPoolExecutionStop } from "./agent-pool-execution-stop.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 type Coordinator = typeof nativeRunFinalizations.$inferSelect;
@@ -13,6 +14,11 @@ type Coordinator = typeof nativeRunFinalizations.$inferSelect;
 /** Candidate for explicit user Retry only, never automatic replay after Stop. */
 export async function canRetryStoppedRun(db: Db, run: Run): Promise<boolean> {
   if (run.errorCode === "native_session_cleanup_quarantined") return false;
+  if (claimedAdapterType(run) === "agent_pool" && ["failed", "timed_out"].includes(run.status)) {
+    const recovery = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+    return hasAgentPoolExecutionStop(run) ||
+      (recovery?.kind === "bootstrap" && recovery.providerWorkStarted === false);
+  }
   if (["failed", "timed_out"].includes(run.status) || canContinueCancelledRun(run)) return true;
   if (run.status !== "cancelled" || !run.finishedAt || run.processPid || run.processGroupId ||
       run.processStartedAt || run.sessionIdAfter) return false;
