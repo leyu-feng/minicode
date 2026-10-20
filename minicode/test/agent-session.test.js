@@ -1,13 +1,82 @@
 import assert from "node:assert/strict"
 import childProcess from "node:child_process"
 import { EventEmitter } from "node:events"
+import { fileURLToPath } from "node:url"
 import test, { afterEach } from "node:test"
 import { AgentSession, callModelOnce } from "../server/agent-session.js"
+import { ShellSession } from "../server/shell-session.js"
 
 const originalFetch = globalThis.fetch
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+})
+
+test("Windows agent commands use PowerShell 7 and serialize file contents as plain strings", { skip: process.platform !== "win32" }, async t => {
+  const file = fileURLToPath(new URL("../README.md", import.meta.url)).replaceAll("'", "''")
+  const requests = []
+  const actions = [
+    { type: "tool", command: `$ErrorActionPreference='Stop'; if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 required' }; $text=Get-Content -Raw -LiteralPath '${file}'; $body=(@{body=$text}|ConvertTo-Json -Depth 4|ConvertFrom-Json).body; if ($body -isnot [string] -or $body -cne $text) { throw 'Report body did not serialize as a plain string' }; Write-Output 'plain-string-verified'` },
+    { type: "final", message: "done" },
+  ]
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return Response.json({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] })
+  }
+  const session = new AgentSession({ id: "powershell-7", cwd: process.cwd() })
+  session.config = { api: "chat-completions", endpoint: "https://example.test", apiKey: "fixture", model: "fixture" }
+  t.after(() => session.dispose())
+  assert.equal((await session.write("Inspect the report")).exitCode, 0)
+  assert.match(requests[0].messages[0].content, /execute directly in PowerShell 7/)
+  assert.match(requests[1].messages.at(-1).content, /exitCode: 0[\s\S]*plain-string-verified/)
+})
+
+test("Windows terminal shells use PowerShell 7 and preserve state between commands", { skip: process.platform !== "win32", timeout: 15_000 }, async t => {
+  const session = new ShellSession({ id: "terminal-powershell-7", cwd: process.cwd() })
+  t.after(() => session.dispose())
+  let output = ""
+  session.on("output", ({ data }) => { output += data })
+  function execute(command) {
+    const done = new Promise(resolve => session.once("done", resolve))
+    session.write(command)
+    return done
+  }
+  assert.equal((await execute("$savedMajor=$PSVersionTable.PSVersion.Major; if ($savedMajor -lt 7) { throw 'PowerShell 7 required' }")).exitCode, 0)
+  assert.equal((await execute("Write-Output ('saved-major=' + $savedMajor)")).exitCode, 0)
+  assert.match(output, /saved-major=[7-9]\d*/)
+})
+
+test("missing PowerShell 7 fails commands explicitly without falling back", { skip: process.platform !== "win32" }, async t => {
+  const launches = []
+  t.mock.method(childProcess, "spawn", (file) => {
+    launches.push(file)
+    const proc = new EventEmitter()
+    proc.stdout = new EventEmitter()
+    proc.stderr = new EventEmitter()
+    proc.stdin = { end() {} }
+    queueMicrotask(() => {
+      proc.emit("error", Object.assign(new Error("spawn failed"), { code: "ENOENT" }))
+      proc.emit("close", -2)
+    })
+    return proc
+  })
+  const actions = [{ type: "tool", command: "Write-Output test" }, { type: "final", message: "Blocked", error: "PowerShell unavailable" }]
+  const requests = []
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return Response.json({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] })
+  }
+  const agent = new AgentSession({ id: "missing-powershell", cwd: process.cwd() })
+  agent.config = { api: "chat-completions", endpoint: "https://example.test", apiKey: "fixture", model: "fixture" }
+  t.after(() => agent.dispose())
+  assert.equal((await agent.write("Run command")).exitCode, 1)
+  assert.match(requests[1].messages.at(-1).content, /exitCode: 1[\s\S]*PowerShell 7 \(pwsh\) is required/)
+  const shell = new ShellSession({ id: "missing-terminal-powershell", cwd: process.cwd() })
+  let output = ""
+  shell.on("output", ({ data }) => { output += data })
+  await new Promise(resolve => shell.once("exit", resolve))
+  assert.match(output, /PowerShell 7 \(pwsh\) is required/)
+  assert.deepEqual(launches, ["pwsh.exe", "pwsh.exe"])
 })
 
 test("calls the Azure Responses API with an Entra token", async () => {

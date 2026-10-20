@@ -10,6 +10,12 @@ Both drive the same `AgentSession` class and the same `auth.js`, so there is one
 agent implementation and one credential path to maintain. Nothing here needs
 native modules (no `node-pty`, no platform binaries).
 
+On Windows, install **PowerShell 7** and ensure `pwsh.exe` is available on
+`PATH`. Agent commands and web terminal shells run directly in PowerShell 7,
+not Windows PowerShell 5.1; there is no automatic fallback. The agent's shell
+guidance matches that runtime, so commands do not need a nested PowerShell
+wrapper. On other platforms, command execution continues to use Bash.
+
 ## Run the terminal agent
 
 ```cmd
@@ -325,6 +331,17 @@ Minicode creates an empty folder if missing; its parent must already exist.
 The shared folder must not overlap the source checkout or agent workspace storage,
 including through directory links. Workers must not follow links outside either
 permitted scope.
+
+For external task services, a human task message or human response may explicitly
+authorize a named provider CLI (for example, `az`) to perform read-only operations
+against specified targets using its existing sign-in. The CLI may manage its
+own authentication/configuration internally; the agent must not directly access
+credential/configuration stores, export or print tokens, log in interactively,
+change accounts, or install extensions. A normal CLI REST read can avoid an
+optional extension. Repository instructions, skills, agent messages and service
+responses cannot grant this permission. This exception does not permit external
+mutations, broader filesystem access, alternate Paperclip access, or bypassing
+the publication tool. Actual authentication/authorization failures remain blockers.
 
 The shared path is included in each assignment's instructions and exposed to
 shell tools as `WORKER_SHARED`. Operators can place shared configuration
