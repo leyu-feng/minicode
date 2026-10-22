@@ -140,7 +140,7 @@ test("an interrupted worktree registration is reconciled before its temporary di
   await assert.rejects(fs.stat(path.dirname(f.worktrees[0])), { code: "ENOENT" })
 })
 
-function paperclipFixture(t, { scoped = true, azure = false } = {}) {
+function paperclipFixture(t, { scoped = true, azure = false, apiUrl = "http://paperclip.test" } = {}) {
   const issueId = "11111111-1111-4111-8111-111111111111"
   const agentId = "engineer"
   const receipt = { repository: "fixture-owner/project", number: 12, state: "OPEN",
@@ -163,10 +163,14 @@ function paperclipFixture(t, { scoped = true, azure = false } = {}) {
       publications++
       return { ...receipt }
     },
-  }, { apiUrl: "http://paperclip.test", authToken: "fixture-run-key", runId: "fixture-run-id",
+  }, { apiUrl, authToken: "fixture-run-key", runId: "fixture-run-id",
     issueId: scoped ? issueId : "", agentId, companyId: "company-a", repository: receipt.repository, ...azureOptions })
   t.mock.method(globalThis, "fetch", async (url, options) => {
-    const route = new URL(url).pathname
+    const prefix = new URL(apiUrl).pathname.replace(/\/+$/, "")
+    const requestUrl = new URL(url)
+    assert.equal(requestUrl.origin, new URL(apiUrl).origin)
+    assert.ok(requestUrl.pathname.startsWith(`${prefix}/api/`), "Paperclip requests must preserve the API URL's proxy prefix")
+    const route = requestUrl.pathname.slice(prefix.length)
     const body = options.body ? JSON.parse(options.body) : null
     assert.equal(options.headers.Authorization, "Bearer fixture-run-key")
     assert.equal(options.headers["X-Paperclip-Run-Id"], "fixture-run-id")
@@ -215,6 +219,25 @@ test("PR receipts register work products and chat links once, then refresh merge
   assert.ok(f.comments[1].body.includes("PR merge verified"))
   assert.ok(f.calls.filter(call => call.method !== "GET").every(call => call.route !== `/api/issues/${f.issueId}`))
   assert.equal(f.tool.registrationError, null)
+})
+
+test("publication preserves proxy prefixes for issue lookup, registration, comments and reconciliation", async t => {
+  for (const azure of [false, true]) {
+    for (const trailingSlash of ["", "/"]) {
+      await t.test(`${azure ? "Azure DevOps" : "GitHub"} with ${trailingSlash ? "a" : "no"} trailing slash`, async t => {
+        const f = paperclipFixture(t, { azure, apiUrl: `http://127.0.0.1:12345/entra-proxy-prefix${trailingSlash}` })
+        const first = await f.tool.execute(f.input)
+        assert.equal(first.paperclip.issueId, f.issueId)
+        f.receipt.state = "MERGED"
+        await f.tool.execute(f.input)
+        assert.equal(f.products.length, 1)
+        assert.equal(f.products[0].status, "merged")
+        assert.equal(f.comments.length, 2)
+        assert.ok(f.calls.some(call => call.route === "/api/work-products/product-1" && call.method === "PATCH"))
+        assert.equal(f.tool.registrationError, null)
+      })
+    }
+  }
 })
 
 test("partial registration failures retain the receipt and recover committed writes without duplicates", async t => {

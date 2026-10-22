@@ -24,7 +24,7 @@ export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issue
         const api = async (route, method = "GET", body) => {
           let response
           try {
-            response = await fetch(new URL(`/api${route}`, apiUrl), {
+            response = await fetch(new URL(`${apiUrl.replace(/\/+$/, "")}/api${route}`), {
               method, redirect: "error",
               signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000),
               headers: { Authorization: `Bearer ${authToken}`, "X-Paperclip-Run-Id": runId,
