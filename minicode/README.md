@@ -329,8 +329,46 @@ root. For example, `D:\Code\portland\stocks` uses
 Relative overrides resolve from the worker process's current directory.
 Minicode creates an empty folder if missing; its parent must already exist.
 The shared folder must not overlap the source checkout or agent workspace storage,
-including through directory links. Workers must not follow links outside either
+including through directory links. Workers must not follow links outside any
 permitted scope.
+
+Attach additional existing Git clones or worktrees with the repeatable worker option
+`--reference-repo <name>=<directory>`. For example, from the Minicode repository:
+
+```powershell
+node .\minicode\cli.js worker `
+  --server https://mmd-dbg-na03-engsys-paperclip-e5fdh9byhkbugsb0.b02.azurefd.net `
+  --worker-id <worker-id> `
+  --repo-root D:\Code\odin\dpu\main `
+  --worker-name w1 `
+  --worker-shared D:\Code\odin\dpu\worker_shared `
+  --reference-repo "dss=D:\Code\odin\dss\main" `
+  --reference-repo "services=D:\Code\odin\services\main" `
+  --entra-user <upn>
+```
+
+Names must be unique (case-insensitive), start with a letter, and contain only
+letters, digits, underscores, or hyphens (up to 64 characters). Relative paths resolve
+from the worker process's current directory; quote the entire `name=path` when it
+contains spaces. Each path must be a Git checkout root with a committed HEAD, not a
+bare repository or subdirectory. Canonical paths must not overlap the source
+checkout, worker workspace storage, shared folder, or another reference.
+
+Each assignment receives a JSON array of `{name, path, commit}` through
+`WORKER_REFERENCE_REPOS_JSON`, its system instructions, and a run-log summary.
+Paths and HEAD commits are checked again before starting each assignment; a missing
+or invalid reference fails the assignment rather than silently dropping it.
+The worker never clones, fetches, resets, copies, or cleans reference checkouts.
+The host operator must prepare them at the desired branch/commit and keep them
+unchanged while assignments use them; refresh them only while those workers are
+stopped. HEAD is recorded, not an immutable snapshot of dirty working files.
+
+References are for reading/searching code only, not executing scripts or accessing
+their `.git` metadata. Their instructions and skills are not loaded or added to the
+worker's skill catalog. They grant no write or publication permissions.
+Like `worker_shared`, **reference read-only access is instruction policy, not an
+OS-enforced sandbox**; use read-only mounts or restricted identities if enforcement
+is required. Reference attachments work with both workspace modes.
 
 For external task services, a human task message or human response may explicitly
 authorize a named provider CLI (for example, `az`) to perform read-only operations

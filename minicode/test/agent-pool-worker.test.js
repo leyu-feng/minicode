@@ -11,7 +11,7 @@ import test from "node:test"
 import { createServer } from "node:http"
 import { zipSync } from "fflate"
 import { WebSocketServer } from "ws"
-import { agentPoolServerUrl, loadWorkerCredential, startAgentPoolWorker } from "../server/agent-pool-worker.js"
+import { agentPoolServerUrl, loadWorkerCredential, parseWorkerReferences, startAgentPoolWorker } from "../server/agent-pool-worker.js"
 import { AgentSession } from "../server/agent-session.js"
 
 const execFileAsync = promisify(execFile)
@@ -365,6 +365,107 @@ test("separate workers can read the same configured shared folder without copyin
     assert.ok(session.instructions.includes(await fs.realpath(workerShared)))
     assert.match(session.instructions, /Never create, edit, delete, rename, move, or change permissions/)
     assert.ok(!session.instructions.includes("shared reference"))
+  }
+})
+
+for (const workspaceMode of ["clone", "worktree"]) {
+  test(`${workspaceMode} workers attach named reference clones and detached worktrees without loading their guidance`, async t => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-references-"))
+    t.after(() => fs.rm(directory, { recursive: true, force: true }))
+    const reference = path.join(directory, "reference with spaces")
+    const detached = path.join(directory, "detached")
+    const gitAt = async (...args) => (await execFileAsync("git", args, { windowsHide: true })).stdout.trim()
+    await gitAt("init", "--initial-branch=main", reference)
+    await fs.mkdir(path.join(reference, ".agents", "skills", "reference-only"), { recursive: true })
+    await fs.writeFile(path.join(reference, "AGENTS.md"), "REFERENCE INSTRUCTIONS MUST NOT BE INJECTED")
+    await fs.writeFile(path.join(reference, ".agents", "skills", "reference-only", "SKILL.md"), "REFERENCE SKILL MUST NOT BE INJECTED")
+    await fs.writeFile(path.join(reference, "code.txt"), "reference code")
+    await gitAt("-C", reference, "add", ".")
+    await gitAt("-C", reference, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+      "-c", "commit.gpgsign=false", "commit", "-m", "Reference")
+    const commit = await gitAt("-C", reference, "rev-parse", "HEAD")
+    await gitAt("-C", reference, "worktree", "add", "--detach", detached, "HEAD")
+    const sessions = []
+    class Session extends EventEmitter {
+      constructor(options) { super(); this.options = options; sessions.push(options) }
+      async write() {
+        const manifest = JSON.parse(this.options.env.WORKER_REFERENCE_REPOS_JSON)
+        assert.deepEqual(manifest, [
+          { name: "services", path: await fs.realpath(reference), commit },
+          { name: "dss", path: await fs.realpath(detached), commit },
+        ])
+        for (const entry of manifest) {
+          assert.equal(await fs.readFile(path.join(entry.path, "code.txt"), "utf8"), "reference code")
+          assert.ok(this.options.instructions.includes(entry.path.replaceAll("\\", "\\\\")))
+        }
+        assert.match(this.options.instructions, /Never write, execute their scripts, fetch, checkout, reset, commit, publish/)
+        assert.ok(!this.options.instructions.includes("REFERENCE INSTRUCTIONS MUST NOT BE INJECTED"))
+        assert.ok(!this.options.instructions.includes("REFERENCE SKILL MUST NOT BE INJECTED"))
+        assert.ok(!this.options.instructions.includes("reference-only ["))
+        return { exitCode: 0 }
+      }
+      interrupt() {}
+      dispose() {}
+    }
+    const fixture = await harness(t, options => new Session(options), {
+      workspaceMode, referenceRepos: [`services=${reference}`, `dss=${detached}`],
+    })
+    const peer = await fixture.welcome(0)
+    await executeTask(peer, { runId: "reference-read", agent })
+    assert.equal(await gitAt("-C", reference, "status", "--porcelain"), "")
+    assert.equal(await gitAt("-C", detached, "status", "--porcelain"), "")
+    assert.ok(peer.messages.some(message => message.data?.includes(`HEAD ${commit}`)))
+
+    await fs.rename(detached, `${detached}-moved`)
+    const result = await executeTask(peer, { runId: "missing-reference", agent }, 1)
+    assert.match(result.error, /ENOENT|no such file/i)
+    assert.equal(sessions.length, 1, "A missing reference must stop before starting the model")
+  })
+}
+
+test("reference checkout validation rejects ambiguous names, overlap, missing paths, bare repos and subdirectories", async t => {
+  for (const values of [["invalid"], ["name="], ["../escape=directory"], ["same=one", "SAME=two"]]) {
+    assert.throws(() => parseWorkerReferences(values), /--reference-repo/)
+  }
+  assert.deepEqual(parseWorkerReferences(["code=folder=with=equals"]), [
+    { name: "code", path: path.resolve("folder=with=equals") },
+  ])
+  const fixture = await harness(t, () => { throw new Error("Must not start a session") })
+  const root = path.dirname(fixture.source)
+  const reference = path.join(root, "reference")
+  const gitAt = async (...args) => (await execFileAsync("git", args, { windowsHide: true })).stdout.trim()
+  await gitAt("clone", "--no-hardlinks", fixture.source, reference)
+  const nested = path.join(reference, "nested")
+  await fs.mkdir(nested)
+  const bare = path.join(root, "bare.git")
+  await gitAt("clone", "--bare", "--no-hardlinks", fixture.source, bare)
+  const shared = path.join(root, "worker_shared")
+  for (const [specs, expected] of [
+    [[`source=${fixture.source}`], /must not overlap/],
+    [[`ancestor=${root}`], /must not overlap/],
+    [[`workspace=${fixture.workspaceRoot}`], /must not overlap/],
+    [[`shared=${shared}`], /must not overlap/],
+    [[`one=${reference}`, `two=${reference}`], /must not overlap/],
+    [[`missing=${path.join(root, "missing")}`], /ENOENT/],
+    [[`nested=${nested}`], /root of an existing Git checkout/],
+    [[`bare=${bare}`], /work tree|working tree|bare repository/i],
+  ]) {
+    await assert.rejects(startAgentPoolWorker({ ...fixture.options, referenceRepos: specs }), expected)
+  }
+  const alias = path.join(root, "reference-alias")
+  await fs.symlink(reference, alias, process.platform === "win32" ? "junction" : "dir")
+  await assert.rejects(startAgentPoolWorker({
+    ...fixture.options, referenceRepos: [`one=${reference}`, `alias=${alias}`],
+  }), /must not overlap/)
+  for (const [option, target] of [
+    ["workerShared", path.join(reference, "new-shared")],
+    ["workspaceRoot", path.join(reference, "nested", "new-workspaces")],
+    ["workspaceRoot", path.join(alias, "linked-workspaces")],
+  ]) {
+    await assert.rejects(startAgentPoolWorker({
+      ...fixture.options, [option]: target, referenceRepos: [`one=${reference}`],
+    }), /must not overlap/)
+    await assert.rejects(fs.stat(target), { code: "ENOENT" })
   }
 })
 
@@ -1232,6 +1333,29 @@ test("worker CLI forwards workspace mode and short name to workspace validation"
       "--server", fixture.serverUrl,
       "--worker-id", randomUUID(), "--repo-root", fixture.source,
       "--workspace-mode", mode, "--worker-name", name, ...extra,
+    ], { env: { ...process.env, MINICODE_CONFIG_HOME: config }, windowsHide: true }), error => {
+      assert.match(error.stderr, expected)
+      return true
+    })
+  }
+})
+
+test("worker CLI accepts repeated reference options and validates every supplied checkout", async t => {
+  const fixture = await harness(t, () => { throw new Error("Must not start a session") })
+  const config = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-reference-cli-"))
+  t.after(() => fs.rm(config, { recursive: true, force: true }))
+  const reference = path.join(config, "reference repo")
+  await execFileAsync("git", ["clone", "--no-hardlinks", fixture.source, reference], { windowsHide: true })
+  for (const [references, expected] of [
+    [[`one=${reference}`, "invalid"], /--reference-repo requires/],
+    [[`one=${reference}`, `ONE=${reference}`], /Duplicate --reference-repo name/],
+    [[`one=${reference}`, `two=${fixture.source}`], /must not overlap/],
+  ]) {
+    await assert.rejects(execFileAsync(process.execPath, [
+      fileURLToPath(new URL("../cli.js", import.meta.url)), "worker",
+      "--server", fixture.serverUrl, "--worker-id", randomUUID(), "--repo-root", fixture.source,
+      "--workspace-mode", "clone",
+      ...references.flatMap(value => ["--reference-repo", value]),
     ], { env: { ...process.env, MINICODE_CONFIG_HOME: config }, windowsHide: true }), error => {
       assert.match(error.stderr, expected)
       return true
