@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url"
-import { publicationCommand, publicationEnvironment, pullRequestTool } from "./pull-request-publisher.js"
+import { publicationBranch, publicationCommand, publicationEnvironment, pullRequestTool } from "./pull-request-publisher.js"
 
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i
 const DEFAULT_CLIPPY_AUTH = fileURLToPath(new URL("../../clippy-auth/cli.js", import.meta.url))
@@ -114,36 +114,45 @@ export async function createAzureDevOpsPublisher({ repoRoot, organization, proje
   const identity = `${source.organization}/${bound.project.name}/${bound.name}`
   const webUrl = `https://dev.azure.com/${source.organization}/${encodeURIComponent(bound.project.name)}/_git/${encodeURIComponent(bound.name)}`
   const branchForCommit = (agentId, commit) => `users/${alias}/minicode-${agentId}-${commit}`
-  const publisher = ({ workspace, agentId }) => pullRequestTool({
+  const publisher = ({ workspace, agentId, agentName = agentId }) => pullRequestTool({
     repoRoot, workspace, agentId, env, run, url: pushUrl.href,
     branchForCommit: commit => branchForCommit(agentId, commit),
-    description: `Publish an existing local commit to Azure Repos ${identity} using existing Git credentials for push and harness-only MSAL credentials for REST PRs. Branches use users/${alias}/. Retries reuse the branch and PR. Never merges or deploys.`,
-    async prepare({ commit, branch, title, body, signal }) {
+    branchForTitle: title => publicationBranch(alias, agentName, title),
+    description: `Publish an existing local commit to Azure Repos ${identity} using existing Git credentials and harness-only MSAL REST credentials. Branches use users/${alias}/<agent-name>/<feature-title> with up to 10 collision suffixes. Saved PRs reconcile without local history. Never merges or deploys.`,
+    async prepare({ title, body, signal, saved }) {
       const currentOrigin = repositoryUrl(await run("git", ["remote", "get-url", "origin"], { cwd: repoRoot, env, signal }))
       if (JSON.stringify(currentOrigin) !== JSON.stringify(source)) throw new Error("Source origin changed; restart the worker before publication")
       const info = await readRepository(signal)
       if (!same(info.id, bound.id) || !same(info.project.id, bound.project.id)) throw new Error("Azure DevOps repository changed; restart the worker")
-      const target = info.defaultBranch
+      if ((saved?.repositoryId && !same(saved.repositoryId, bound.id)) || (saved?.projectId && !same(saved.projectId, bound.project.id))) {
+        throw new Error("Azure DevOps repository identity does not match the saved publication")
+      }
+      const target = saved?.target ?? info.defaultBranch
+      if (typeof target !== "string" || !target.startsWith("refs/heads/")) throw new Error("Saved Azure DevOps target branch is invalid")
+      await run("git", ["check-ref-format", target], { cwd: repoRoot, env, signal })
       return {
-        async findPr() {
+        target, repositoryId: bound.id, projectId: bound.project.id,
+        async findPr(branch, number) {
           const query = new URLSearchParams({ "searchCriteria.sourceRefName": `refs/heads/${branch}`,
             "searchCriteria.targetRefName": target, "searchCriteria.status": "all", "$top": "2" })
-          const result = await api(`/pullrequests?${query}`, { signal })
-          const prs = result.value
+          const prs = number ? [await api(`/pullrequests/${number}`, { signal })]
+            : (await api(`/pullrequests?${query}`, { signal })).value
           if (!Array.isArray(prs) || prs.length > 1) throw new Error("Ambiguous Azure DevOps PR state; review the publication branch")
           if (!prs.length) return null
           const pr = prs[0]
-          const state = { active: "OPEN", completed: "MERGED", abandoned: "CLOSED" }[pr.status]
-          if (!Number.isSafeInteger(pr.pullRequestId) || pr.pullRequestId < 1 || !state
+          const state = { active: "OPEN", completed: "MERGED", abandoned: "CLOSED" }[pr?.status]
+          if (!pr || !Number.isSafeInteger(pr.pullRequestId) || pr.pullRequestId < 1 || !state
+            || (number && pr.pullRequestId !== number)
             || !same(pr.repository?.id, bound.id) || !same(pr.repository?.project?.id, bound.project.id)
             || pr.sourceRefName !== `refs/heads/${branch}` || pr.targetRefName !== target
-            || pr.lastMergeSourceCommit?.commitId !== commit) {
+            || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(pr.lastMergeSourceCommit?.commitId ?? "")) {
             throw new Error("Azure DevOps returned an unexpected PR identity")
           }
-          return { provider: "azure_devops", repository: identity, branch, commit,
+          return { provider: "azure_devops", repository: identity, repositoryId: bound.id, projectId: bound.project.id,
+            branch, target, commit: pr.lastMergeSourceCommit.commitId,
             number: pr.pullRequestId, url: `${webUrl}/pullrequest/${pr.pullRequestId}`, state }
         },
-        createPr: () => api("/pullrequests", { method: "POST", signal,
+        createPr: branch => api("/pullrequests", { method: "POST", signal,
           body: { sourceRefName: `refs/heads/${branch}`, targetRefName: target, title, description: body } }),
       }
     },
