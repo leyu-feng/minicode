@@ -242,7 +242,12 @@ existing `/api/routine-triggers/public/{publicId}/fire` URL with:
 - `Idempotency-Key: <stable delivery ID, 1-255 characters>`
 
 Reuse the delivery ID when retrying an event; use a new ID for an explicit new
-investigation. Routine lifecycle, company scope, concurrency, activity logging,
+investigation. The accepted payload is retained in run history and appended to
+the execution task as explicitly labelled external data, so investigators receive
+the build or incident context without requiring routine-template variables.
+The task includes at most 16,384 characters of formatted payload; larger payloads
+remain available in full on the run.
+Routine lifecycle, company scope, concurrency, activity logging,
 and execution scheduling remain unchanged. Successful delivery audit records
 include the authenticated client and principal IDs. No tokens are stored.
 
