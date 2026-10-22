@@ -368,7 +368,7 @@ export async function startAgentPoolWorker({
       if (stopped || run.cancelled) return { exitCode: 130 }
       await worktree?.ensureDiskSpace()
       if (stopped || run.cancelled) return { exitCode: 130 }
-      run.publication = publisher ? paperclipPublicationTool(publisher({ workspace, agentId: task.agent.id }), {
+      run.publication = publisher ? paperclipPublicationTool(publisher({ workspace, agentId: task.agent.id, agentName: task.agent.name }), {
         apiUrl: agentApiUrl, authToken: task.authToken, runId: task.runId, agentId: task.agent.id,
         companyId: task.agent.companyId, issueId: contextString(task.context.taskId, task.context.issueId),
         repository: publicationRepository,
