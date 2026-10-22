@@ -1,3 +1,5 @@
+import { validatePublicationInput } from "./pull-request-publisher.js"
+
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i
 
 export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issueId, agentId, companyId, repository,
@@ -40,19 +42,64 @@ export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issue
           throw new Error("PR publication target must be assigned to this agent in this company")
         }
         const { issueId: _issueId, ...publicationInput } = input
-        receipt = await tool.execute(publicationInput, options)
-        if (receipt.repository !== repository || (receipt.provider ?? "github") !== provider
+        validatePublicationInput(publicationInput, agentId)
+        const products = await api(`/issues/${target}/work-products`)
+        if (!Array.isArray(products)) throw new Error("Paperclip returned an invalid work-product list")
+        const matches = products.filter(product => ["pull_request", "branch"].includes(product.type)
+          && product.provider === provider && product.metadata?.repository === repository
+          && product.metadata?.commit === publicationInput.commit)
+        if (matches.some(product => product.issueId !== target || typeof product.id !== "string" || !product.id)) {
+          throw new Error("Saved publication has an invalid task binding")
+        }
+        if (matches.some(product => product.metadata.agentId !== agentId)) throw new Error("Saved publication belongs to another agent")
+        const prs = matches.filter(product => product.type === "pull_request")
+        const allocations = matches.filter(product => product.type === "branch" && product.externalId === `minicode-publication:${agentId}:${publicationInput.commit}`)
+        if (prs.length > 1 || allocations.length > 1) throw new Error("Ambiguous saved publication; no new PR will be created")
+        const savedPr = prs[0]
+        let allocationProduct = allocations[0], allocation = allocationProduct?.metadata
+        if (savedPr && (!Number.isSafeInteger(savedPr.metadata.number) || savedPr.metadata.number < 1
+          || savedPr.url !== pullRequestUrl(savedPr.metadata.number) || typeof savedPr.metadata.branch !== "string")) {
+          throw new Error("Saved PR identity is invalid; no replacement PR will be created")
+        }
+        if (allocation && (typeof allocation.baseBranch !== "string" || !Number.isInteger(allocation.attempt)
+          || allocation.attempt < 0 || allocation.attempt > 10
+          || allocation.branch !== `${allocation.baseBranch}${allocation.attempt ? `-${allocation.attempt}` : ""}`)) {
+          throw new Error("Saved publication branch allocation is invalid")
+        }
+        if (savedPr && allocation && ["branch", "target", "repositoryId", "projectId"].some(key =>
+          savedPr.metadata[key] != null && allocation[key] != null && savedPr.metadata[key] !== allocation[key])) {
+          throw new Error("Saved PR and branch allocation disagree; no replacement PR will be created")
+        }
+        receipt = await tool.execute(publicationInput, { ...options, publication: {
+          existing: savedPr?.metadata, allocation,
+          async saveAllocation(value) {
+            const metadata = { ...value, repository, agentId }
+            const payload = { metadata, status: "draft" }
+            const product = allocationProduct
+              ? await api(`/work-products/${allocationProduct.id}`, "PATCH", payload)
+              : await api(`/issues/${target}/work-products`, "POST", {
+                ...payload, type: "branch", provider, externalId: `minicode-publication:${agentId}:${publicationInput.commit}`,
+                title: `PR branch: ${publicationInput.title}`, reviewState: "none", isPrimary: false,
+              })
+            if (!product?.id || product.issueId !== target || product.type !== "branch" || product.provider !== provider
+              || Object.entries(metadata).some(([key, value]) => product.metadata?.[key] !== value)) {
+              throw new Error("Paperclip did not confirm the saved publication branch; no further provider writes attempted")
+            }
+            allocationProduct = product
+            allocation = metadata
+          },
+        } })
+        if (!receipt || receipt.repository !== repository || (receipt.provider ?? "github") !== provider
           || !Number.isSafeInteger(receipt.number) || receipt.number < 1
+          || (savedPr && receipt.number !== savedPr.metadata.number)
           || receipt.url !== pullRequestUrl(receipt.number)
           || !["OPEN", "CLOSED", "MERGED"].includes(receipt.state)
           || receipt.commit !== publicationInput.commit
           || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(receipt.commit ?? "")
-          || receipt.branch !== branchForCommit(agentId, receipt.commit)) {
+          || receipt.branch !== (savedPr?.metadata.branch ?? allocation?.branch ?? branchForCommit(agentId, receipt.commit))) {
           throw new Error("Harness returned an invalid PR receipt")
         }
-        const products = await api(`/issues/${target}/work-products`)
-        if (!Array.isArray(products)) throw new Error("Paperclip returned an invalid work-product list")
-        const existing = products.find(product => product.type === "pull_request"
+        const existing = savedPr ?? products.find(product => product.type === "pull_request"
           && product.provider === provider && product.url?.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase() === receipt.url.toLowerCase())
         const status = receipt.state === "OPEN"
           ? (["approved", "changes_requested", "draft"].includes(existing?.status) ? existing.status : "ready_for_review")
@@ -60,7 +107,10 @@ export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issue
         const payload = {
           status, reviewState: receipt.state === "OPEN" ? existing?.reviewState ?? "needs_board_review" : "none",
           metadata: { ...existing?.metadata, repository, number: receipt.number, branch: receipt.branch,
-            commit: receipt.commit, state: receipt.state.toLowerCase(), agentId },
+            commit: receipt.commit, state: receipt.state.toLowerCase(), agentId,
+            ...(receipt.target ? { target: receipt.target } : {}),
+            ...(receipt.repositoryId ? { repositoryId: receipt.repositoryId } : {}),
+            ...(receipt.projectId ? { projectId: receipt.projectId } : {}) },
         }
         const product = existing
           ? await api(`/work-products/${existing.id}`, "PATCH", payload)

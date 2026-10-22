@@ -575,8 +575,12 @@ The model commits its selected changes in its assigned checkout, then calls:
 The harness retrieves the selected GitHub credential privately, imports the
 committed revision into the source Git object database without changing its
 checkout or branches, and creates a temporary detached, metadata-only worktree.
-It pushes a deterministic `minicode/<agent-id>/<commit>` branch using a
-create-only lease and opens a PR against the GitHub default branch. The worktree
+It pushes a `users/<github-user>/<agent-name>/<feature-name>` branch using a
+create-only lease and opens a PR against the GitHub default branch. Agent names
+and the initial PR title become lowercase, Git-safe slugs of up to 64 characters
+each. If a name is occupied, the harness tries `-1` through `-10`, then fails
+explicitly. Authentication, network, and uncertain push failures do not advance
+the suffix; only verified naming conflicts do. The worktree
 is removed on success, failure, or cancellation; cleanup failures are reported.
 Publication does not reset the assigned checkout or remove its local edits.
 In default worktree mode the next assignment resets it, so publish or upload
@@ -606,8 +610,9 @@ GitHub and Azure DevOps publication flags are mutually exclusive. Both modern
 are supported; the configured organization/project/repository must match the
 source. Repository and project IDs are verified and bound before publication.
 The alias defaults to the UPN local part and must be a simple branch-safe name.
-Publication branches are `users/<alias>/minicode-<agent-id>-<full-commit>`, preserving
-the exact selected local commit and deterministic same-commit retries.
+Publication branches are `users/<alias>/<agent-name>/<feature-name>`, using the
+same slug and ten-suffix collision rules as GitHub. The selected commit is
+preserved exactly; it is stored separately rather than encoded in the branch.
 
 PR creation and reconciliation use Azure DevOps REST API 7.1, not `az repos`.
 The harness privately invokes `clippy-auth ado-token --silent` for an MSAL/WAM
@@ -629,8 +634,14 @@ For AgentPool runs, publication also creates or updates the task's provider-spec
 `pull_request` work product and posts a clickable task-chat link using the
 run-scoped Paperclip credential and audit header. The existing Paperclip **Pull
 requests** section displays the saved record; no separate dashboard is needed.
-The record includes repository, PR number, branch, commit, agent, and current
-provider state. Open PRs request review; merged/closed receipts do not complete
+Before pushing, the harness saves a non-primary `branch` work product containing
+the allocated branch, original commit, target, attempt number, agent, and provider
+repository identity. Retries reuse this allocation across machines, alias changes,
+agent renames, and title edits. A failed allocation write stops publication; retrying
+also recovers a lost write response.
+
+The PR record includes repository identity, PR number, branch, original commit,
+target, agent, and current provider state. Open PRs request review; merged/closed receipts do not complete
 the task or bypass its approval gates.
 Behind Entra sign-in, issue lookup and all registration requests use the worker's
 loopback proxy, preserving its path prefix and keeping the Easy Auth session private.
@@ -639,7 +650,17 @@ A task-scoped run cannot override its issue. For a general Run Now, discover
 your assigned task using the bundled skill and supply its UUID as the tool's
 optional `issueId` argument. The harness verifies ownership before accessing
 the repository provider. Reconcile a known PR with its original commit to refresh
-its state without another push or duplicate PR. The harness reuses existing work products
+its state without another push or duplicate PR. The harness reads the saved PR by
+number and verifies its repository, source/target branches and original source
+commit before consulting local Git history or remote branches. This works after
+squash merging, source-branch deletion, or a fresh checkout without the original
+commit object. A saved PR that cannot be verified fails explicitly; no replacement
+PR is created. New publication still requires the commit to exist in the assigned
+checkout and be an ancestor of its HEAD. Legacy commit-based branch names remain
+discoverable for earlier publications; old PR records acquire target and repository
+IDs when reconciled.
+
+The harness reuses existing work products
 and posts at most one harness comment per agent/PR/state across sequential
 retries, including a lost write response. It does not provide cross-run atomic
 deduplication against concurrent independent publishers.
