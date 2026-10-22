@@ -74,6 +74,7 @@ API: `present` — representative operation IDs:
 - `POST /api/companies/{companyId}/adapters/{type}/test-environment`.
 - `GET /api/companies/{companyId}/agent-pools`.
 - `POST /api/companies/{companyId}/agent-pools`.
+- `GET /api/companies/{companyId}/agent-pools/{poolId}/repos` (Hosted catalog).
 
 Agent access: `partial` — Permitted agent/model API; operator
 provider-account/environment setup.
@@ -102,6 +103,9 @@ errors never cause an automatic runner switch.
 AgentPool onboarding reuses the existing board-only, company-scoped pool
 inventory/create routes. Pool names are unique per company. Saving can create
 a pool before the hire and requires no worker connection or readiness probe.
+Hosted repository discovery is board-only and company-scoped through the
+existing pool authorization boundary. Hiring validates primary and read-only
+repository IDs against that pool's provider catalog.
 This does not grant pool management to agent identities or bypass normal hire
 approval. [Shared selector](../../ui/src/components/AgentPoolSelect.tsx) and
 [pool routes](../../server/src/routes/agent-pools.ts) are source evidence;

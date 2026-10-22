@@ -13,6 +13,7 @@ import { agentCredentialService } from "./agent-credentials.js";
 import { agentIdentityService } from "./agent-identity.js";
 import { initializePrimaryAgent } from "./primary-agent.js";
 import { resolveNewAgentRunnerForCompany } from "./agent-runner-selection.js";
+import { agentPoolService } from "./agent-pools.js";
 
 export async function prepareAgentHire(db: Db, companyId: string, input: CreateAgentData, options?: CreateAgentOptions): Promise<CreateAgentData> {
   const { runner, ...data } = input;
@@ -43,7 +44,10 @@ export async function prepareAgentHire(db: Db, companyId: string, input: CreateA
   const rawAdapterConfig = isPlainRecord(data.adapterConfig)
     ? await secretService(db).normalizeAdapterConfigForPersistence(companyId, data.adapterConfig, { adapterType })
     : {};
-  const adapterConfig = normalizePaperclipRunnerAdapterConfig(adapterType, rawAdapterConfig);
+  let adapterConfig = normalizePaperclipRunnerAdapterConfig(adapterType, rawAdapterConfig);
+  if (adapterType === "agent_pool") {
+    adapterConfig = await agentPoolService(db).validateAgentRepositories(companyId, adapterConfig);
+  }
   await agentCredentialService(db).enforceClaudeOAuthBindingClaim(db, {
     companyId, consume: true, environmentId: data.defaultEnvironmentId ?? null,
     childAdapterConfig: adapterConfig, claudeLogin: options?.claudeLogin,

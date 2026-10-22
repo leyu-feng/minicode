@@ -5,6 +5,10 @@ export const agentPools = pgTable("agent_pools", {
   id: uuid("id").primaryKey().defaultRandom(),
   companyId: uuid("company_id").notNull().references(() => companies.id),
   name: text("name").notNull(),
+  type: text("type").$type<"freelance" | "hosted">().notNull().default("freelance"),
+  hostedApiUrl: text("hosted_api_url"),
+  hostedAudience: text("hosted_audience"),
+  hostedPoolId: uuid("hosted_pool_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   companyNameIdx: uniqueIndex("agent_pools_company_name_idx").on(table.companyId, table.name),

@@ -2423,6 +2423,13 @@
       "when": 1792120683577,
       "tag": "0347_nosy_nuke",
       "breakpoints": true
+    },
+    {
+      "idx": 348,
+      "version": "7",
+      "when": 1792711406820,
+      "tag": "0348_nappy_leo",
+      "breakpoints": true
     }
   ]
 }

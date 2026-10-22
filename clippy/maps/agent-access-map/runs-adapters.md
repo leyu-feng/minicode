@@ -227,6 +227,10 @@ the failed Test setup does not qualify successful live cleanup.
 Review: `baseline`.
 
 API: `present` — GET/POST /api/companies/{companyId}/agent-pools;
+GET /api/companies/{companyId}/agent-pools/hosted-defaults;
+PATCH/POST /api/companies/{companyId}/agent-pools/{poolId};
+GET /api/companies/{companyId}/agent-pools/{poolId}/status;
+GET /api/companies/{companyId}/agent-pools/{poolId}/repos;
 GET/POST /api/companies/{companyId}/agent-pools/{poolId}/workers;
 DELETE /api/companies/{companyId}/agent-pools/{poolId}/workers/{workerId}.
 POST /api/agent-pool/pair consumes a ten-minute, single-use server token and binds
@@ -240,6 +244,15 @@ Agent access: `operator-only` for pool/worker administration; normal agent keys
 are denied. Minicode's `worker` CLI is the worker entry point. It receives only
 its assigned run context and transient run-scoped tool credentials, not board
 authority or the credentials of another pool.
+Hosted provider calls use Clippy's managed identity, not agent credentials.
+The provider allowlists the caller and scopes persisted pool IDs to it.
+Pool conversion revokes credentials and disconnects workers in both directions.
+Repository selection remains company/catalog-scoped; reference metadata grants
+no operational instruction authority. Mock active/provisioning counts cannot
+dispatch a run: only a compatible actual socket advertising
+`hosted_repositories_v1` qualifies. Provider configuration, demand and status
+remain board-only. Focused fixture tests do not qualify a live managed-identity
+deployment or a permitted-agent journey.
 Its actual tools run outside the source checkout, initialized from committed
 source files. Every pool worker can serve every pool agent; different setups
 require separate pools. Minicode defaults to stable short sibling Git worktrees

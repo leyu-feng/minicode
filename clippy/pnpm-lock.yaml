@@ -911,6 +911,9 @@ importers:
       '@aws-sdk/client-s3':
         specifier: ^3.1141.0
         version: 3.1141.0
+      '@azure/identity':
+        specifier: ^4.14.0
+        version: 4.14.0
       '@chat-adapter/discord':
         specifier: 4.39.0
         version: 4.39.0(patch_hash=nywlhls7dd4npegrgax7jqdbxa)(ai@7.0.130(zod@4.4.3))(zod@4.4.3)

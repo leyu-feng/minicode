@@ -11,6 +11,7 @@ import { secretService, assertClaudeOAuthBindingInvariant } from "./secrets.js";
 import { agentCredentialService } from "./agent-credentials.js";
 import { clearPrimaryAgent } from "./primary-agent.js";
 import { budgetServiceInTransaction } from "./budgets.js";
+import { agentPoolService } from "./agent-pools.js";
 
 export async function prepareAgentConfiguration(db: Db, existing: AgentConfigurationRecord, data: AgentConfigurationPatch, options?: UpdateAgentOptions): Promise<AgentConfigurationPatch> {
   const id = existing.id;
@@ -78,6 +79,12 @@ export async function prepareAgentConfiguration(db: Db, existing: AgentConfigura
     normalizedPatch.adapterConfig = normalizePaperclipRunnerAdapterConfig(
       normalizedPatch.adapterType as string,
       existing.adapterConfig,
+    );
+  }
+  if ((normalizedPatch.adapterType ?? existing.adapterType) === "agent_pool"
+    && (normalizedPatch.adapterConfig !== undefined || normalizedPatch.adapterType !== undefined)) {
+    normalizedPatch.adapterConfig = await agentPoolService(db).validateAgentRepositories(
+      existing.companyId, normalizedPatch.adapterConfig ?? existing.adapterConfig,
     );
   }
   return normalizedPatch;
