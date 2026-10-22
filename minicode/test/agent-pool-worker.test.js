@@ -162,6 +162,67 @@ test("an unresolved PR registration failure fails the run even if the model clai
   assert.match(result.error, /GitHub PR exists.*Receipt:.*HTTP 403/)
 })
 
+test("Azure worker publication uses its configured provider, users namespace and existing registration flow", async t => {
+  const previousPat = process.env.AZURE_DEVOPS_EXT_PAT
+  process.env.AZURE_DEVOPS_EXT_PAT = "operator-pat-not-for-model-tools"
+  t.after(() => {
+    if (previousPat === undefined) delete process.env.AZURE_DEVOPS_EXT_PAT
+    else process.env.AZURE_DEVOPS_EXT_PAT = previousPat
+  })
+  const issueId = "11111111-1111-4111-8111-111111111111", commit = "a".repeat(40)
+  const repository = "fixture/Project/Repository"
+  const pullRequestUrl = number => `https://dev.azure.com/fixture/Project/_git/Repository/pullrequest/${number}`
+  const branchForCommit = (agentId, hash) => `users/alice/minicode-${agentId}-${hash}`
+  const products = [], comments = []
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    const route = new URL(url).pathname
+    const body = options.body ? JSON.parse(options.body) : null
+    if (route === `/api/issues/${issueId}`) return Response.json({ id: issueId, assigneeAgentId: agent.id })
+    if (route.endsWith("/work-products")) {
+      if (body) products.push({ ...body, id: "product-1", issueId })
+      return Response.json(body ? products.at(-1) : products)
+    }
+    assert.ok(route.endsWith("/comments"))
+    if (body) comments.push({ ...body, id: "comment-1", issueId, authorAgentId: agent.id })
+    return Response.json(body ? comments.at(-1) : comments)
+  })
+  class Session extends EventEmitter {
+    constructor(options) {
+      super()
+      assert.equal(options.env.AZURE_DEVOPS_EXT_PAT, undefined)
+      assert.ok(!options.instructions.includes("operator-pat-not-for-model-tools"))
+      this.tool = options.tools.find(tool => tool.name === "publish_pull_request")
+    }
+    async write() {
+      const receipt = await this.tool.execute({ commit, title: "Feature", body: "Validated" })
+      assert.equal(receipt.branch, branchForCommit(agent.id, commit))
+      return { exitCode: 0 }
+    }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, options => new Session(options), {
+    azureDevOpsOrg: "https://dev.azure.com/fixture", azureDevOpsProject: "Project",
+    azureDevOpsRepo: "Repository", azureDevOpsUser: "alice@contoso.test",
+    async azureDevOpsPublisherFactory(config) {
+      assert.equal(config.organization, "https://dev.azure.com/fixture")
+      assert.equal(config.user, "alice@contoso.test")
+      return Object.assign(() => ({
+        name: "publish_pull_request", description: "Azure fixture", parameters: { type: "object", properties: {} },
+        async execute() { return { provider: "azure_devops", repository, number: 12, url: pullRequestUrl(12),
+          commit, branch: branchForCommit(agent.id, commit), state: "OPEN", worktreeRemoved: true } },
+      }), { repository, pullRequestUrl, branchForCommit })
+    },
+  })
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, { runId: "azure-publication", agent, authToken: "fixture-key", context: { issueId } })
+  assert.equal(products.length, 1)
+  assert.equal(products[0].provider, "azure_devops")
+  assert.equal(comments.length, 1)
+  await assert.rejects(startAgentPoolWorker({ githubRepo: "fixture/repository",
+    azureDevOpsOrg: "https://dev.azure.com/fixture" }), /not both/)
+})
+
 test("inline instructions are agent-scoped snapshots applied without workspace instruction files", async (t) => {
   const sessions = []
   class Session extends EventEmitter {
@@ -238,6 +299,27 @@ test("bundled skills download once, repair extracted files each assignment, and 
   const status = await execFileAsync("git", ["status", "--porcelain"], { cwd: workspace, windowsHide: true })
   assert.equal(status.stdout, "")
   await assert.rejects(fs.stat(path.join(fixture.source, ".worker")), { code: "ENOENT" })
+})
+
+test("bundled skills download through the Entra proxy with its path prefix and credentials", async (t) => {
+  const bundle = skillBundle()
+  const sessions = []
+  class Session extends EventEmitter {
+    async write() { return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, options => { sessions.push(options); return new Session() }, {
+    bundle,
+    entraSession: { token: () => "entra-session" },
+  })
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, { runId: "proxied-skills", agent, skills: bundle.skills, authToken: "run-credential" })
+  assert.equal(bundle.downloads.length, 1)
+  assert.equal(bundle.downloads[0]["x-zumo-auth"], "entra-session")
+  assert.equal(bundle.downloads[0].authorization, `Bearer ${"run-credential"}`)
+  assert.equal(bundle.downloads[0]["x-paperclip-run-id"], "proxied-skills")
+  assert.ok(sessions[0].instructions.includes("Post progress with the issue comments API"))
 })
 
 test("invalid skill manifests, ZIP hashes, and archive contents fail before starting the model", async (t) => {

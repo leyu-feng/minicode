@@ -1,6 +1,8 @@
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i
 
-export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issueId, agentId, companyId, repository }) {
+export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issueId, agentId, companyId, repository,
+  provider = "github", pullRequestUrl = number => `https://github.com/${repository}/pull/${number}`,
+  branchForCommit = (agent, commit) => `minicode/${agent}/${commit}` }) {
   const failures = new Map()
   return {
     ...tool,
@@ -39,18 +41,19 @@ export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issue
         }
         const { issueId: _issueId, ...publicationInput } = input
         receipt = await tool.execute(publicationInput, options)
-        if (receipt.repository !== repository || !Number.isSafeInteger(receipt.number) || receipt.number < 1
-          || receipt.url !== `https://github.com/${repository}/pull/${receipt.number}`
+        if (receipt.repository !== repository || (receipt.provider ?? "github") !== provider
+          || !Number.isSafeInteger(receipt.number) || receipt.number < 1
+          || receipt.url !== pullRequestUrl(receipt.number)
           || !["OPEN", "CLOSED", "MERGED"].includes(receipt.state)
           || receipt.commit !== publicationInput.commit
           || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(receipt.commit ?? "")
-          || receipt.branch !== `minicode/${agentId}/${receipt.commit}`) {
+          || receipt.branch !== branchForCommit(agentId, receipt.commit)) {
           throw new Error("Harness returned an invalid PR receipt")
         }
         const products = await api(`/issues/${target}/work-products`)
         if (!Array.isArray(products)) throw new Error("Paperclip returned an invalid work-product list")
         const existing = products.find(product => product.type === "pull_request"
-          && product.provider === "github" && product.url?.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase() === receipt.url.toLowerCase())
+          && product.provider === provider && product.url?.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase() === receipt.url.toLowerCase())
         const status = receipt.state === "OPEN"
           ? (["approved", "changes_requested", "draft"].includes(existing?.status) ? existing.status : "ready_for_review")
           : receipt.state.toLowerCase()
@@ -62,7 +65,7 @@ export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issue
         const product = existing
           ? await api(`/work-products/${existing.id}`, "PATCH", payload)
           : await api(`/issues/${target}/work-products`, "POST", {
-            ...payload, type: "pull_request", provider: "github", externalId: `${repository}#${receipt.number}`,
+            ...payload, type: "pull_request", provider, externalId: `${repository}#${receipt.number}`,
             title: publicationInput.title, url: receipt.url, isPrimary: true,
           })
         if (!product?.id || product.issueId !== target || product.url !== (existing?.url ?? receipt.url)
@@ -85,7 +88,7 @@ export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issue
         return { ...receipt, paperclip: { issueId: target, workProductId: product.id, commentId: comment.id } }
       } catch (cause) {
         const message = receipt
-          ? `GitHub PR exists, but Paperclip registration is incomplete. Retry the same commit to reconcile. Receipt: ${JSON.stringify(receipt)}. ${cause.message}`
+          ? `${provider === "github" ? "GitHub" : "Azure DevOps"} PR exists, but Paperclip registration is incomplete. Retry the same commit to reconcile. Receipt: ${JSON.stringify(receipt)}. ${cause.message}`
           : `PR publication/registration failed: ${cause.message}`
         if (receipt) failures.set(key, message)
         throw new Error(message, { cause })

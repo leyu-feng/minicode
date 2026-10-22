@@ -17,24 +17,33 @@ const USAGE = `Usage:
   clippy-auth login  --server <origin> [--user <upn>] [--silent] [--client-id <id>] [--scope <scope>]
   clippy-auth status --server <origin> [--user <upn>]
   clippy-auth logout --server <origin> [--user <upn>]
+  clippy-auth ado-login --organization <https://dev.azure.com/org> --user <upn>
+  clippy-auth ado-token --organization <https://dev.azure.com/org> --user <upn> [--silent]
 
 login   Signs in through WAM and saves the Easy Auth session the worker sends as X-ZUMO-AUTH.
         --silent never shows UI and exits ${EXIT_INTERACTION_REQUIRED} if signing in needs you; the worker renews with it.
 status  Shows the saved session and whether Easy Auth still accepts it.
-logout  Deletes the saved session.`
+logout  Deletes the saved session.
+ado-login  Signs in to Azure DevOps through MSAL/WAM; does not print or save an access token.
+ado-token  Returns private token JSON for the worker harness, never for model tools or logs.`
 
 export function parseArgs(argv) {
   const [command, ...rest] = argv
   const options = { command, silent: false }
-  const valued = { "--server": "server", "--user": "user", "--client-id": "clientId", "--scope": "scope" }
+  const valued = { "--server": "server", "--user": "user", "--client-id": "clientId", "--scope": "scope",
+    "--organization": "organization" }
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]
     if (arg === "--silent") options.silent = true
     else if (valued[arg] && rest[i + 1] && !rest[i + 1].startsWith("--")) options[valued[arg]] = rest[++i]
     else throw new Error(`Unknown or incomplete argument: ${arg}`)
   }
-  if (!["login", "status", "logout"].includes(command) || !options.server) throw new Error(USAGE)
-  options.server = serverOrigin(options.server)
+  if (["ado-login", "ado-token"].includes(command)) {
+    if (!options.organization || !options.user || options.server || options.scope) throw new Error(USAGE)
+  } else {
+    if (!["login", "status", "logout"].includes(command) || !options.server || options.organization) throw new Error(USAGE)
+    options.server = serverOrigin(options.server)
+  }
   return options
 }
 
@@ -98,7 +107,7 @@ async function logout(options, log) {
   log(session ? `Removed the saved session for ${session.user} at ${options.server}.` : "No saved session to remove.")
 }
 
-export async function main(argv, log = console.log, logError = console.error) {
+export async function main(argv, log = console.log, logError = console.error, dependencies = {}) {
   let options
   try {
     options = parseArgs(argv)
@@ -107,7 +116,14 @@ export async function main(argv, log = console.log, logError = console.error) {
     return EXIT_ERROR
   }
   try {
-    if (options.command === "login") await login(options, log)
+    if (["ado-login", "ado-token"].includes(options.command)) {
+      const getToken = dependencies.acquireAzureDevOpsToken ?? (await import("./src/azure-devops.js")).acquireAzureDevOpsToken
+      const result = await getToken({ organization: options.organization, user: options.user,
+        clientId: options.clientId || DEFAULT_CLIENT_ID, silentOnly: options.silent })
+      if (options.command === "ado-token") log(JSON.stringify(result))
+      else log(`Signed in to Azure DevOps as ${result.user}. Access token valid until ${result.expiresAt}; no token was saved.`)
+    }
+    else if (options.command === "login") await login(options, log)
     else if (options.command === "status") return await status(options, log)
     else await logout(options, log)
     return EXIT_OK
