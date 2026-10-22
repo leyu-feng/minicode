@@ -197,7 +197,56 @@ POST /api/routine-triggers/public/{publicId}/fire
 
 Fires a webhook trigger from an external system without a Paperclip login. Send
 `Content-Type: application/json` and a JSON object. The trigger authenticates the
-request using its own secret; an agent or board API key is not a substitute.
+request using its own secret or the deployment-configured Entra policy below;
+an agent or board API key is not a substitute.
+
+### Entra-authenticated investigation webhooks
+
+An Azure deployment can require passwordless service authentication for explicitly
+selected webhook URLs. Set `PAPERCLIP_ENTRA_ROUTINE_WEBHOOKS` on the server:
+
+```json
+{
+  "tenantId": "<Entra tenant UUID>",
+  "applicationId": "<API application client UUID>",
+  "audience": "<API application ID URI>",
+  "grants": [
+    {
+      "publicId": "<24-character public trigger ID>",
+      "companyId": "<routine company UUID>",
+      "clientId": "<calling managed identity client UUID>",
+      "principalId": "<calling managed identity service principal UUID>"
+    }
+  ]
+}
+```
+
+For a listed trigger, this policy **replaces** its secret-based authentication.
+The server verifies the bearer token's RS256 signature against the configured
+tenant's Entra keys, issuer, audience, expiry, tenant, `AdoPipelines` application
+role, and the exact company/identity/trigger grant. Delegated user tokens are
+rejected. A secret, browser session, or forged Easy Auth identity header is not
+a substitute. Unlisted triggers retain their existing authentication.
+The API application ID URI is accepted as a v1 token audience; the API application
+client UUID is also accepted, as used by v2 access tokens. Malformed configuration
+fails closed.
+
+Assign the API's existing `AdoPipelines` application role to the managed identity.
+If Easy Auth protects ingress, also allow that identity's client ID and the API
+audience there; do not change browser access or exclude this route from Easy Auth.
+Request the token using `<API application ID URI>/.default`, then POST to the
+existing `/api/routine-triggers/public/{publicId}/fire` URL with:
+
+- `Authorization: Bearer <Entra access token>`
+- `Content-Type: application/json`
+- `Idempotency-Key: <stable delivery ID, 1-255 characters>`
+
+Reuse the delivery ID when retrying an event; use a new ID for an explicit new
+investigation. Routine lifecycle, company scope, concurrency, activity logging,
+and execution scheduling remain unchanged. Successful delivery audit records
+include the authenticated client and principal IDs. No tokens are stored.
+
+### Secret-authenticated webhooks
 
 | Mode | Headers and signature |
 |------|-----------------------|

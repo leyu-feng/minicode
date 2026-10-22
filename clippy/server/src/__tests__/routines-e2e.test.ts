@@ -152,6 +152,7 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
     vi.doUnmock("../services/workspace-runtime.js");
     vi.doUnmock("../services/index.js");
     vi.doUnmock("../services/routines.js");
+    vi.doUnmock("../services/entra-routine-webhook.js");
     vi.doUnmock("../routes/routines.js");
     vi.doUnmock("../routes/authz.js");
     vi.doUnmock("../middleware/index.js");
@@ -349,6 +350,69 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
     const changedTrigger = await request(board).patch(`/api/routine-triggers/${triggerId}`).send({ enabled: false });
     expect(changedTrigger.status, JSON.stringify(changedTrigger.body)).toBe(200);
     expect(changedTrigger.body.enabled).toBe(false);
+  }, 20_000);
+
+  it("runs an identity-protected webhook with idempotency, auditing, and no secret fallback", async () => {
+    vi.stubEnv("PAPERCLIP_API_URL", "http://localhost:3100");
+    vi.stubEnv("PAPERCLIP_IN_WORKTREE", "false");
+    const clientId = randomUUID();
+    const principalId = randomUUID();
+    vi.doMock("../services/entra-routine-webhook.js", async () => {
+      const { unauthorized } = await import("../errors.js");
+      return {
+        authenticateEntraRoutineWebhook: async (_publicId: string, _companyId: string, header: string) => {
+          if (header !== "Bearer verified-entra-token") throw unauthorized();
+          return { clientId, principalId };
+        },
+      };
+    });
+    const { companyId, agentId, projectId, userId } = await seedFixture();
+    const board = await createApp({ type: "board", source: "local_implicit", userId, isInstanceAdmin: true });
+    const created = await request(board).post(`/api/companies/${companyId}/routines`).send({
+      projectId, assigneeAgentId: agentId, title: "Investigate {{event}}",
+      variables: [{ name: "event", type: "text", required: true }],
+      concurrencyPolicy: "always_enqueue",
+    });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const configured = await request(board).post(`/api/routines/${created.body.id}/triggers`)
+      .send({ kind: "webhook", signingMode: "bearer" });
+    expect(configured.status, JSON.stringify(configured.body)).toBe(201);
+    const path = new URL(configured.body.secretMaterial.webhookUrl).pathname;
+    const [{ actorMiddleware }, { boardMutationGuard }, { routineRoutes }, { errorHandler }] = await Promise.all([
+      import("../middleware/auth.js"), import("../middleware/board-mutation-guard.js"),
+      import("../routes/routines.js"), import("../middleware/error-handler.js"),
+    ]);
+    const ingress = express();
+    ingress.use(express.json());
+    ingress.use(actorMiddleware(db, { deploymentMode: "authenticated" }));
+    ingress.use("/api", boardMutationGuard(), routineRoutes(db));
+    ingress.use(errorHandler);
+    const rejected = await request(ingress).post(path)
+      .set("Authorization", `Bearer ${configured.body.secretMaterial.webhookSecret}`)
+      .set("Idempotency-Key", "delivery-1").send({ event: "pipeline failure" });
+    expect(rejected.status).toBe(401);
+    const noKey = await request(ingress).post(path)
+      .set("Authorization", "Bearer verified-entra-token").send({ event: "pipeline failure" });
+    expect(noKey.status).toBe(422);
+    const first = await request(ingress).post(path)
+      .set("Authorization", "Bearer verified-entra-token")
+      .set("Idempotency-Key", "delivery-1").send({ event: "pipeline failure" });
+    expect(first.status, JSON.stringify(first.body)).toBe(202);
+    expect(first.body.status).toBe("issue_created");
+    const retry = await request(ingress).post(path)
+      .set("Authorization", "Bearer verified-entra-token")
+      .set("Idempotency-Key", "delivery-1").send({ event: "pipeline failure" });
+    expect(retry.status, JSON.stringify(retry.body)).toBe(202);
+    expect(retry.body.id).toBe(first.body.id);
+    const [issue] = await db.select().from(issues).where(eq(issues.id, first.body.linkedIssueId));
+    expect(issue).toMatchObject({ companyId, assigneeAgentId: agentId, title: "Investigate pipeline failure" });
+    const history = await request(board).get(`/api/routines/${created.body.id}/runs`);
+    expect(history.body).toHaveLength(1);
+    const deliveries = await db.select().from(activityLog).where(eq(activityLog.entityId, created.body.id));
+    expect(deliveries.some((entry) =>
+      entry.details?.authentication === "entra"
+      && entry.details.clientId === clientId
+      && entry.details.principalId === principalId)).toBe(true);
   }, 20_000);
 
   it.each(["bearer", "hmac_sha256", "github_hmac", "none"] as const)(
