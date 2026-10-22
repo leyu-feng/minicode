@@ -46,6 +46,18 @@ for workers, and inspect or revoke them. Hire an agent with AgentPool and select
 the pool name. Follow [worker setup](../../../minicode/README.md#connect-as-an-agentpool-worker)
 on the worker machine.
 
+Existing pools are Freelance. Select Hosted to configure a managed-identity
+provider and confirm clearing all pairings; switching back also disconnects
+workers. Inspect the persisted provider pool ID, mock capacity and repository
+catalog. Configure an agent's primary and distinct read-only references; all
+catalog repositories may be primary and the marked default is preselected.
+Provider status is mock: create starts at one active/one provisioning; reporting
+backlog N sets active to 1 + N and leaves provisioning at one. Verify repeated
+reports do not accumulate. Without an actual compatible worker, a Hosted task
+must request capacity, wait at most two minutes and fail visibly, never claim
+execution from mock counts. This version does not provision Hosted compute.
+See the [provider contract](../../doc/agent-pool-protocol.md#freelance-and-hosted-pools).
+
 Updated workers download Paperclip's bundled operational and onboarding skills into the assigned
 checkout's Git-ignored `.worker/skills`, not the host-owned shared folder. Confirm
 the run records a verified ZIP hash before model work, and inspect the next

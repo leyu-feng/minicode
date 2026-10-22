@@ -75,6 +75,10 @@ company access; an agent's hire grant does not grant pool administration.
 [Shared selector](../../ui/src/components/AgentPoolSelect.tsx) and
 [new-agent controls](../../ui/src/pages/NewAgent.test.tsx) are source/component
 evidence only, not a live permitted-agent journey.
+Hosted agent selections are checked against the selected company's pool catalog,
+defaulting the primary when omitted and rejecting duplicate/unknown references.
+This does not grant agents provider credentials or board-only pool/status/catalog
+administration; Clippy's managed identity performs provider calls.
 
 The runner request does not grant new account, environment-probe or native API
 fallback authority; see [validation access](./runs-adapters.md#validation) and

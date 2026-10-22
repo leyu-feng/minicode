@@ -3,6 +3,7 @@ import { eq, inArray } from "drizzle-orm";
 import { createAgentLifecycle, scheduleAgentLifecycle } from "./agent-lifecycle.js";
 import { agentLifecycleCompanyDeletion } from "../modules/agent-lifecycle/company-deletion.js";
 import { agentPoolBroker } from "./agent-pool-broker.js";
+import { agentPoolService } from "./agent-pools.js";
 import {
   companies,
   agents,
@@ -52,6 +53,7 @@ export async function deleteCompany(db: Db, id: string) {
     await scheduleAgentLifecycle(db, agent.id);
   }
   const removedWorkers: Array<{ id: string }> = [];
+  await agentPoolService(db).deleteHostedPools(id);
   const result = await db.transaction(async (tx) => {
         // Exclude accounting writers before taking child locks. KEY SHARE must
         // remain compatible: native writers can already hold a child row while

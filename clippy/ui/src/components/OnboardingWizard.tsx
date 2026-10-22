@@ -1862,7 +1862,7 @@ function OnboardingWizardInner({
       return adapter.buildAdapterConfig({
         ...defaultCreateValues,
         adapterType,
-        adapterSchemaValues: { name: poolName.trim() },
+        adapterSchemaValues: { name: poolName.trim(), ...poolSelection.repositoryConfig },
       });
     }
     const config = adapter.buildAdapterConfig({

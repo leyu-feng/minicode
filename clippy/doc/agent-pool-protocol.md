@@ -27,6 +27,65 @@ The canonical TypeScript schemas and types are exported from
 `@paperclipai/shared/agent-pools`. Non-TypeScript workers implement the same JSON
 contract. Do not depend on Minicode's internal session or prompt representation.
 
+## Freelance and Hosted pools
+
+Existing pools migrate to `freelance`; their pairing and immediate
+worker-unavailable behavior is unchanged. Hosted pools use an external provider,
+authenticated exclusively with Clippy's managed identity. Configure
+`PAPERCLIP_HOSTED_WORKER_URL` (HTTPS, ending in `/v1/hosted-worker`) and
+`PAPERCLIP_HOSTED_WORKER_AUDIENCE` to provision new-company default pools as
+Hosted. `AZURE_CLIENT_ID` selects a user-assigned managed identity. Without the
+two provider settings, new pools remain Freelance; existing pools are never
+automatically converted.
+
+Company settings lets a board operator select the pool type, provider URL and
+audience, then **Save and test**. Confirming the change clears all pairings and
+disconnects workers, in either direction. The external provider's `poolId` is
+persisted separately from the local pool ID and reused for all subsequent calls.
+If provisioning or connectivity fails, saved settings and revoked pairings
+remain in effect. The pending pool stays visible; retry saving or loading its
+status after correcting the provider. No fallback to Freelance or user
+credentials occurs. Company deletion also deletes its provider pools.
+
+The managed-identity-authenticated provider contract is:
+
+| Method | Path | Body / response |
+| --- | --- | --- |
+| POST | `/v1/hosted-worker` | `{ "companyId": "<uuid>", "name": "default" }`; 201 with `poolId`, `companyId`, `name` |
+| GET | `/v1/hosted-worker/{poolId}` | 200 with persisted pool and mock counts |
+| POST | `/v1/hosted-worker/{poolId}` | `{ "itemsWaiting": 4 }`; 202 |
+| DELETE | `/v1/hosted-worker/{poolId}` | 204, idempotent |
+| GET | `/v1/hosted-worker/{poolId}/status` | `{ "activeWorkers": 5, "provisioningWorkers": 1, "isMock": true }` |
+| GET | `/v1/hosted-worker/{poolId}/repos` | Repository array: `id`, `name`, `branch`, `isDefault` |
+
+Engsys stores mock state in Cosmos `EngineeringSystems/HostedWorkerPools`,
+partitioned by `/PoolId`. Create is idempotent for the caller identity, company
+and pool name. Initially `activeWorkers = 1`, `provisioningWorkers = 1` and
+`itemsWaiting = 0`. Demand replaces the backlog snapshot and sets
+`activeWorkers = 1 + itemsWaiting`; `provisioningWorkers` always remains 1.
+Repeated demand is not additive. The caller must satisfy the existing
+PartnerPlatformAndMicroservice authentication policy and appear in
+`HostedWorkers:AllowedClientIds`. Pool IDs cannot cross caller identities.
+Deployment Bicep configures the Clippy managed identity allowlist, audience,
+Cosmos container and repository catalog. `hostedWorkerRepositories` overrides
+the default catalog derived from `sessionRepos` (branch `main`, first default).
+
+Catalogs require unique repository IDs and exactly one default. Every repository
+can be primary. Hosted agent configuration saves `primaryRepositoryId` and
+distinct `referenceRepositoryIds`; omitting primary chooses the provider default.
+Assignments include optional `repositories: { primary, references }`, containing
+the selected repositories' `id`, `name` and `branch`. Only workers advertising
+`hosted_repositories_v1` may receive these assignments. References are read-only
+code context, not operational instruction authority.
+
+Hosted runs request capacity using the current waiting-run count and wait at
+most two minutes for an actual idle, compatible worker connection. Admission,
+cancellation and timeout update the backlog. Provider mock counts never authorize
+dispatch. No compatible worker produces a visible, retriable bootstrap failure.
+This release does not provision compute or implement Hosted repository
+materialization in Minicode; existing workers deliberately do not advertise the
+new capability. The mock API and settings are not evidence of working hosting.
+
 ## Connection and assignment
 
 Connect to `/api/agent-pool/worker?workerId=<paired-worker-id>` with the paired
@@ -174,12 +233,13 @@ server-owned stop receipt bound to the run, company, worker process and result
 sequence. A result without `ready`, a lost process, an expired reconnect lease,
 or unacknowledged cancellation is not evidence of a stopped assignment.
 
-If no idle compatible worker is available, the broker fails the run with
+For Freelance pools, if no idle compatible worker is available, the broker fails the run with
 `agent_pool_worker_unavailable` and records bootstrap evidence that no assignment
 was dispatched. This remains a failed, explicitly retriable run, not an
 unknown-action reconciliation hold, even after repeated availability failures.
 Connect an eligible worker and retry to start a fresh assignment. A failure
-after dispatch does not receive this no-dispatch evidence.
+after dispatch does not receive this no-dispatch evidence. Hosted pools first
+perform the bounded capacity-request/wait flow described above.
 
 When human input is needed, save the question, progress and durable artifacts
 through the task APIs, leave the task waiting/blocked, and finish the assignment

@@ -9,6 +9,8 @@ type UpgradeRequest = IncomingMessage & { paperclipWebSocketHandled?: boolean };
 
 export function setupAgentPoolWebSocketServer(server: Server, db: Db) {
   const svc = agentPoolService(db);
+  const prepareExecution = (ctx: Parameters<typeof svc.prepareExecution>[0]) => svc.prepareExecution(ctx);
+  agentPoolBroker.prepareExecution = prepareExecution;
   const wss = new WebSocketServer({ noServer: true, maxPayload: AGENT_POOL_MAX_FRAME });
   const alive = new Set<object>();
   const timer = setInterval(() => {
@@ -53,6 +55,7 @@ export function setupAgentPoolWebSocketServer(server: Server, db: Db) {
     closed = true;
     clearInterval(timer);
     agentPoolBroker.close();
+    if (agentPoolBroker.prepareExecution === prepareExecution) agentPoolBroker.prepareExecution = undefined;
     for (const ws of wss.clients) ws.terminate();
     wss.close();
   };

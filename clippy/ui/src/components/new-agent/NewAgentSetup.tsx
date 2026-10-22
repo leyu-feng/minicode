@@ -394,7 +394,7 @@ function Setup({
         : {}),
     };
     const config = getUIAdapter(adapterType).buildAdapterConfig(values);
-    if (adapterType === "agent_pool") config.name = poolName.trim();
+    if (adapterType === "agent_pool") Object.assign(config, { name: poolName.trim(), ...poolSelection.repositoryConfig });
     if (preserveNativeCodex && runner === "paperclip") {
       Object.assign(config, { provider: "codex", codexPermissionMode: "never", lifecycleMode: "per_turn" });
     }

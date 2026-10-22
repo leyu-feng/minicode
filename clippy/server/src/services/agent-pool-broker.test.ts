@@ -63,6 +63,82 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("reserves a compatible Hosted worker for only one waiter and releases it before an aborted dispatch", async () => {
+    const { broker, worker } = await harness();
+    const legacy = await worker();
+    const hosted = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1", "hosted_repositories_v1"]);
+    const ctx = context();
+    ctx.context.paperclipHostedRepositories = {
+      primary: { id: "main", name: "Main", branch: "main" }, references: [],
+    };
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    expect(broker.status(hosted.id)).toBe("busy");
+    expect(broker.reserveAvailableWorker({ ...ctx, runId: randomUUID() })).toBe(false);
+    const controller = new AbortController();
+    controller.abort();
+    ctx.signal = controller.signal;
+    await expect(broker.execute(ctx)).rejects.toThrow("cancelled before dispatch");
+    expect(broker.status(hosted.id)).toBe("idle");
+    expect(legacy.messages).toEqual([]);
+    expect(hosted.messages).toEqual([]);
+  });
+
+  it("sends repository descriptors only to workers explicitly supporting Hosted assignments", async () => {
+    const { broker, worker } = await harness();
+    const legacy = await worker();
+    const hosted = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1", "hosted_repositories_v1"]);
+    const ctx = context();
+    const repositories = { primary: { id: "other", name: "Other", branch: "release" },
+      references: [{ id: "main", name: "Main", branch: "main" }] };
+    broker.prepareExecution = async (execution) => {
+      execution.context.paperclipHostedRepositories = repositories;
+      expect(broker.reserveAvailableWorker(execution)).toBe(true);
+    };
+    const result = broker.execute(ctx);
+    const task = await hosted.take("task");
+    expect(task.repositories).toEqual(repositories);
+    expect(task.context).not.toHaveProperty("paperclipHostedRepositories");
+    expect(legacy.messages).toEqual([]);
+    hosted.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await hosted.take("ack");
+    hosted.send({ type: "ready" });
+    await expect(result).resolves.toMatchObject({ exitCode: 0 });
+  });
+
+  it.each(["reconnect", "replace"])("drops a reservation until the worker is ready after %s", async (kind) => {
+    const { broker, worker } = await harness();
+    const first = await worker();
+    const ctx = context();
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    if (kind === "reconnect") await first.disconnect();
+    const replacement = await worker(first.id, first.instanceId, null, false);
+    await expect(broker.execute(ctx)).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
+    expect(replacement.messages).toEqual([]);
+    expect(broker.hasAvailableWorker(ctx)).toBe(false);
+    replacement.send({ type: "ready" });
+    await vi.waitFor(() => expect(broker.status(replacement.id)).toBe("idle"));
+  });
+
+  it("does not expire a new connection when the old peer is removed", async () => {
+    const { broker, worker } = await harness(100);
+    const first = await worker();
+    broker.close();
+    await once(first.socket, "close");
+    const replacement = await worker(first.id, first.instanceId);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(broker.status(replacement.id)).toBe("idle");
+    expect(replacement.socket.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("rejects a revoked credential even when its hello arrives after revocation", async () => {
+    const { broker, worker } = await harness();
+    const id = randomUUID();
+    broker.revoke(id);
+    const rejected = await worker(id);
+    expect(rejected.welcome).toBeUndefined();
+    expect(broker.status(id)).toBe("offline");
+  });
+
   it("allows the same pool worker to serve different agents on successive assignments", async () => {
     const { broker, worker } = await harness();
     const client = await worker();

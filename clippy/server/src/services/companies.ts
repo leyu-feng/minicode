@@ -30,6 +30,7 @@ import { environmentService } from "./environments.js";
 import { heartbeatService } from "./heartbeat.js";
 import { logActivity, type ActivityPublication } from "./activity-log.js";
 import { builtInAgentService } from "./built-in-agents.js";
+import { agentPoolService } from "./agent-pools.js";
 
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -287,6 +288,7 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
     create: async (data: typeof companies.$inferInsert) => {
       const created = await createCompanyWithUniquePrefix(data);
       await environmentsSvc.ensureLocalEnvironment(created.id);
+      await agentPoolService(db).ensureDefault(created.id);
       await builtInAgents.autoProvisionBundledAgents(created.id);
       const row = await getCompanyQuery(db)
         .where(eq(companies.id, created.id))

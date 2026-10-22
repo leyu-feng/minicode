@@ -3,6 +3,7 @@ import { z } from "zod";
 export const AGENT_POOL_PROTOCOL_VERSION = 1;
 export const AGENT_POOL_INLINE_INSTRUCTIONS = "inline_instructions_v1";
 export const AGENT_POOL_SKILL_BUNDLE = "skill_bundle_v1";
+export const AGENT_POOL_HOSTED_REPOSITORIES = "hosted_repositories_v1";
 
 export const agentPoolHelloSchema = z.object({
   type: z.literal("hello"),
@@ -46,12 +47,55 @@ export const agentPoolTaskSchema = z.object({
   continuation: z.unknown().nullable(),
   runtimeTools: z.unknown().nullable(),
   authToken: z.string().nullable(),
+  repositories: z.object({
+    primary: z.object({ id: z.string(), name: z.string(), branch: z.string() }),
+    references: z.array(z.object({ id: z.string(), name: z.string(), branch: z.string() })),
+  }).optional(),
 });
 
 export type AgentPoolTask = z.infer<typeof agentPoolTaskSchema>;
 
 export const agentPoolNameSchema = z.string().trim().min(1).max(64).regex(/^[a-z0-9][a-z0-9_-]*$/);
 export const createAgentPoolSchema = z.object({ name: agentPoolNameSchema });
+export const hostedWorkerConfigSchema = z.object({
+  apiUrl: z.string().url().refine((value) => {
+    if (!URL.canParse(value)) return false;
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash
+      && url.pathname.replace(/\/+$/, "").endsWith("/v1/hosted-worker");
+  }, "Use an HTTPS URL ending in /v1/hosted-worker, without credentials, a query or a fragment."),
+  audience: z.string().trim().min(1).max(500).regex(/^\S+$/),
+});
+export const updateAgentPoolSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("freelance"), clearPairings: z.literal(true) }),
+  z.object({ type: z.literal("hosted"), clearPairings: z.literal(true), config: hostedWorkerConfigSchema }),
+]);
+export const hostedWorkerStatusSchema = z.object({
+  activeWorkers: z.number().int().nonnegative(),
+  provisioningWorkers: z.number().int().nonnegative(),
+  isMock: z.boolean(),
+});
+export const hostedWorkerRepositorySchema = z.object({
+  id: z.string().min(1).max(200),
+  name: z.string().min(1).max(200),
+  branch: z.string().min(1).max(200),
+  isDefault: z.boolean(),
+});
+export const hostedWorkerRepositoriesSchema = z.array(hostedWorkerRepositorySchema).min(1).max(1000)
+  .refine((repos) => repos.filter((repo) => repo.isDefault).length === 1
+    && new Set(repos.map((repo) => repo.id)).size === repos.length,
+  "The provider must return unique repository IDs and exactly one default.");
+export const hostedWorkerDemandSchema = z.object({ itemsWaiting: z.number().int().min(0).max(2147483646) });
+export const hostedAgentRepositoriesSchema = z.object({
+  primaryRepositoryId: z.string().min(1).max(200).optional(),
+  referenceRepositoryIds: z.array(z.string().min(1).max(200)).max(100).default([]),
+}).refine((value) => new Set(value.referenceRepositoryIds).size === value.referenceRepositoryIds.length
+  && !value.referenceRepositoryIds.includes(value.primaryRepositoryId ?? ""),
+"Primary and reference repositories must be distinct.");
+export type HostedWorkerConfig = z.infer<typeof hostedWorkerConfigSchema>;
+export type HostedWorkerStatus = z.infer<typeof hostedWorkerStatusSchema>;
+export type HostedWorkerRepository = z.infer<typeof hostedWorkerRepositorySchema>;
+export type UpdateAgentPool = z.infer<typeof updateAgentPoolSchema>;
 export const createAgentPoolWorkerSchema = z.object({ name: z.string().trim().min(1).max(100) });
 export const pairAgentPoolWorkerSchema = z.object({
   workerId: z.string().uuid(),
@@ -63,6 +107,10 @@ export interface AgentPool {
   id: string;
   companyId: string;
   name: string;
+  type: "freelance" | "hosted";
+  hostedApiUrl: string | null;
+  hostedAudience: string | null;
+  hostedPoolId: string | null;
 }
 
 export interface AgentPoolWorker {

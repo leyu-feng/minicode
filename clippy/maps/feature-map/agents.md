@@ -57,6 +57,10 @@ the pool and agent are persisted and the agent names the selected pool.
 Duplicate names must offer explicit reuse; a pool created before a failed hire
 must remain selectable on retry. Pair/connect workers later through company
 settings before verifying a real task; saving an agent is not execution proof.
+For Hosted pools, select the primary and read-only reference repositories from
+the provider catalog. Omitted primary resolves to its single default; every
+repository may be primary. Save/reload must retain distinct selections and
+reject unknown catalog IDs. Mock provider counts are not worker readiness.
 
 For a new Codex hire, choose the Codex harness. Automatic selection uses Paperclip
 Runner on a qualified selected target; Advanced offers an explicit Legacy runner

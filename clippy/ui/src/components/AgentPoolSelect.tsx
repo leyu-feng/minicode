@@ -5,6 +5,7 @@ import { agentPoolsApi } from "../api/agent-pools";
 import { ApiError } from "../api/client";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { HostedRepositorySelect } from "./HostedRepositorySelect";
 
 type PoolMode = "existing" | "new";
 
@@ -23,6 +24,9 @@ export function useAgentPoolSelection({
 }) {
   const cache = useQueryClient();
   const [modeChoice, setModeChoice] = useState(initialMode);
+  const [primaryRepositoryId, setPrimaryRepositoryId] = useState<string>();
+  const [referenceRepositoryIds, setReferenceRepositoryIds] = useState<string[]>([]);
+  const resetRepositories = () => { setPrimaryRepositoryId(undefined); setReferenceRepositoryIds([]); };
   const key = ["agent-pools", companyId];
   const pools = useQuery({
     queryKey: key,
@@ -34,15 +38,24 @@ export function useAgentPoolSelection({
   const mode = modeChoice ?? (existing ? "existing" : "new");
   const duplicate = mode === "new" && Boolean(existing);
   const validName = agentPoolNameSchema.safeParse(name).success;
+  const repositoryConfig: { primaryRepositoryId?: string; referenceRepositoryIds?: string[] } = existing?.type === "hosted"
+    ? { ...(primaryRepositoryId ? { primaryRepositoryId } : {}), referenceRepositoryIds } : {};
   return {
-    pools, name, mode, modeChoice, duplicate,
+    pools, name, mode, modeChoice, duplicate, companyId,
+    repositoryConfig,
+    setRepositories: (primaryId: string, referenceIds: string[]) => {
+      setPrimaryRepositoryId(primaryId); setReferenceRepositoryIds(referenceIds);
+    },
     ready: pools.isSuccess && validName && (mode === "existing" ? Boolean(existing) : !duplicate),
-    reset: () => setModeChoice(null),
-    changeName: onNameChange,
+    reset: () => { setModeChoice(null); resetRepositories(); },
+    changeName: (value: string) => { resetRepositories(); onNameChange(value); },
     select: (value: string) => {
       setModeChoice(value === "__new__" ? "new" : "existing");
       const nextName = value === "__new__" ? "" : value;
-      if (nextName !== name.trim()) onNameChange(nextName);
+      if (nextName !== name.trim()) {
+        resetRepositories();
+        onNameChange(nextName);
+      }
     },
     async ensurePool() {
       if (!companyId || !pools.isSuccess) throw new Error("Load the company pools before creating the agent.");
@@ -96,7 +109,7 @@ export function AgentPoolSelect({
               onChange={(event) => selection.select(event.target.value)}
             >
               <option value="" disabled>Select an existing pool</option>
-              {pools.data?.map((pool) => <option key={pool.id} value={pool.name}>{pool.name}</option>)}
+              {pools.data?.map((pool) => <option key={pool.id} value={pool.name}>{pool.name} ({pool.type === "hosted" ? "Hosted" : "Freelance"})</option>)}
               <option value="__new__">Create a new pool</option>
             </select>
           </label>
@@ -131,9 +144,12 @@ export function AgentPoolSelect({
       )}
       <p className="text-xs text-muted-foreground">
         No connected worker is required to save this agent. New pools are saved with the agent.
-        Before running tasks, pair/connect a Minicode worker in company settings.
-        The worker supplies its model access and local working directory.
+        Freelance pools need a paired Minicode worker. Hosted pools request capacity and wait up to two minutes
+        for a real worker; mock provider counts do not make a worker available.
       </p>
+      {mode === "existing" && <HostedRepositorySelect companyId={selection.companyId} poolName={name}
+        primaryId={selection.repositoryConfig.primaryRepositoryId} referenceIds={selection.repositoryConfig.referenceRepositoryIds ?? []}
+        onChange={selection.setRepositories} />}
     </div>
   );
 }
