@@ -632,6 +632,8 @@ requests** section displays the saved record; no separate dashboard is needed.
 The record includes repository, PR number, branch, commit, agent, and current
 provider state. Open PRs request review; merged/closed receipts do not complete
 the task or bypass its approval gates.
+Behind Entra sign-in, issue lookup and all registration requests use the worker's
+loopback proxy, preserving its path prefix and keeping the Easy Auth session private.
 
 A task-scoped run cannot override its issue. For a general Run Now, discover
 your assigned task using the bundled skill and supply its UUID as the tool's
