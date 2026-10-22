@@ -97,6 +97,7 @@
     "express": "^5.1.0",
     "fflate": "0.8.3",
     "heif2jpeg": "0.1.6",
+    "jose": "^6.2.12",
     "jsdom": "^30.0.1",
     "light-my-request": "^6.6.0",
     "multer": "^2.4.0",

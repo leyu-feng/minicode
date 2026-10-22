@@ -81,6 +81,7 @@ import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./is
 import { logActivity } from "./activity-log.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { runtimePublicOrigin } from "./cloud-runtime-identity.js";
+import { authenticateEntraRoutineWebhook, type EntraRoutineWebhookIdentity } from "./entra-routine-webhook.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
@@ -2939,6 +2940,7 @@ export function routineService(
         if (!routine) throw notFound("Routine not found");
         if (routine.status === "archived") throw conflict("Routine is archived");
         if (!trigger.enabled || (!trigger.setupPending && routine.status !== "active")) throw conflict("Routine trigger is not active");
+        let entraIdentity: EntraRoutineWebhookIdentity | null = null;
         const recordDelivery = async (status: "received" | "rejected") => {
           const receivedAt = new Date().toISOString();
           await txDb.update(routineTriggers).set({ lastWebhookDelivery: { status, receivedAt, test: trigger.setupPending } }).where(eq(routineTriggers.id, trigger.id));
@@ -2946,13 +2948,23 @@ export function routineService(
             companyId: routine.companyId, actorType: "system", actorId: "routine-webhook",
             action: trigger.setupPending ? `routine.webhook_test_${status}` : `routine.webhook_${status}`,
             entityType: "routine", entityId: routine.id,
-            details: { triggerId: trigger.id, test: trigger.setupPending, result: status === "received" ? "passed" : "rejected" },
+            details: {
+              triggerId: trigger.id,
+              test: trigger.setupPending,
+              result: status === "received" ? "passed" : "rejected",
+              ...(entraIdentity ? { authentication: "entra", ...entraIdentity } : {}),
+            },
           });
         };
         let hmacReplayKey: string | null = null;
         let appDelivery: ReturnType<typeof verifyAppWebhook> = null;
         try {
-          if (trigger.signingMode === "none") {
+          entraIdentity = await authenticateEntraRoutineWebhook(publicId, routine.companyId, input.authorizationHeader);
+          if (entraIdentity) {
+            if (!input.idempotencyKey?.trim() || input.idempotencyKey.length > 255) {
+              throw unprocessable("Entra webhook deliveries require an Idempotency-Key of 1 to 255 characters");
+            }
+          } else if (trigger.signingMode === "none") {
             // No authentication — the publicId in the URL acts as a shared secret.
           } else if (trigger.signingMode === "app_webhook") {
             appDelivery = verifyAppWebhook({
