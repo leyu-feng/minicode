@@ -56,7 +56,7 @@ function skillBundle(contents = {
 }
 
 async function harness(t, factory, workerOptions = {}) {
-  const { bundle, linkedSource, ...configuredOptions } = workerOptions
+  const { bundle, linkedSource, remoteSource, ...configuredOptions } = workerOptions
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-workspace-test-"))
   const source = path.join(directory, "source repo")
   const workspaceRoot = path.join(directory, "workspaces")
@@ -66,6 +66,11 @@ async function harness(t, factory, workerOptions = {}) {
   await fs.writeFile(path.join(source, "tracked.txt"), "committed")
   await git("add", "tracked.txt")
   await git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "commit", "-m", "Fixture")
+  const remote = path.join(directory, "source-remote.git")
+  if (remoteSource) {
+    await git("clone", "--bare", "--no-hardlinks", "--", source, remote)
+    await git("remote", "add", "origin", remote)
+  }
   let workerSource = source
   if (linkedSource) {
     workerSource = path.join(directory, "main")
@@ -110,7 +115,7 @@ async function harness(t, factory, workerOptions = {}) {
     return peer
   }
   return {
-    worker, welcome, connections, serverInstanceId, serverUrl: options.server, source: workerSource, workspaceRoot, git, options,
+    worker, welcome, connections, serverInstanceId, serverUrl: options.server, source: workerSource, workspaceRoot, remote, git, options,
     async restart() {
       await worker.stop()
       worker = await startAgentPoolWorker(options)
@@ -384,6 +389,9 @@ for (const workspaceMode of ["clone", "worktree"]) {
     await gitAt("-C", reference, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
       "-c", "commit.gpgsign=false", "commit", "-m", "Reference")
     const commit = await gitAt("-C", reference, "rev-parse", "HEAD")
+    const remote = path.join(directory, "reference-remote.git")
+    await gitAt("clone", "--bare", "--no-hardlinks", reference, remote)
+    await gitAt("-C", reference, "remote", "add", "origin", remote)
     await gitAt("-C", reference, "worktree", "add", "--detach", detached, "HEAD")
     const sessions = []
     class Session extends EventEmitter {
@@ -391,8 +399,8 @@ for (const workspaceMode of ["clone", "worktree"]) {
       async write() {
         const manifest = JSON.parse(this.options.env.WORKER_REFERENCE_REPOS_JSON)
         assert.deepEqual(manifest, [
-          { name: "services", path: await fs.realpath(reference), commit },
-          { name: "dss", path: await fs.realpath(detached), commit },
+          { name: "services", path: await fs.realpath(reference), branch: "main", commit },
+          { name: "dss", path: await fs.realpath(detached), branch: "main", commit },
         ])
         for (const entry of manifest) {
           assert.equal(await fs.readFile(path.join(entry.path, "code.txt"), "utf8"), "reference code")
@@ -408,7 +416,7 @@ for (const workspaceMode of ["clone", "worktree"]) {
       dispose() {}
     }
     const fixture = await harness(t, options => new Session(options), {
-      workspaceMode, referenceRepos: [`services=${reference}`, `dss=${detached}`],
+      workspaceMode, referenceRepos: [`main@services=${reference}`, `main@dss=${detached}`],
     })
     const peer = await fixture.welcome(0)
     await executeTask(peer, { runId: "reference-read", agent })
@@ -424,11 +432,15 @@ for (const workspaceMode of ["clone", "worktree"]) {
 }
 
 test("reference checkout validation rejects ambiguous names, overlap, missing paths, bare repos and subdirectories", async t => {
-  for (const values of [["invalid"], ["name="], ["../escape=directory"], ["same=one", "SAME=two"]]) {
+  for (const values of [["invalid"], ["name="], ["../escape=directory"], ["same=one", "SAME=two"],
+    ["@code=directory"], ["main@primary=directory"], ["all_references=directory"]]) {
     assert.throws(() => parseWorkerReferences(values), /--reference-repo/)
   }
   assert.deepEqual(parseWorkerReferences(["code=folder=with=equals"]), [
     { name: "code", path: path.resolve("folder=with=equals") },
+  ])
+  assert.deepEqual(parseWorkerReferences(["prototype/paperclip@code=folder=with=equals"]), [
+    { name: "code", path: path.resolve("folder=with=equals"), branch: "prototype/paperclip" },
   ])
   const fixture = await harness(t, () => { throw new Error("Must not start a session") })
   const root = path.dirname(fixture.source)
@@ -468,6 +480,64 @@ test("reference checkout validation rejects ambiguous names, overlap, missing pa
     await assert.rejects(fs.stat(target), { code: "ENOENT" })
   }
 })
+
+for (const workspaceMode of ["clone", "worktree"]) {
+  test(`${workspaceMode} assignments fetch latest primary before model work and expose the harness refresh tool`, async t => {
+    const sessions = []
+    const bundle = skillBundle()
+    let expected = "remote-one"
+    let update
+    let toolRefresh = false
+    class Session extends EventEmitter {
+      constructor(options) { super(); this.options = options; sessions.push(options) }
+      async write() {
+        assert.equal(await fs.readFile(path.join(this.options.cwd, "tracked.txt"), "utf8"), expected)
+        const branch = await gitAt(this.options.cwd, "rev-parse", "--symbolic-full-name", "HEAD")
+        const tool = this.options.tools.find(tool => tool.name === "sync_repositories")
+        assert.ok(tool)
+        if (toolRefresh) {
+          await update("remote-two")
+          await tool.execute({ repositories: ["primary"], operation: "pull" })
+          assert.equal(await fs.readFile(path.join(this.options.cwd, "tracked.txt"), "utf8"), "remote-two")
+          assert.equal(await gitAt(this.options.cwd, "rev-parse", "--symbolic-full-name", "HEAD"), branch)
+          await fs.writeFile(path.join(this.options.cwd, "remove-untracked.txt"), "remove on reset")
+          await tool.execute({ repositories: ["primary"], operation: "fetch_reset" })
+          await assert.rejects(fs.stat(path.join(this.options.cwd, "remove-untracked.txt")), { code: "ENOENT" })
+          assert.match(await fs.readFile(path.join(this.options.cwd, ".worker", "skills", "paperclip", "SKILL.md"), "utf8"), /Paperclip skill/)
+        }
+        return { exitCode: 0 }
+      }
+      interrupt() {}
+      dispose() {}
+    }
+    const gitAt = async (cwd, ...args) => (await execFileAsync("git", args, { cwd, windowsHide: true })).stdout.trim()
+    const f = await harness(t, options => new Session(options), {
+      workspaceMode, remoteSource: true, workerName: workspaceMode === "worktree" ? "w1" : undefined, bundle,
+    })
+    const original = await f.git("rev-parse", "HEAD")
+    const seed = path.join(path.dirname(f.source), "updater")
+    await execFileAsync("git", ["clone", f.remote, seed], { windowsHide: true })
+    update = async text => {
+      await fs.writeFile(path.join(seed, "tracked.txt"), text)
+      await gitAt(seed, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+        "-c", "commit.gpgsign=false", "commit", "-am", text)
+      await gitAt(seed, "push", "origin", "main")
+    }
+    await update(expected)
+    const peer = await f.welcome(0)
+    toolRefresh = true
+    await executeTask(peer, { runId: "remote-first", agent, skills: bundle.skills, authToken: "run-credential" })
+    expected = "remote-two"
+    toolRefresh = false
+    await executeTask(peer, { runId: "remote-second", agent, skills: bundle.skills, authToken: "run-credential" })
+    assert.equal(await f.git("rev-parse", "HEAD"), original)
+    assert.equal(await fs.readFile(path.join(f.source, "tracked.txt"), "utf8"), "committed")
+    await gitAt(f.source, `--git-dir=${f.remote}`, "update-ref", "-d", "refs/heads/main")
+    const result = await executeTask(peer, { runId: "missing-remote-branch", agent }, 1)
+    assert.match(result.error, /Git fetch failed.*primary.*main/)
+    assert.equal(sessions.length, 2)
+  })
+}
 
 for (const outputMode of ["normal", "verbose"]) {
   test(`${outputMode} worker output preserves summaries and errors with mode-specific raw tool output`, async (t) => {
@@ -956,7 +1026,7 @@ test("default worktrees isolate worker-agent pairs and reset each assignment to 
     constructor(options) { super(); this.cwd = options.cwd; sessions.push(options) }
     async write() {
       assert.equal(await fs.readFile(path.join(this.cwd, "tracked.txt"), "utf8"), expected)
-      assert.equal(await gitAt(this.cwd, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD")
+      assert.equal(await gitAt(this.cwd, "rev-parse", "--abbrev-ref", "HEAD"), path.basename(this.cwd))
       for (const name of ["progress.txt", "ignored.txt"]) {
         await assert.rejects(fs.stat(path.join(this.cwd, name)), { code: "ENOENT" })
       }
@@ -1361,6 +1431,14 @@ test("worker CLI accepts repeated reference options and validates every supplied
       return true
     })
   }
+  await assert.rejects(execFileAsync(process.execPath, [
+    fileURLToPath(new URL("../cli.js", import.meta.url)), "worker",
+    "--server", fixture.serverUrl, "--worker-id", randomUUID(), "--repo-root", `main@${fixture.source}`,
+    "--workspace-mode", "clone",
+  ], { env: { ...process.env, MINICODE_CONFIG_HOME: config }, windowsHide: true }), error => {
+    assert.match(error.stderr, /Repository 'primary' requires a configured remote/)
+    return true
+  })
 })
 
 test("workspace preparation failure fails the run without falling back to the source checkout", async (t) => {

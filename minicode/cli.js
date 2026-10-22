@@ -48,7 +48,7 @@ Usage:
   minicode --help
 
 Options:
-  --repo-root <dir>       Working directory for shell commands
+  --repo-root <dir>       Working directory; worker also accepts <branch>@<dir>
   --model <name>          Override the model for this run
   --auth <entry>          Use a saved auth entry without changing the active one
   --copilot               Select @copilot; with 'auth add', add/sign in
@@ -57,7 +57,7 @@ Options:
   --tenant <id>           Select the Entra tenant (with 'auth add --entra-user')
   --clippy-auth <cli.js>  Override the Easy Auth helper (with 'worker' only)
   --worker-shared <dir>   Worker read-only shared folder (default: sibling worker_shared)
-  --reference-repo <name>=<dir>  Attach an existing read-only reference checkout (repeatable)
+  --reference-repo [<branch>@]<name>=<dir>  Attach a synced read-only reference checkout (repeatable)
   --workspace-mode <mode>  worktree (default): clean worker-agent siblings; clone: legacy per-agent clones
   --worker-name <name>    Short sibling prefix, e.g. w1 creates w1a1 (default: w-<worker-id prefix>)
   --min-free-gib <GiB>    Evict idle worktrees below this free space (default: 24)

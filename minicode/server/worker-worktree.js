@@ -113,7 +113,7 @@ export async function prepareWorkerWorktrees({
     checkDisk,
     ensureDiskSpace,
     release() { activeWorkspace = null },
-    async assign(agentId) {
+    async assign(agentId, { commit } = {}) {
       if (typeof agentId !== "string" || !/^[a-z0-9][a-z0-9_-]{0,99}$/i.test(agentId)) {
         throw new Error("AgentPool task requires a valid agent id for its workspace")
       }
@@ -136,7 +136,7 @@ export async function prepareWorkerWorktrees({
         await fs.rename(temporary, file)
         registry = next
         const worktree = await prepareWorkerWorktree({ source, workspace, workerId, server, git })
-        await worktree.assign(agentId)
+        await worktree.assign(agentId, commit)
         await ensureDiskSpace()
         return workspace
       } finally {
@@ -181,30 +181,42 @@ async function prepareWorkerWorktree({ source, workspace, workerId, server, git,
   }
   if (binding.version !== 1 || binding.source !== source || binding.workspace !== workspace
     || binding.workerId !== workerId || binding.server !== server
-    || !(binding.agentId === null || typeof binding.agentId === "string" && binding.agentId.length > 0)) {
+    || !(binding.agentId === null || typeof binding.agentId === "string" && binding.agentId.length > 0)
+    || (binding.branch !== undefined && binding.branch !== path.basename(workspace))) {
     throw new Error("Worker worktree belongs to a different worker, source or server; choose another --worker-name")
   }
   return {
     async remove(agentId) {
       if (binding.agentId !== agentId) throw new Error("Worktree belongs to a different agent; refusing LRU eviction")
+      const branchRef = binding.branch ? `refs/heads/${binding.branch}` : null
+      const commit = branchRef ? await git(source, ["rev-parse", "--verify", branchRef]) : null
       await git(source, ["worktree", "remove", "--force", "--", workspace])
+      if (branchRef) await git(source, ["update-ref", "-d", branchRef, commit])
     },
-    async assign(agentId) {
+    async assign(agentId, commit) {
       if (typeof agentId !== "string" || !/^[a-z0-9][a-z0-9_-]{0,99}$/i.test(agentId)) {
         throw new Error("AgentPool task requires a valid agent id for its workspace")
       }
       if (binding.agentId !== null && binding.agentId !== agentId) {
         throw new Error("Worker-agent worktree is bound to a different agent; refusing to reset it")
       }
-      if (binding.agentId === null) {
-        const next = { ...binding, agentId }
+      const branch = path.basename(workspace)
+      if (binding.branch !== undefined && binding.branch !== branch) {
+        throw new Error("Worker worktree branch binding changed; refusing to reset it")
+      }
+      if (binding.branch === undefined
+        && await git(workspace, ["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])) {
+        throw new Error(`Worker-local branch ${branch} already exists without a matching ownership binding`)
+      }
+      if (binding.agentId === null || binding.branch === undefined) {
+        const next = { ...binding, agentId, branch }
         const temporary = `${file}.pending`
         await fs.writeFile(temporary, JSON.stringify(next), { flag: "wx", mode: 0o600 })
         await fs.rename(temporary, file)
         binding = next
       }
-      const commit = await git(source, ["rev-parse", "--verify", "HEAD^{commit}"])
-      await git(workspace, ["checkout", "--detach", "--force", commit])
+      commit ??= await git(source, ["rev-parse", "--verify", "HEAD^{commit}"])
+      await git(workspace, ["checkout", "--force", "-B", branch, commit])
       await git(workspace, ["reset", "--hard", commit])
       await git(workspace, ["clean", "-ffdx"])
       return workspace
