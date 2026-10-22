@@ -64,6 +64,11 @@ Options:
   --target-free-gib <GiB>  LRU cleanup recovery target (default: 36; worktree mode only)
   --github-repo <owner/repo>  Enable harness PR publication for this source GitHub repo
   --github-user <account>    Existing GitHub CLI login used only by the publisher
+  --azure-devops-org <url>   Enable Azure Repos publication for this organization
+  --azure-devops-project <name-or-id>  Bound Azure DevOps project
+  --azure-devops-repo <name-or-id>     Bound source Azure Repos repository
+  --azure-devops-user <upn>  MSAL account for REST PRs; Git push keeps its own auth
+  --azure-devops-alias <alias>  Branch namespace users/<alias>/ (default: UPN local part)
   --output-mode <mode>   Worker logs: normal (default) or verbose (includes raw tool output)
 
 REPL commands:

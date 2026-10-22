@@ -553,7 +553,9 @@ worker instructions also request plain-text output. Model tool results are
 unchanged by the public-log filter.
 Interactive CLI and web logging are unchanged.
 
-#### Harness-owned GitHub publication
+#### Harness-owned PR publication
+
+**GitHub**
 
 Enable publication explicitly with both worker flags:
 
@@ -588,31 +590,66 @@ merged PRs are returned with their actual state rather than reopened.
 An uncertain network outcome must be retried with the same commit. No automatic
 merge or deployment is performed. Without these flags the tool is unavailable.
 
-For AgentPool runs, publication also creates or updates the task's GitHub
+**Azure DevOps**
+
+Use an existing Azure Repos HTTPS source checkout and enable publication with:
+
+```powershell
+minicode worker --server <origin> --worker-id <id> --repo-root <source> `
+  --azure-devops-org https://dev.azure.com/<org> `
+  --azure-devops-project <project-name-or-id> --azure-devops-repo <repo-name-or-id> `
+  --azure-devops-user <upn> --azure-devops-alias <alias>
+```
+
+GitHub and Azure DevOps publication flags are mutually exclusive. Both modern
+`dev.azure.com` and legacy `<org>.visualstudio.com/DefaultCollection` HTTPS origins
+are supported; the configured organization/project/repository must match the
+source. Repository and project IDs are verified and bound before publication.
+The alias defaults to the UPN local part and must be a simple branch-safe name.
+Publication branches are `users/<alias>/minicode-<agent-id>-<full-commit>`, preserving
+the exact selected local commit and deterministic same-commit retries.
+
+PR creation and reconciliation use Azure DevOps REST API 7.1, not `az repos`.
+The harness privately invokes `clippy-auth ado-token --silent` for an MSAL/WAM
+access token; no MSAL dependencies are added to Minicode. `--clippy-auth` can
+override the helper path for both Clippy and Azure DevOps authentication. If
+interaction/consent is required, run the reported `clippy-auth ado-login` command
+explicitly. Tokens are never saved to the inventory, passed on command lines,
+given to model tools, or supplied to Git. Git push uses its existing credential
+configuration, with prompts disabled; Git authentication failures stop publication.
+Neither an Azure DevOps CLI extension nor PAT environment variables are required.
+
+The same commit-only, create-only push, temporary-worktree cleanup and retry
+rules apply to both providers. Azure active/completed/abandoned PRs map to
+OPEN/MERGED/CLOSED receipts; there is no automatic merge or policy bypass.
+
+**Clippy registration**
+
+For AgentPool runs, publication also creates or updates the task's provider-specific
 `pull_request` work product and posts a clickable task-chat link using the
 run-scoped Paperclip credential and audit header. The existing Paperclip **Pull
 requests** section displays the saved record; no separate dashboard is needed.
 The record includes repository, PR number, branch, commit, agent, and current
-GitHub state. Open PRs request review; merged/closed receipts do not complete
+provider state. Open PRs request review; merged/closed receipts do not complete
 the task or bypass its approval gates.
 
 A task-scoped run cannot override its issue. For a general Run Now, discover
 your assigned task using the bundled skill and supply its UUID as the tool's
 optional `issueId` argument. The harness verifies ownership before accessing
-GitHub. Reconcile a known PR with its original commit to refresh its state
-without another push or duplicate PR. The harness reuses existing work products
+the repository provider. Reconcile a known PR with its original commit to refresh
+its state without another push or duplicate PR. The harness reuses existing work products
 and posts at most one harness comment per agent/PR/state across sequential
 retries, including a lost write response. It does not provide cross-run atomic
 deduplication against concurrent independent publishers.
 
-Registration errors retain the GitHub receipt and explicitly require retrying
+Registration errors retain the provider receipt and explicitly require retrying
 the same commit. An unresolved registration error fails the run even if the
 model subsequently claims success. Work-product/comment writes are not atomic:
 retry reconciliation repairs a partial registration without undoing a PR.
 There is no automatic merge watcher; follow-up runs must check acceptance and
 approval gates and explicitly complete the task through the Paperclip API.
 
-Worker rules prohibit direct shell pushes and PR creation; GitHub token
+Worker rules prohibit direct shell pushes and PR creation; GitHub token and ADO PAT
 environment variables are removed from model tool environments. This is a
 credential-handling boundary, **not an OS sandbox**: shell commands still run as
 the worker account, which may have other locally available credentials.

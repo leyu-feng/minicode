@@ -140,12 +140,20 @@ test("an interrupted worktree registration is reconciled before its temporary di
   await assert.rejects(fs.stat(path.dirname(f.worktrees[0])), { code: "ENOENT" })
 })
 
-function paperclipFixture(t, { scoped = true } = {}) {
+function paperclipFixture(t, { scoped = true, azure = false } = {}) {
   const issueId = "11111111-1111-4111-8111-111111111111"
   const agentId = "engineer"
   const receipt = { repository: "fixture-owner/project", number: 12, state: "OPEN",
     url: "https://github.com/fixture-owner/project/pull/12", commit: "a".repeat(40),
     branch: `minicode/${agentId}/${"a".repeat(40)}`, reused: true, worktreeRemoved: true }
+  const azureOptions = azure ? {
+    provider: "azure_devops",
+    repository: "fixture/Project/Repository",
+    pullRequestUrl: number => `https://dev.azure.com/fixture/Project/_git/Repository/pullrequest/${number}`,
+    branchForCommit: (agent, commit) => `users/alice/minicode-${agent}-${commit}`,
+  } : {}
+  if (azure) Object.assign(receipt, { provider: azureOptions.provider, repository: azureOptions.repository,
+    url: azureOptions.pullRequestUrl(receipt.number), branch: azureOptions.branchForCommit(agentId, receipt.commit) })
   const products = [], comments = [], calls = []
   let publications = 0, failure = null, loseResponse = null
   const tool = paperclipPublicationTool({
@@ -156,7 +164,7 @@ function paperclipFixture(t, { scoped = true } = {}) {
       return { ...receipt }
     },
   }, { apiUrl: "http://paperclip.test", authToken: "fixture-run-key", runId: "fixture-run-id",
-    issueId: scoped ? issueId : "", agentId, companyId: "company-a", repository: receipt.repository })
+    issueId: scoped ? issueId : "", agentId, companyId: "company-a", repository: receipt.repository, ...azureOptions })
   t.mock.method(globalThis, "fetch", async (url, options) => {
     const route = new URL(url).pathname
     const body = options.body ? JSON.parse(options.body) : null
@@ -247,4 +255,31 @@ test("a lost comment response is reconciled without reposting and general Run No
   await f.tool.execute(input)
   assert.equal(f.products.length, 1)
   assert.equal(f.comments.length, 1)
+})
+
+test("Azure PR receipts register/reconcile work products and chat links using their bound URL and users branch", async t => {
+  const f = paperclipFixture(t, { azure: true })
+  f.loseResponse((route, options) => route.endsWith("/comments") && options.method === "POST")
+  await assert.rejects(f.tool.execute(f.input), /Azure DevOps PR exists.*request failed/)
+  f.loseResponse(null)
+  await f.tool.execute(f.input)
+  assert.equal(f.products.length, 1)
+  assert.equal(f.comments.length, 1)
+  assert.equal(f.products[0].provider, "azure_devops")
+  assert.equal(f.products[0].metadata.branch, f.receipt.branch)
+  f.receipt.state = "MERGED"
+  await f.tool.execute(f.input)
+  assert.equal(f.products[0].status, "merged")
+  assert.equal(f.comments.length, 2)
+  assert.equal(f.tool.registrationError, null)
+})
+
+test("Azure registration rejects unbound PR URLs and branch namespaces", async t => {
+  const f = paperclipFixture(t, { azure: true })
+  f.receipt.url = "https://other.test/pullrequest/12"
+  await assert.rejects(f.tool.execute(f.input), /invalid PR receipt/)
+  f.receipt.url = "https://dev.azure.com/fixture/Project/_git/Repository/pullrequest/12"
+  f.receipt.branch = `users/other/minicode-engineer-${f.receipt.commit}`
+  await assert.rejects(f.tool.execute(f.input), /invalid PR receipt/)
+  assert.equal(f.products.length, 0)
 })

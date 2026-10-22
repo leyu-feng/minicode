@@ -57,7 +57,7 @@ export async function prepareWorkerSkills({ workspace, skills, apiUrl, authToken
   let downloaded = false
   if (!archive || digest(archive) !== skills.sha256) {
     if (typeof authToken !== "string" || !authToken) throw new Error("Skill download requires a run-scoped Paperclip credential")
-    const response = await fetch(new URL(skills.url, apiUrl), {
+    const response = await fetch(new URL(`${apiUrl.replace(/\/+$/, "")}${skills.url}`), {
       headers: { Authorization: `Bearer ${authToken}`, "X-Paperclip-Run-Id": runId },
       redirect: "error", signal: AbortSignal.any([AbortSignal.timeout(60_000), ...(signal ? [signal] : [])]),
     })

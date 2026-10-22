@@ -51,6 +51,8 @@ The worker notices the new session within a few seconds and carries on.
 node cli.js login  --server <origin> [--user <upn>] [--silent] [--client-id <id>] [--scope <scope>]
 node cli.js status --server <origin> [--user <upn>]
 node cli.js logout --server <origin> [--user <upn>]
+node cli.js ado-login --organization https://dev.azure.com/<org> --user <upn>
+node cli.js ado-token --organization https://dev.azure.com/<org> --user <upn> --silent
 ```
 
 - `login` signs in through WAM, the Windows account broker. It is silent when the broker already has
@@ -60,6 +62,24 @@ node cli.js logout --server <origin> [--user <upn>]
   Device-code sign-in is not offered: Conditional Access blocks it in the Microsoft tenant.
 - `status` shows the saved session and whether Easy Auth still accepts it.
 - `logout` deletes the saved session.
+- `ado-login` explicitly signs in to Azure DevOps through MSAL/WAM. It prints only
+  identity and expiration, never the access token. It does not create an Easy Auth
+  session or save token JSON.
+- `ado-token` returns private JSON (`accessToken`, `expiresAt`, `user`, `tenantId`)
+  for a harness subprocess pipe, **not model tools, shell history, inventory, or
+  logs**. Workers always pass `--silent`; interaction-required failures use exit
+  code 2 and require an operator to run `ado-login`.
+
+Azure DevOps authentication discovers the organization's tenant from the
+`X-VSS-ResourceTenant` header on a non-redirecting connection-data request, then
+uses MSAL/WAM for the Azure DevOps scope
+`499b84ac-1321-427f-aa17-267ca6975798/.default`. The selected account and tenant
+must match the result. Token expiry comes from MSAL, not decoded token claims.
+WAM owns its secure cache; the worker keeps access tokens only in memory and
+requests another before expiry. Unlike Easy Auth login, these ADO commands do
+not fall back to Azure CLI. Consent, Conditional Access and Azure DevOps
+repository permissions still apply; there is no automatic login or identity switch.
+Git push authentication is separate and continues to use Git's existing credentials.
 
 | Exit code | Meaning |
 |---|---|
