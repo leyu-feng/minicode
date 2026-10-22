@@ -245,7 +245,7 @@ a fresh AgentSession and the worker's model configuration. Every worker in a
 pool must be able to serve every agent connected to that pool. Use different
 pools when worker setup differs; workers are not pinned to particular agents.
 
-`--workspace-mode worktree` is the default. The worker creates a detached Git
+`--workspace-mode worktree` is the default. The worker creates an isolated Git
 worktree beside `--repo-root` for each worker/agent pair. `--worker-name` is its
 short prefix, or `w-<first 12 worker-id characters>` if omitted. An `a<slot>`
 suffix identifies that worker's agent; final folder names use at most 24 safe
@@ -258,17 +258,23 @@ node .\minicode\cli.js worker --server http://localhost:3100 --worker-id <id> --
 The assigned tool directories are `C:\repos\my-project\w1a1`, `w1a2`, etc.; another
 worker uses `w2a1`, `w2a2`, etc. Slots are allocated as each worker first sees an
 agent and remain stable across restarts; `a1` is not a global agent number.
+Each worktree uses its own same-named local branch (`w1a1`, `w1a2`, etc.), never
+the shared source branch. Those branch names are harness-owned; do not rename,
+delete, or use them in another checkout. Existing detached worker worktrees are
+migrated on their next assignment; conflicting pre-existing branches are refused.
 The worker/agent registry is kept in the common Git administrative directory,
 with ownership metadata in each worktree's Git directory, not tracked files.
 Unmanaged directories and another worker's worktrees are never adopted or reset.
 Existing old `w1`-style directories are left untouched, not migrated.
 
-Before **every new assignment**, Minicode detaches the selected worktree and
-hard-resets it to the source checkout's current committed `HEAD`, then removes
+Before **every new assignment**, Minicode fetches the primary repository's assigned
+remote branch and hard-resets the selected worktree's **own local branch** to that
+commit, then removes
 untracked and ignored files with `git clean -ffdx`. This includes installed
 dependencies and the `.worker` skill cache, which is downloaded and verified
-again. Source dirty files and `worker_shared` are untouched. This does not fetch
-or pull remote changes. A network reconnect does not reset or replay an active
+again. The source checkout's branch, HEAD, and dirty files, other workers' branches,
+and `worker_shared` are untouched; only shared Git objects and harness fetch refs
+are updated. A network reconnect does not reset or replay an active
 assignment. Save durable results through artifact/task APIs or the enabled
 publication tool before finishing; local changes do not survive reassignment.
 Minicode also checks free space on the worktree volume when connected, every
@@ -286,6 +292,8 @@ unchanged healthy status.
 
 LRU eviction uses Git's worktree removal only after validating the exact
 worker/server/source/agent binding and checking source/shared boundaries again.
+It also deletes that checkout's disposable harness-owned branch, but not branches
+created for task results.
 The active assignment remains protected until completion is acknowledged, even
 if disk space stays low. Another worker's checkouts, old `w1`-style folders,
 legacy clones, unmanaged directories, source/common Git storage, and
@@ -302,10 +310,24 @@ using their existing checkouts; changing modes does **not** migrate edits.
 This mode can serve different agents without sharing their checkouts and does
 not accept `--worker-name`.
 
-Both modes start from committed source `HEAD`; uncommitted changes, untracked
-files and installed dependencies are not copied. Only legacy clone mode retains
-edits on later runs without resetting or pulling. Repositories listed as
-submodules are not initialized automatically.
+Both modes start each assignment at the assigned remote branch's latest fetched
+commit; uncommitted source changes, untracked files and installed dependencies
+are not copied. Clone mode also hard-resets tracked edits and local commits when
+an assigned remote is configured, then runs `git clean -xdf` to remove untracked
+and ignored files.
+For a local-only primary source with no remotes, the previous behavior is retained:
+worktree mode uses committed source `HEAD`, while clone mode retains later edits.
+Remote refresh is unavailable for that primary until it has a configured remote.
+Repositories listed as submodules are not initialized automatically.
+
+Use `--repo-root "main@D:\Code\my-project\main"` to explicitly assign the primary
+remote branch, or omit `main@` to capture the source branch's configured upstream
+at worker startup (otherwise its current branch on `origin`). The assigned remote
+is the source branch's upstream remote, or `origin` when no upstream is configured.
+A detached source with a remote requires an explicit branch selector. The assigned
+branch is frozen for the worker's lifetime; agent branch changes cannot redirect it.
+Fetch/authentication errors or a missing assigned remote branch fail the assignment
+before model work, with no fallback to stale local commits.
 
 The actual local workspace path is recorded in the run log. Workspace paths
 from Clippy's server-side context are metadata, not worker filesystem paths.
@@ -333,39 +355,73 @@ including through directory links. Workers must not follow links outside any
 permitted scope.
 
 Attach additional existing Git clones or worktrees with the repeatable worker option
-`--reference-repo <name>=<directory>`. For example, from the Minicode repository:
+`--reference-repo "[<branch>@]<name>=<directory>"`. For example, from the Minicode repository:
 
 ```powershell
 node .\minicode\cli.js worker `
   --server https://clippy.example.net `
   --worker-id <worker-id> `
-  --repo-root D:\Code\workspace\your-repo\main `
+  --repo-root "main@D:\Code\workspace\your-repo\main" `
   --worker-name w1 `
   --worker-shared D:\Code\workspace\your-repo\worker_shared `
-  --reference-repo "reference-one=D:\Code\workspace\reference-one\main" `
-  --reference-repo "reference-two=D:\Code\workspace\reference-two\main" `
+  --reference-repo "main@reference-one=D:\Code\workspace\reference-one\main" `
+  --reference-repo "main@reference-two=D:\Code\workspace\reference-two\main" `
   --entra-user <upn>
 ```
 
 Names must be unique (case-insensitive), start with a letter, and contain only
-letters, digits, underscores, or hyphens (up to 64 characters). Relative paths resolve
-from the worker process's current directory; quote the entire `name=path` when it
+letters, digits, underscores, or hyphens (up to 64 characters). `primary` and
+`all_references` are reserved. Branch names may contain slashes, for example
+`"feature/example@tools=D:\Code\workspace\tools"`. Relative paths resolve
+from the worker process's current directory; quote the entire `branch@name=path` when it
 contains spaces. Each path must be a Git checkout root with a committed HEAD, not a
 bare repository or subdirectory. Canonical paths must not overlap the source
 checkout, worker workspace storage, shared folder, or another reference.
+Each reference needs a configured remote. An omitted branch captures its upstream
+branch at startup, otherwise its current branch on `origin`; a detached reference
+requires an explicit branch selector. There is no implicit remote-default fallback.
 
-Each assignment receives a JSON array of `{name, path, commit}` through
+Each assignment receives a JSON array of `{name, path, branch, commit}` through
 `WORKER_REFERENCE_REPOS_JSON`, its system instructions, and a run-log summary.
-Paths and HEAD commits are checked again before starting each assignment; a missing
+Before each assignment the harness fetches every reference's assigned branch,
+detaches its checkout, and hard-resets it to the fetched commit. This does not move
+local branch refs that might be shared with other worktrees.
+Paths, repository identities, and configured remotes are checked again; a missing
 or invalid reference fails the assignment rather than silently dropping it.
-The worker never clones, fetches, resets, copies, or cleans reference checkouts.
-The host operator must prepare them at the desired branch/commit and keep them
-unchanged while assignments use them; refresh them only while those workers are
-stopped. HEAD is recorded, not an immutable snapshot of dirty working files.
+The harness does not clone, copy, or run `git clean` on references.
+Hard reset discards tracked edits and checkout-local commits; Git may also remove
+untracked files that obstruct tracked files. Ordinary non-obstructing untracked
+files remain. Use dedicated reference checkouts rather than an operator's working
+checkout. Separate workers should use separate reference paths if they require
+stable reads: another worker's refresh can change a shared reference during a run.
+
+Agents can request another refresh using the **`sync_repositories` harness tool**:
+
+```json
+{"repositories":["all_references"],"operation":"pull"}
+{"repositories":["primary","services"],"operation":"fetch_reset"}
+```
+
+`pull` fetches then fast-forwards only; conflicting edits or divergent history
+fail instead of being discarded. `fetch_reset` fetches then hard-resets to the
+assigned branch, discarding tracked edits and local commits. For the primary
+workspace it then runs `git clean -xdf`, deleting untracked and ignored files,
+including installed dependencies and caches. The harness restores the run's
+verified skill bundle afterward so its tools remain usable. References are
+never cleaned, and `pull` does not run `git clean`.
+The primary keeps its assignment's local branch, and other
+workers' checkouts/branches and the source branch are never reset. Save durable
+work before requesting reset. The tool accepts only configured names, not arbitrary
+paths, remotes, branches, shell commands, pushes or PR operations. Fetching uses
+the harness account's existing Git credentials without interactive sign-in.
+The tool's returned commits supersede the initial manifest; environment variables,
+loaded instructions and skills remain the assignment-start snapshot.
 
 References are for reading/searching code only, not executing scripts or accessing
 their `.git` metadata. Their instructions and skills are not loaded or added to the
-worker's skill catalog. They grant no write or publication permissions.
+worker's skill catalog. Agents must request updates through the harness tool,
+not run Git network/mutation commands themselves. References grant no general
+write or publication permissions.
 Like `worker_shared`, **reference read-only access is instruction policy, not an
 OS-enforced sandbox**; use read-only mounts or restricted identities if enforcement
 is required. Reference attachments work with both workspace modes.
