@@ -132,6 +132,12 @@ describe("CompanySettings rename hint", () => {
     flushSync(() => root.unmount());
   });
 
+  it("keeps pool management out of General", () => {
+    const root = render(SELF_HOSTED_HEALTH);
+    expect(container.querySelector('[aria-label="New pool name"]')).toBeNull();
+    flushSync(() => root.unmount());
+  });
+
   it("warns that a rename re-keys task IDs on a managed instance", () => {
     const root = render(CLOUD_HEALTH);
     expect(hintText()).toBeDefined();

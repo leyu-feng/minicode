@@ -31,7 +31,6 @@ import {
 import { InstanceGeneralSettings } from "./InstanceGeneralSettings";
 import { DecisionModelSettingsSection } from "../components/decision-models/DecisionModelSettings";
 import { useFastResponsesEnabled } from "../hooks/useFastResponsesEnabled";
-import { AgentPoolSettings } from "../components/AgentPoolSettings";
 
 export function CompanySettings() {
   const {
@@ -377,7 +376,6 @@ export function CompanySettings() {
       )}
 
       <InstanceGeneralSettings embedded />
-      <AgentPoolSettings key={selectedCompanyId} companyId={selectedCompanyId!} />
 
       {/* Danger Zone */}
       <div className="space-y-4">

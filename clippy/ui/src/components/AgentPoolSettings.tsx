@@ -46,7 +46,6 @@ export function AgentPoolSettings({ companyId }: { companyId: string }) {
   const error = pools.error || workers.error || create.error || pair.error || revoke.error || copy.error;
   return (
     <section className="space-y-4">
-      <h2 className="text-sm font-semibold">Agent pools</h2>
       <p className="text-sm text-muted-foreground">
         The default Hosted pool uses the built-in agent host. Create Devbox pools for your own Minicode workers.
         Pool types cannot be changed.
@@ -100,7 +99,7 @@ export function AgentPoolSettings({ companyId }: { companyId: string }) {
       {visibleWorkers?.map((worker) => (
         <div key={worker.id} className="flex items-center justify-between gap-2 text-sm">
           <span>{worker.name}: {worker.revoked ? "revoked" : worker.paired ? worker.status : "awaiting pairing"}</span>
-          {!worker.revoked && <Button variant="outline" disabled={revoke.isPending}
+          {selectedPool?.type === "devbox" && !worker.revoked && <Button variant="outline" disabled={revoke.isPending}
             onClick={() => revoke.mutate(worker.id)}>Revoke</Button>}
         </div>
       ))}

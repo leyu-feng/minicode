@@ -60,6 +60,7 @@ import { WhatNeedsMe } from "./pages/WhatNeedsMe";
 import { DecisionQueuePage } from "./pages/DecisionQueuePage";
 import { BoardChat } from "./pages/BoardChat";
 import { CompanySettings } from "./pages/CompanySettings";
+import { CompanyAgentPools } from "./pages/CompanyAgentPools";
 import { CompanyConnections } from "./pages/CompanyConnections";
 import { CompanyEnvironments } from "./pages/CompanyEnvironments";
 import { BootstrapSetupUxLab } from "./pages/BootstrapSetupUxLab";
@@ -163,6 +164,7 @@ function boardRoutes(streamlinedUiEnabled: boolean, combinedInboxTasksEnabled: b
       <Route path="onboarding" element={<OnboardingRoutePage />} />
       <Route path="companies" element={<Companies />} />
       <Route path="company/settings" element={<CompanySettings />} />
+      <Route path="company/settings/agent-pools" element={<CompanyAgentPools />} />
       <Route path="company/settings/connections" element={<CompanyConnections />} />
       <Route path="company/settings/environments" element={<Navigate to="/company/settings/instance/environments" replace />} />
       <Route path="company/settings/cloud-upstream" element={<Navigate to="/company/export" replace />} />

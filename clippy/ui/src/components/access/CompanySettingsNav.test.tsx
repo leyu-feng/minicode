@@ -76,6 +76,8 @@ describe("CompanySettingsNav", () => {
     expect(getCompanySettingsTab("/PAP/company/import")).toBe("import");
     expect(getCompanySettingsTab("/company/settings/members")).toBe("members");
     expect(getCompanySettingsTab("/PAP/company/settings/members")).toBe("members");
+    expect(getCompanySettingsTab("/company/settings/agent-pools")).toBe("agent-pools");
+    expect(getCompanySettingsTab("/PAP/company/settings/agent-pools")).toBe("agent-pools");
     expect(getCompanySettingsTab("/company/settings/access")).toBe("members");
     expect(getCompanySettingsTab("/PAP/company/settings/access")).toBe("members");
     expect(getCompanySettingsTab("/company/settings/invites")).toBe("members");
@@ -134,6 +136,7 @@ describe("CompanySettingsNav", () => {
           { value: "export", label: "Export" },
           { value: "import", label: "Import" },
           { value: "members", label: "Members" },
+          { value: "agent-pools", label: "Agent Pools" },
           { value: "secrets", label: "Secrets" },
           { value: "instance-profile", label: "Profile" },
           { value: "instance-environments", label: "Environments" },
@@ -154,6 +157,10 @@ describe("CompanySettingsNav", () => {
     });
 
     expect(navigateMock).toHaveBeenCalledWith("/company/settings/secrets");
+    await act(async () => {
+      pageTabBarMock.mock.calls.at(-1)?.[0]?.onValueChange?.("agent-pools");
+    });
+    expect(navigateMock).toHaveBeenCalledWith("/company/settings/agent-pools");
 
     await act(async () => {
       root.unmount();
@@ -176,6 +183,7 @@ describe("CompanySettingsNav", () => {
       "export",
       "import",
       "members",
+      "agent-pools",
       "secrets",
       "instance-profile",
       "instance-environments",

@@ -12,6 +12,7 @@ import {
   SlidersHorizontal,
   Upload,
   UserRoundPen,
+  UserRoundGroup,
   Users,
 } from "lucide-react";
 import type { PluginRecord } from "@paperclipai/shared";
@@ -123,6 +124,7 @@ export function CompanySettingsSidebar() {
               end
             />
           )}
+          <SidebarNavItem to="/company/settings/agent-pools" label="Agent Pools" icon={UserRoundGroup} end />
           {companySettingsPluginSlots
             .filter((slot) => slot.routePath)
             .map((slot) => (

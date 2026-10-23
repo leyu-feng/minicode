@@ -360,7 +360,10 @@ export function agentPoolService(db: Db) {
       return worker ?? null;
     },
     async revoke(companyId: string, poolId: string, workerId: string) {
-      await get(companyId, poolId);
+      const pool = await get(companyId, poolId);
+      if (pool.type !== "devbox") {
+        throw conflict("Only Devbox pools support manual worker revocation.");
+      }
       const [worker] = await db.update(agentPoolWorkers).set({
         revokedAt: new Date(), clientTokenHash: null, pairingTokenHash: null, pairingExpiresAt: null,
       }).where(and(eq(agentPoolWorkers.id, workerId), eq(agentPoolWorkers.poolId, poolId))).returning();

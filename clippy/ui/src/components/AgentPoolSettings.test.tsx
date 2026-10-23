@@ -8,13 +8,24 @@ import { agentPoolsApi } from "../api/agent-pools";
 import { agentPoolUIAdapter } from "../adapters/agent-pool";
 import { defaultCreateValues } from "./agent-config-defaults";
 import { HostedRepositorySelect } from "./HostedRepositorySelect";
+import { CompanyAgentPools } from "../pages/CompanyAgentPools";
 
 let root: Root | undefined;
 let client: QueryClient | undefined;
 let container: HTMLDivElement;
+let selectedCompanyId: string | null = "company";
+const setBreadcrumbs = vi.fn();
+vi.mock("../context/CompanyContext", () => ({
+  useCompany: () => ({ selectedCompanyId, selectedCompany: { name: "Example" } }),
+}));
+vi.mock("../context/BreadcrumbContext", () => ({
+  useBreadcrumbs: () => ({ setBreadcrumbs }),
+}));
 const devbox = { type: "devbox" as const, hostedApiUrl: null, hostedAudience: null, hostedPoolId: null };
 const hosted = { ...devbox, type: "hosted" as const, id: "default-pool", companyId: "company", name: "default" };
 beforeEach(() => {
+  selectedCompanyId = "company";
+  setBreadcrumbs.mockClear();
   vi.spyOn(agentPoolsApi, "status").mockResolvedValue({ activeWorkers: 1, provisioningWorkers: 1, isMock: false });
   vi.spyOn(agentPoolsApi, "repositories").mockResolvedValue([]);
 });
@@ -51,6 +62,34 @@ async function click(text: string) {
 }
 
 describe("AgentPool settings", () => {
+  it("opens pool management on its own page and clears drafts when switching organizations", async () => {
+    const list = vi.spyOn(agentPoolsApi, "list").mockResolvedValue([]);
+    await mount(<CompanyAgentPools />);
+    expect(container.querySelector("h1")?.textContent).toBe("Agent Pools");
+    expect(list).toHaveBeenCalledWith("company");
+    expect(setBreadcrumbs).toHaveBeenCalledWith([
+      { label: "Example", href: "/dashboard" },
+      { label: "Settings", href: "/company/settings" },
+      { label: "Agent Pools" },
+    ]);
+    await input("New pool name", "unsaved-company-pool");
+    selectedCompanyId = "other-company";
+    await act(async () => root!.render(
+      <QueryClientProvider client={client!}><CompanyAgentPools /></QueryClientProvider>,
+    ));
+    expect(list).toHaveBeenCalledWith("other-company");
+    expect(container.querySelector<HTMLInputElement>('[aria-label="New pool name"]')?.value).toBe("");
+  });
+
+  it("requires an organization before loading the Agent Pools page", async () => {
+    selectedCompanyId = null;
+    const list = vi.spyOn(agentPoolsApi, "list").mockResolvedValue([]);
+    await mount(<CompanyAgentPools />);
+    expect(container.textContent).toContain("No organization selected.");
+    expect(container.querySelector('[aria-label="New pool name"]')).toBeNull();
+    expect(list).not.toHaveBeenCalled();
+  });
+
   it("defaults the Hosted primary and lets every catalog repository be primary without duplicating references", async () => {
     vi.spyOn(agentPoolsApi, "list").mockResolvedValue([{
       ...hosted,
@@ -115,6 +154,35 @@ describe("AgentPool settings", () => {
     expect(container.textContent).not.toContain("Clear all existing worker pairings");
   });
 
+  it("only offers worker revocation for the selected Devbox pool", async () => {
+    const pool = { ...devbox, id: "devbox-pool", companyId: "company", name: "coding" };
+    vi.spyOn(agentPoolsApi, "list").mockResolvedValue([hosted, pool]);
+    vi.spyOn(agentPoolsApi, "workers").mockImplementation(async (_companyId, poolId) => [{
+      id: `${poolId}-worker`, poolId, name: poolId === hosted.id ? "W01" : "devbox-worker",
+      paired: true, revoked: false, status: "idle",
+    }]);
+    const revoke = vi.spyOn(agentPoolsApi, "revoke").mockResolvedValue(undefined);
+    await mount();
+    expect(container.textContent).toContain("W01: idle");
+    expect([...container.querySelectorAll("button")].some(button => button.textContent === "Revoke")).toBe(false);
+    const selected = container.querySelector<HTMLSelectElement>('[aria-label="Agent pool"]')!;
+    await act(async () => {
+      selected.value = pool.id;
+      selected.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(container.textContent).toContain("devbox-worker: idle");
+    await click("Revoke");
+    expect(revoke).toHaveBeenCalledWith("company", pool.id, `${pool.id}-worker`);
+    await act(async () => {
+      selected.value = hosted.id;
+      selected.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(container.textContent).toContain("W01: idle");
+    expect([...container.querySelectorAll("button")].some(button => button.textContent === "Revoke")).toBe(false);
+  });
+
   it("defaults to active workers and filters disconnected, reconnecting, unpaired, and revoked workers", async () => {
     vi.spyOn(agentPoolsApi, "list").mockResolvedValue([hosted]);
     const worker = { poolId: hosted.id, paired: true, revoked: false };
@@ -151,6 +219,7 @@ describe("AgentPool settings", () => {
       else expect(container.textContent).not.toContain("revoked-worker:");
       if (value === "all") expect(container.textContent).toContain("connected-idle:");
       else expect(container.textContent).not.toContain("connected-idle:");
+      expect([...container.querySelectorAll("button")].some(button => button.textContent === "Revoke")).toBe(false);
     }
   });
 
