@@ -51,7 +51,7 @@ status and execution report a visible configuration error rather than falling
 back to Devbox or user credentials. Stored per-pool URL/audience values do not
 override the deployment connection.
 
-Company settings shows observed Hosted capacity and available repositories,
+Settings / Agent Pools, immediately after Members, shows observed Hosted capacity and available repositories,
 not editable types, provider URLs, audiences or manual backlog controls. The
 external host's `poolId` is persisted separately from the local pool ID and
 reused for subsequent calls. Failed provisioning stays visible and is retried
@@ -64,6 +64,9 @@ The worker inventory defaults to active workers: paired, non-revoked workers
 with an idle or busy connection. Its filter can show disconnected workers
 (including reconnecting and awaiting-pairing workers), revoked workers, or all
 workers. Filtering changes only the view, not registrations or credentials.
+The portal's Revoke action and company-scoped worker DELETE endpoint apply only
+to Devbox workers. Hosted registrations are managed by the built-in host through
+its authenticated provider lifecycle, not manually revoked from company settings.
 Demand and deletion requests allow up to 90 seconds for provider reconciliation;
 reads and pool registration retain a 10-second limit. Caller cancellation still
 applies to every request.

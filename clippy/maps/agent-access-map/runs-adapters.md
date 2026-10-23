@@ -251,6 +251,10 @@ The built-in host connection comes only from deployment environment variables;
 stored per-pool URL/audience values cannot redirect it. Manual pairing is
 restricted to non-default Devbox pools. Legacy `freelance` records are exposed
 as Devbox without rewriting them or automatically converting existing defaults.
+Pool administration lives at Settings / Agent Pools (`/company/settings/agent-pools`),
+immediately after Members in the settings navigation, not in General.
+The portal Revoke action and company-scoped worker DELETE endpoint are Devbox-only;
+Hosted worker revocation remains restricted to the authenticated provider lifecycle.
 The settings worker filter initially hides revoked and disconnected workers;
 other filters only change visibility, not credential validity or operator access.
 Repository selection remains company/catalog-scoped; reference metadata grants

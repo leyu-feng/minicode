@@ -40,9 +40,10 @@ turn; do not count a nested discovery interval twice.
 
 ### `agent-pool-setup`
 
-Open Company settings and its AgentPool workers section. The `default` pool is
+Open Settings / Agent Pools, immediately after Members. The `default` pool is
 always Hosted for new companies; create distinct named Devbox pools there, generate
-one-time pairing tokens for Devbox workers, and inspect or revoke them. The worker
+one-time pairing tokens for Devbox workers, and inspect workers. Revoke is available
+only for Devbox workers; the built-in host manages Hosted registrations. The worker
 list defaults to active (paired, non-revoked idle/busy) connections. Select
 Disconnected to include offline, reconnecting and awaiting-pairing workers,
 Revoked for revoked registrations, or All for the complete inventory.

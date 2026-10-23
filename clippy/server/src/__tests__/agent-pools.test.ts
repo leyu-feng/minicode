@@ -86,6 +86,26 @@ const execFileAsync = promisify(execFile);
     expect(provider.client.create).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects board revocation of Hosted workers without changing their credentials", async () => {
+    const provider = hostedProvider();
+    const svc = agentPoolService(db);
+    const pool = await svc.ensureDefault(companyId);
+    const grant = { ...provider.config, clientId: randomUUID(), principalId: randomUUID() };
+    const input = {
+      companyId, poolId: provider.poolId, poolName: pool.name,
+      workerId: randomUUID(), clientToken: "c".repeat(64),
+    };
+    await svc.pairHostedWorker(input, grant);
+    const before = await svc.workers(companyId, pool.id);
+    const response = await request(app())
+      .delete(`/api/companies/${companyId}/agent-pools/${pool.id}/workers/${input.workerId}`).expect(409);
+    expect(response.body.error).toBe("Only Devbox pools support manual worker revocation.");
+    expect(await svc.workers(companyId, pool.id)).toEqual(before);
+    expect(await svc.authenticate(input.workerId, input.clientToken)).toMatchObject({ companyId, poolName: pool.name });
+    await expect(svc.revokeHostedWorker(input, grant)).resolves.toMatchObject({ revoked: true });
+    expect(await svc.authenticate(input.workerId, input.clientToken)).toBeNull();
+  });
+
   it("uses the entire v2 repository catalog without retaining primary or reference selections", async () => {
     const provider = hostedProvider();
     vi.mocked(hostedWorkers.hostedWorkerClient).mockReturnValue({

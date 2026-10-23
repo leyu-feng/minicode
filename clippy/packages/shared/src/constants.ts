@@ -1539,6 +1539,7 @@ export const PLUGIN_RESERVED_COMPANY_SETTINGS_ROUTE_SEGMENTS = [
   "environments",
   "access",
   "members",
+  "agent-pools",
   "invites",
   "secrets",
   "instance",

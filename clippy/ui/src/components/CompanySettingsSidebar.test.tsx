@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { queryKeys } from "@/lib/queryKeys";
 import { CompanySettingsSidebar } from "./CompanySettingsSidebar";
+import { CompanySettingsSidebar as ProductionCompanySettingsSidebar } from "./CompanySettingsSidebar.production";
 import { primarySidebarStyles } from "./primary-sidebar-styles";
 
 const sidebarNavItemMock = vi.hoisted(() => vi.fn());
@@ -62,6 +63,13 @@ vi.mock("./SidebarNavItem", () => ({
     end?: boolean;
     badge?: number;
   }) => {
+    sidebarNavItemMock(props);
+    return <div>{props.label}</div>;
+  },
+}));
+
+vi.mock("./SidebarNavItem.production", () => ({
+  SidebarNavItem: (props: { to: string; label: string; end?: boolean }) => {
     sidebarNavItemMock(props);
     return <div>{props.label}</div>;
   },
@@ -262,6 +270,26 @@ describe("CompanySettingsSidebar", () => {
     await act(async () => {
       root.unmount();
     });
+  });
+
+  it.each([
+    ["streamlined", CompanySettingsSidebar],
+    ["production", ProductionCompanySettingsSidebar],
+  ])("places Agent Pools immediately after Members in the %s sidebar", async (_name, Sidebar) => {
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}><Sidebar /></QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    expect(container.querySelector("nav")?.textContent).toContain("MembersAgent Pools");
+    expect(sidebarNavItemMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "/company/settings/agent-pools", label: "Agent Pools", end: true,
+    }));
+    await act(async () => { root.unmount(); });
+    queryClient.clear();
   });
 
   it("renders company settings pages contributed by ready plugins", async () => {

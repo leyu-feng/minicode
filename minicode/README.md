@@ -270,7 +270,7 @@ a Devbox pool, select its company pool name:
 { "name": "devbox" }
 ```
 
-In Clippy's **Company settings → AgentPool workers**, create a named Devbox
+In Clippy's **Settings → Agent Pools** (immediately after Members), create a named Devbox
 pool or select an existing one (lowercase letters, numbers, hyphens,
 underscores; at most 64 characters). Choose **Pair worker**, give it a display
 name, and copy the one-time server token. Each worker needs its own pairing.

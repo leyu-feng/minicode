@@ -280,13 +280,13 @@ describe("plugin UI slot validators", () => {
     expect(parsed.routePath).toBe("permissions");
   });
 
-  it("prevents company settings page slots from shadowing core settings routes", () => {
+  it.each(["instance", "agent-pools"])("prevents company settings page slots from shadowing the core %s route", (routePath) => {
     const parsed = pluginUiSlotDeclarationSchema.safeParse({
       type: "companySettingsPage",
       id: "instance-settings",
       displayName: "Instance",
       exportName: "InstanceSettingsPage",
-      routePath: "instance",
+      routePath,
     });
 
     expect(parsed.success).toBe(false);
