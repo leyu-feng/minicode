@@ -197,15 +197,16 @@ test("Hosted assignments persist busy before repository preparation and retire o
   assert.deepEqual(transitions, ["idle", "busy", "repositories", "idle", "stopped"])
 })
 
-test("Hosted all-repository assignments run at a non-Git parent with readonly references and shared guidance", async t => {
+for (const explicitRole of [true, false]) test(`Hosted all-repository assignments use supervisory guidance with explicit metadata=${explicitRole}`, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "hosted-catalog-test-"))
   const shared = path.join(root, "worker_shared")
   const writable = path.join(root, "Main")
   const reference = path.join(root, "Reference")
   for (const directory of [shared, writable, reference]) await fs.mkdir(directory)
   await fs.writeFile(path.join(shared, "AGENTS.md"), "Shared catalog guidance wins.")
+  await fs.writeFile(path.join(root, "AGENTS.md"), "Conflicting workspace guidance loses.")
   const descriptors = [
-    { id: "shared", name: "shared-guidance", branch: "main", readOnly: true, path: shared },
+    { id: "shared", name: "shared-guidance", branch: "main", readOnly: true, path: shared, ...(explicitRole ? { supervisory: true } : {}) },
     { id: "main", name: "Main", branch: "main", readOnly: false, path: writable },
     { id: "ref", name: "Reference", branch: "main", readOnly: true, path: reference },
   ]
@@ -219,6 +220,9 @@ test("Hosted all-repository assignments run at a non-Git parent with readonly re
       assert.match(this.options.instructions, /Shared catalog guidance wins/)
       assert.match(this.options.instructions, /there is no primary repository/)
       assert.match(this.options.instructions, /worker_shared guidance and same-named skills override every repository/)
+      assert.match(this.options.instructions, /repository marked supervisory: true in workspace.json/)
+      assert.ok(this.options.instructions.indexOf("Shared catalog guidance wins.")
+        < this.options.instructions.indexOf("Conflicting workspace guidance loses."))
       assert.deepEqual(JSON.parse(this.options.env.WORKER_REFERENCE_REPOS_JSON), [descriptors[2]])
       assert.equal(this.options.tools.length, 0)
       assert.equal(await fs.readFile(path.join(root, ".worker", "skills", "paperclip", "SKILL.md"), "utf8"),
@@ -242,6 +246,28 @@ test("Hosted all-repository assignments run at a non-Git parent with readonly re
     repositories: { mode: "all_repositories", repositories: descriptors } })
   assert.equal(sessions, 1)
   await assert.rejects(fs.stat(path.join(root, ".git")), { code: "ENOENT" })
+})
+
+for (const count of [0, 2]) test(`Hosted rejects ${count} explicitly supervisory repositories before model execution`, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "hosted-supervisory-test-"))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const descriptors = [0, 1].map(index => ({
+    id: `repo-${index}`, name: `Repo${index}`, branch: "main", readOnly: true,
+    path: path.join(root, `repo-${index}`), supervisory: index < count,
+  }))
+  const fixture = await harness(t, () => { throw new Error("Model must not start") }, {
+    cwd: root, workspaceMode: "worktree", hostedWorkspaceMode: "all_repositories",
+    prepareHostedRepositories: async () => ({
+      mode: "all_repositories", cwd: root, workerShared: descriptors[0].path, repositories: descriptors,
+    }),
+  })
+  const peer = await fixture.welcome(0)
+  peer.send({ type: "task", runId: "invalid-supervisory", agent, context: {},
+    repositories: { mode: "all_repositories", repositories: descriptors } })
+  await waitUntil(() => peer.messages.some(message => message.type === "result"))
+  const result = peer.messages.find(message => message.type === "result")
+  assert.notEqual(result.exitCode, 0)
+  assert.match(result.error, /exactly one supervisory repository/)
 })
 
 test("an assignment deadline cancels repository preparation before any model starts", async t => {
@@ -1070,7 +1096,7 @@ test("shared guidance overrides worktree skills and worktree skills override the
     assert.ok(session.instructions.includes(`# ${label} guidance`))
     if (source !== "bundle") assert.ok(!session.instructions.includes("# Bundled operational guidance"))
     assert.ok(session.instructions.includes(index ? "Updated shared policy" : "Shared policy overrides repository policy"))
-    assert.ok(session.instructions.indexOf("Repository policy") < session.instructions.indexOf("Host-owned shared AGENTS.md"))
+    assert.ok(session.instructions.indexOf("Host-owned shared AGENTS.md") < session.instructions.indexOf("Repository policy"))
     assert.match(session.instructions, /worker_shared overrides the worktree/)
     peer.send({ type: "ack", runId, seq: result.seq, completed: true })
     await waitUntil(() => peer.messages.filter(message => message.type === "ready").length > readyCount)

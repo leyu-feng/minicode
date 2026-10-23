@@ -52,8 +52,14 @@ below a non-Git root and fetches every configured branch's latest ref before
 model execution. Assignments start at that root. Writable checkouts can be edited
 and committed independently; `publish_pull_request` selects a repository and
 registers each PR with Paperclip. Read-only checkouts are reference material.
-shared-guidance/main is always `worker_shared`; its instructions and same-named
-skills override every repository. Other reference skills are not loaded;
+shared-guidance/main is always `worker_shared` and marked `"supervisory": true` in
+the workspace manifest and trusted assignment descriptors. Exactly one read-only
+supervisory checkout is required when supervisory metadata is supplied. Legacy
+descriptors retain configured `worker_shared` precedence during rolling upgrades.
+The explicitly supervisory checkout's `AGENTS.md` must exist and is loaded before
+other repository guidance; its instructions and same-named skills override every
+other repository, while remaining subordinate to built-in worker rules and managed
+agent-specific instructions. Other reference skills are not loaded;
 duplicate writable repository skills are qualified as `Repository/skill`.
 Read-only behavior is instruction policy, not OS isolation.
 
