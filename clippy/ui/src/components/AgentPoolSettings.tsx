@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AgentPoolPairing, AgentPool, HostedWorkerConfig } from "@paperclipai/shared";
-import { hostedWorkerConfigSchema, hostedWorkerDemandSchema } from "@paperclipai/shared";
+import type { AgentPoolPairing, AgentPool } from "@paperclipai/shared";
 import { agentPoolsApi } from "../api/agent-pools";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -13,12 +12,12 @@ export function AgentPoolSettings({ companyId }: { companyId: string }) {
   const [poolId, setPoolId] = useState("");
   const [workerName, setWorkerName] = useState("");
   const [pairing, setPairing] = useState<AgentPoolPairing | null>(null);
+  const [workerFilter, setWorkerFilter] = useState("active");
   const copy = useMutation({ mutationFn: copyTextToClipboard });
   const key = ["agent-pools", companyId];
   const pools = useQuery({ queryKey: key, queryFn: () => agentPoolsApi.list(companyId) });
   const selected = poolId || pools.data?.find((pool) => pool.name === "default")?.id || "";
   const selectedPool = pools.data?.find((pool) => pool.id === selected);
-  const defaults = useQuery({ queryKey: [...key, "hosted-defaults"], queryFn: () => agentPoolsApi.defaults(companyId) });
   const workers = useQuery({
     queryKey: [...key, selected, "workers"], queryFn: () => agentPoolsApi.workers(companyId, selected),
     enabled: Boolean(selected), refetchInterval: 5000,
@@ -37,12 +36,20 @@ export function AgentPoolSettings({ companyId }: { companyId: string }) {
     mutationFn: (id: string) => agentPoolsApi.revoke(companyId, selected, id),
     onSuccess: () => { void client.invalidateQueries({ queryKey: key }); },
   });
-  const error = pools.error || defaults.error || workers.error || create.error || pair.error || revoke.error || copy.error;
+  const visibleWorkers = workers.data?.filter((worker) => {
+    if (workerFilter === "all") return true;
+    if (workerFilter === "revoked") return worker.revoked;
+    if (worker.revoked) return false;
+    const active = worker.paired && (worker.status === "idle" || worker.status === "busy");
+    return workerFilter === "active" ? active : !active;
+  });
+  const error = pools.error || workers.error || create.error || pair.error || revoke.error || copy.error;
   return (
     <section className="space-y-4">
       <h2 className="text-sm font-semibold">Agent pools</h2>
       <p className="text-sm text-muted-foreground">
-        Freelance pools use your own Minicode workers. Hosted pools use a managed-identity-authenticated provider.
+        The default Hosted pool uses the built-in agent host. Create Devbox pools for your own Minicode workers.
+        Pool types cannot be changed.
       </p>
       {error && <p role="alert" className="text-sm text-destructive">{error.message}</p>}
       <div className="flex items-center gap-2">
@@ -51,14 +58,10 @@ export function AgentPoolSettings({ companyId }: { companyId: string }) {
       </div>
       <select aria-label="Agent pool" className="rounded-md border border-border bg-background p-2 text-sm"
         value={selected} onChange={(e) => { setPoolId(e.target.value); setPairing(null); }}>
-        {pools.data?.map((pool) => <option key={pool.id} value={pool.id}>{pool.name} ({pool.type === "hosted" ? "Hosted" : "Freelance"})</option>)}
+        {pools.data?.map((pool) => <option key={pool.id} value={pool.id}>{pool.name} ({pool.type === "hosted" ? "Hosted" : "Devbox"})</option>)}
       </select>
-      {selectedPool && defaults.isSuccess && <PoolProviderSettings
-        key={`${selectedPool.id}:${selectedPool.type}:${selectedPool.hostedPoolId ?? ""}`}
-        companyId={companyId} pool={selectedPool} defaults={defaults.data}
-        onChanged={() => { setPairing(null); void client.invalidateQueries({ queryKey: key }); }}
-      />}
-      {selectedPool?.type !== "hosted" && <>
+      {selectedPool?.type === "hosted" && <HostedPoolStatus key={selectedPool.id} companyId={companyId} pool={selectedPool} />}
+      {selectedPool?.type === "devbox" && selectedPool.name !== "default" && <>
       <div className="flex items-center gap-2">
         <Input aria-label="Worker name" placeholder="Worker name" value={workerName}
           onChange={(e) => setWorkerName(e.target.value)} />
@@ -79,7 +82,22 @@ export function AgentPoolSettings({ companyId }: { companyId: string }) {
         </div>
       )}
       </>}
-      {workers.data?.map((worker) => (
+      <label className="block space-y-2 text-sm">
+        <span>Workers</span>
+        <select aria-label="Worker filter" value={workerFilter} onChange={(event) => setWorkerFilter(event.target.value)}
+          className="rounded-md border border-border bg-background p-2 text-sm">
+          <option value="active">Active workers</option>
+          <option value="disconnected">Disconnected workers</option>
+          <option value="revoked">Revoked workers</option>
+          <option value="all">All workers</option>
+        </select>
+      </label>
+      {workers.isSuccess && visibleWorkers?.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          {workerFilter === "active" ? "No active workers connected." : "No workers match this filter."}
+        </p>
+      )}
+      {visibleWorkers?.map((worker) => (
         <div key={worker.id} className="flex items-center justify-between gap-2 text-sm">
           <span>{worker.name}: {worker.revoked ? "revoked" : worker.paired ? worker.status : "awaiting pairing"}</span>
           {!worker.revoked && <Button variant="outline" disabled={revoke.isPending}
@@ -90,81 +108,34 @@ export function AgentPoolSettings({ companyId }: { companyId: string }) {
   );
 }
 
-function PoolProviderSettings({ companyId, pool, defaults, onChanged }: {
-  companyId: string; pool: AgentPool; defaults: HostedWorkerConfig | null; onChanged: () => void;
+function HostedPoolStatus({ companyId, pool }: {
+  companyId: string; pool: AgentPool;
 }) {
-  const [type, setType] = useState<"freelance" | "hosted">(pool.type ?? "freelance");
-  const [apiUrl, setApiUrl] = useState(pool.hostedApiUrl ?? defaults?.apiUrl ?? "");
-  const [audience, setAudience] = useState(pool.hostedAudience ?? defaults?.audience ?? "");
-  const [confirmed, setConfirmed] = useState(false);
-  const [itemsWaiting, setItemsWaiting] = useState("0");
   const status = useQuery({
     queryKey: ["agent-pools", companyId, pool.id, "status"],
     queryFn: () => agentPoolsApi.status(companyId, pool.id),
-    enabled: pool.type === "hosted", refetchInterval: 10_000, retry: false,
+    refetchInterval: 10_000, retry: false,
   });
   const repos = useQuery({
     queryKey: ["agent-pools", companyId, pool.id, "repos"],
     queryFn: () => agentPoolsApi.repositories(companyId, pool.id),
-    enabled: pool.type === "hosted", retry: false,
+    retry: false,
   });
-  const save = useMutation({
-    mutationFn: () => agentPoolsApi.update(companyId, pool.id, type === "hosted"
-      ? { type, clearPairings: true, config: { apiUrl, audience } } : { type, clearPairings: true }),
-    onSettled: () => { setConfirmed(false); onChanged(); },
-  });
-  const report = useMutation({
-    mutationFn: () => agentPoolsApi.report(companyId, pool.id, Number(itemsWaiting)),
-    onSuccess: () => { void status.refetch(); },
-  });
-  const error = save.error || status.error || repos.error || report.error;
-  const validConfig = type !== "hosted" || hostedWorkerConfigSchema.safeParse({ apiUrl, audience }).success;
+  const error = status.error || repos.error;
   return <div className="space-y-3 rounded-md border border-border p-4">
-    <label className="block space-y-2 text-sm">
-      <span>Pool type</span>
-      <select aria-label="Pool type" value={type} onChange={(event) => setType(event.target.value === "hosted" ? "hosted" : "freelance")}
-        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
-        <option value="freelance">Freelance</option><option value="hosted">Hosted</option>
-      </select>
-    </label>
-    {type === "hosted" && <>
-      <label className="block space-y-2 text-sm"><span>Provider API URL</span>
-        <Input aria-label="Provider API URL" value={apiUrl} placeholder="https://engsys.example/v1/hosted-worker"
-          onChange={(event) => setApiUrl(event.target.value)} /></label>
-      <label className="block space-y-2 text-sm"><span>Provider token audience</span>
-        <Input aria-label="Provider token audience" value={audience} placeholder="api://provider"
-          onChange={(event) => setAudience(event.target.value)} /></label>
-      <p className="text-xs text-muted-foreground">Clippy uses its managed identity. Saving creates or reconnects the provider pool and tests status and repositories.</p>
-    </>}
-    <label className="flex items-center gap-2 text-sm">
-      <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
-      Clear all existing worker pairings and disconnect running workers.
-    </label>
-    <div className="flex items-center justify-between gap-2">
-      <Button variant="outline" onClick={() => {
-        setType(pool.type ?? "freelance"); setApiUrl(pool.hostedApiUrl ?? defaults?.apiUrl ?? "");
-        setAudience(pool.hostedAudience ?? defaults?.audience ?? ""); setConfirmed(false);
-      }}>Cancel</Button>
-      <Button disabled={!confirmed || !validConfig || save.isPending} onClick={() => save.mutate()}>
-        {type === "hosted" ? "Save and test Hosted pool" : "Save Freelance pool"}
-      </Button>
-    </div>
-    {error && <p role="alert" className="text-sm text-destructive">{error.message}</p>}
-    {pool.type === "hosted" && <>
-      <p className="text-xs text-muted-foreground">Provider pool: {pool.hostedPoolId ?? "Not provisioned; save to retry"}</p>
-      {status.data && <p className="text-sm">
-        {status.data.isMock ? "Mock capacity" : "Provider capacity"}: {status.data.activeWorkers} active, {status.data.provisioningWorkers} provisioning.
-        {status.data.isMock && " These counts do not represent connected workers or provision compute."}
-      </p>}
-      {repos.data && <p className="text-sm">Available repositories: {repos.data.map((repo) =>
-        `${repo.name} (${repo.branch})${repo.isDefault ? " [default]" : ""}`).join(", ")}. Select a primary and references on each agent.</p>}
-      <div className="flex items-center gap-2">
-        <Input aria-label="Tasks waiting" type="number" min="0" step="1" value={itemsWaiting}
-          onChange={(event) => setItemsWaiting(event.target.value)} />
-        <Button variant="outline" disabled={itemsWaiting.trim() === "" || report.isPending
-          || !hostedWorkerDemandSchema.safeParse({ itemsWaiting: Number(itemsWaiting) }).success}
-          onClick={() => report.mutate()}>Report backlog</Button>
-      </div>
-    </>}
+    <p className="text-sm text-muted-foreground">
+      The built-in agent host is connected through deployment environment settings. Capacity is requested automatically as tasks wait.
+    </p>
+    {error && <div className="space-y-2">
+      <p role="alert" className="text-sm text-destructive">{error.message}</p>
+      <Button variant="outline" disabled={status.isFetching || repos.isFetching}
+        onClick={() => { void status.refetch(); void repos.refetch(); }}>Retry Hosted connection</Button>
+    </div>}
+    {status.data && <p className="text-sm">
+      {status.data.isMock ? "Mock capacity" : "Provider capacity"}: {status.data.activeWorkers} active, {status.data.provisioningWorkers} provisioning.
+      {status.data.isMock && " These counts do not represent connected workers or provision compute."}
+    </p>}
+    {repos.data && <p className="text-sm">Available repositories: {repos.data.map((repo) =>
+      `${repo.name} (${repo.branch})${repo.isDefault ? " [default]" : ""}`).join(", ")}. Select a primary and references on each agent.</p>}
   </div>;
 }

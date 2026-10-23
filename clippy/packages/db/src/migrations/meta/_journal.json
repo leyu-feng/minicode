@@ -2437,6 +2437,13 @@
       "when": 1792732675720,
       "tag": "0349_clumsy_banshee",
       "breakpoints": true
+    },
+    {
+      "idx": 350,
+      "version": "7",
+      "when": 1792783413882,
+      "tag": "0350_sour_bedlam",
+      "breakpoints": true
     }
   ]
 }

@@ -41,19 +41,33 @@ turn; do not count a nested discovery interval twice.
 ### `agent-pool-setup`
 
 Open Company settings and its AgentPool workers section. The `default` pool is
-automatic; create distinct named pools there, generate one-time pairing tokens
-for workers, and inspect or revoke them. Hire an agent with AgentPool and select
+always Hosted for new companies; create distinct named Devbox pools there, generate
+one-time pairing tokens for Devbox workers, and inspect or revoke them. The worker
+list defaults to active (paired, non-revoked idle/busy) connections. Select
+Disconnected to include offline, reconnecting and awaiting-pairing workers,
+Revoked for revoked registrations, or All for the complete inventory.
+Hire an agent with AgentPool and select
 the pool name. Follow [worker setup](../../../minicode/README.md#connect-as-an-agentpool-worker)
 on the worker machine.
 
-Existing pools are Freelance. Select Hosted to configure a managed-identity
-provider and confirm clearing all pairings; switching back also disconnects
-workers. Inspect the persisted provider pool ID, observed capacity and repository
-catalog. Configure an agent's primary and distinct read-only references; all
-catalog repositories may be primary and the marked default is preselected.
-Engsys reserves six-hour Container Apps Jobs, maintaining at least one waiting
-worker and replacing capacity immediately when a worker becomes busy. A
-five-minute operator heals missing capacity. Counts reflect worker heartbeats
+The default Hosted pool uses the deployment's built-in agent host through
+environment variables and managed identity. Pool types are fixed; additional
+pools are always Devbox. There are no type-switching, provider URL/audience or
+manual backlog controls. Missing host configuration is a visible blocker, not
+a Devbox fallback. Legacy Freelance rows display as Devbox; existing defaults
+require manual conversion and are never rewritten automatically.
+Inspect observed capacity and the repository catalog. Updated Hosted workers
+prepare the entire global catalog below one non-Git workspace root; there is no
+primary repository selection. Engsys operators manage writable and read-only
+entries through the repository portal. AgentAcademy is the fixed read-only
+`worker_shared` checkout and takes priority over repository-local guidance and
+skills. Read-only references do not activate their own skills. Legacy workers
+retain their primary/reference selection contract.
+Engsys reserves six-hour Container Apps Jobs from persistent W01-W99 logical
+identities, multiplexing idle connections across organizations and maintaining
+two waiting connections per pool without keeping all 99 containers running.
+Normal recycling deactivates connections without revoking their registrations.
+A five-minute operator heals missing capacity. Counts reflect worker heartbeats
 and real reservations; repeated backlog reports do not accumulate. Assignments
 and idle waits are bounded to 45 minutes; workers retire after completion with
 less than one hour remaining. The harness prepares catalog-selected repositories
@@ -61,7 +75,7 @@ before model execution. Without an actual compatible worker, a Hosted task
 must request capacity, wait at most two minutes and fail visibly, never claim
 execution from counts. Managed workers retire only after a broker receipt.
 Local checks are not evidence of a live Hosted deployment.
-See the [provider contract](../../doc/agent-pool-protocol.md#freelance-and-hosted-pools).
+See the [provider contract](../../doc/agent-pool-protocol.md#devbox-and-hosted-pools).
 
 Updated workers download Paperclip's bundled operational and onboarding skills into the assigned
 checkout's Git-ignored `.worker/skills`, not the host-owned shared folder. Confirm

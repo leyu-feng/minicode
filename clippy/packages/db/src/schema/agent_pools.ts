@@ -1,17 +1,20 @@
-import { pgTable, uuid, text, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, uniqueIndex, index, bigint } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { companies } from "./companies.js";
 
 export const agentPools = pgTable("agent_pools", {
   id: uuid("id").primaryKey().defaultRandom(),
   companyId: uuid("company_id").notNull().references(() => companies.id),
   name: text("name").notNull(),
-  type: text("type").$type<"freelance" | "hosted">().notNull().default("freelance"),
+  // Preserve the existing SQL default; pool creation supplies its type explicitly.
+  type: text("type").$type<"freelance" | "devbox" | "hosted">().notNull().default("freelance"),
   hostedApiUrl: text("hosted_api_url"),
   hostedAudience: text("hosted_audience"),
   hostedPoolId: uuid("hosted_pool_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   companyNameIdx: uniqueIndex("agent_pools_company_name_idx").on(table.companyId, table.name),
+  companyHostedIdx: uniqueIndex("agent_pools_one_hosted_per_company_idx").on(table.companyId).where(sql`${table.type} = 'hosted'`),
 }));
 
 export const agentPoolWorkers = pgTable("agent_pool_workers", {
@@ -23,6 +26,7 @@ export const agentPoolWorkers = pgTable("agent_pool_workers", {
   clientTokenHash: text("client_token_hash"),
   hostedExecutionId: uuid("hosted_execution_id"),
   hostedGeneration: uuid("hosted_generation"),
+  hostedActivationVersion: bigint("hosted_activation_version", { mode: "number" }).notNull().default(0),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({

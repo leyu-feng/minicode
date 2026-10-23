@@ -1,0 +1,2 @@
+ALTER TABLE "agent_pool_workers" ADD COLUMN "hosted_activation_version" bigint DEFAULT 0 NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "agent_pools_one_hosted_per_company_idx" ON "agent_pools" USING btree ("company_id") WHERE "agent_pools"."type" = 'hosted';

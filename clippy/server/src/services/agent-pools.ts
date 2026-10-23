@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { agentPools, agentPoolWorkers, type Db } from "@paperclipai/db";
-import { agentPoolNameSchema, hostedAgentRepositoriesSchema, type HostedWorkerRepository, type UpdateAgentPool,
-  type hostedAgentPoolWorkerSchema } from "@paperclipai/shared";
+import { agentPoolNameSchema, hostedAgentRepositoriesSchema, type AgentPool, type HostedWorkerRepository,
+  type hostedAgentPoolWorkerSchema, type hostedAgentPoolSlotsSchema } from "@paperclipai/shared";
 import type { z } from "zod";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "../errors.js";
 import type { HostedWorkerProviderGrant } from "./entra-hosted-workers.js";
@@ -14,6 +14,10 @@ import { logger } from "../middleware/logger.js";
 
 type Pool = typeof agentPools.$inferSelect;
 
+function poolView(pool: Pool): AgentPool {
+  return { ...pool, type: pool.type === "freelance" ? "devbox" : pool.type };
+}
+
 export function hashAgentPoolToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -21,11 +25,19 @@ export function hashAgentPoolToken(token: string) {
 export function agentPoolService(db: Db) {
   const waiting = new Map<string, { runs: Set<string>; tail: Promise<void> }>();
 
-  function provider(pool: Pool) {
-    if (pool.type !== "hosted" || !pool.hostedApiUrl || !pool.hostedAudience || !pool.hostedPoolId) {
-      throw conflict("Hosted pool is not provisioned. Open Agent pools and reconnect the provider.");
+  function hostedConfig(pool: Pool) {
+    if (pool.type !== "hosted" || pool.name !== "default") {
+      throw conflict("Only the default pool uses the built-in agent host.");
     }
-    return { client: hostedWorkerClient({ apiUrl: pool.hostedApiUrl, audience: pool.hostedAudience }), poolId: pool.hostedPoolId };
+    const config = defaultHostedWorkerConfig();
+    if (!config) throw conflict("The built-in agent host is not configured. Set PAPERCLIP_HOSTED_WORKER_URL and PAPERCLIP_HOSTED_WORKER_AUDIENCE in the deployment.");
+    return config;
+  }
+
+  function provider(pool: Pool) {
+    const config = hostedConfig(pool);
+    if (!pool.hostedPoolId) throw conflict("Hosted pool is not provisioned. Retry after the built-in agent host is available.");
+    return { client: hostedWorkerClient(config), poolId: pool.hostedPoolId };
   }
 
   async function provision(companyId: string, poolId: string, signal?: AbortSignal) {
@@ -33,9 +45,10 @@ export function agentPoolService(db: Db) {
       const [pool] = await tx.select().from(agentPools)
         .where(and(eq(agentPools.id, poolId), eq(agentPools.companyId, companyId))).for("update");
       if (!pool) throw notFound("Agent pool not found");
-      if (pool.type !== "hosted" || pool.hostedPoolId) return pool;
-      if (!pool.hostedApiUrl || !pool.hostedAudience) throw conflict("Hosted provider configuration is missing.");
-      const hostedPoolId = await hostedWorkerClient({ apiUrl: pool.hostedApiUrl, audience: pool.hostedAudience }).create(companyId, pool.name, signal);
+      if (pool.type !== "hosted") return pool;
+      const config = hostedConfig(pool);
+      if (pool.hostedPoolId) return pool;
+      const hostedPoolId = await hostedWorkerClient(config).create(companyId, pool.name, signal);
       const [updated] = await tx.update(agentPools).set({ hostedPoolId }).where(eq(agentPools.id, pool.id)).returning();
       return updated;
     });
@@ -44,28 +57,37 @@ export function agentPoolService(db: Db) {
   async function ensureDefault(companyId: string, provisionHosted = true) {
     const config = defaultHostedWorkerConfig();
     await db.insert(agentPools).values({
-      companyId, name: "default", ...(config ? {
-        type: "hosted" as const, hostedApiUrl: config.apiUrl, hostedAudience: config.audience,
-      } : {}),
+      companyId, name: "default", type: "hosted",
+      hostedApiUrl: config?.apiUrl ?? null, hostedAudience: config?.audience ?? null,
     }).onConflictDoNothing();
     const [pool] = await db.select().from(agentPools)
       .where(and(eq(agentPools.companyId, companyId), eq(agentPools.name, "default")));
-    return provisionHosted ? provision(companyId, pool.id) : pool;
+    return poolView(provisionHosted && config ? await provision(companyId, pool.id) : pool);
   }
 
   async function list(companyId: string) {
     await ensureDefault(companyId, false);
-    return db.select().from(agentPools).where(eq(agentPools.companyId, companyId)).orderBy(agentPools.name);
+    const pools = await db.select().from(agentPools).where(eq(agentPools.companyId, companyId)).orderBy(agentPools.name);
+    return pools.map(poolView);
   }
 
   async function get(companyId: string, poolId: string) {
     const [pool] = await db.select().from(agentPools)
       .where(and(eq(agentPools.id, poolId), eq(agentPools.companyId, companyId)));
     if (!pool) throw notFound("Agent pool not found");
-    return pool;
+    return poolView(pool);
   }
 
   function resolveRepositories(config: Record<string, unknown>, repos: HostedWorkerRepository[]) {
+    if (repos.every(repo => repo.workspaceMode === "all_repositories")) {
+      const { primaryRepositoryId: _primary, referenceRepositoryIds: _references, ...workspaceConfig } = config;
+      return {
+        config: workspaceConfig,
+        repositories: { mode: "all_repositories" as const, repositories: repos.map(repo => ({
+          id: repo.id, name: repo.name, branch: repo.branch, readOnly: repo.readOnly === true,
+        })) },
+      };
+    }
     const selections = hostedAgentRepositoriesSchema.parse(config);
     const primaryRepositoryId = selections.primaryRepositoryId ?? repos.find((repo) => repo.isDefault)!.id;
     const primary = repos.find((repo) => repo.id === primaryRepositoryId);
@@ -79,20 +101,23 @@ export function agentPoolService(db: Db) {
     };
   }
 
-  async function hostedWorker(input: z.infer<typeof hostedAgentPoolWorkerSchema>, grant: HostedWorkerProviderGrant, revoke: boolean) {
+  async function hostedWorker(input: z.infer<typeof hostedAgentPoolWorkerSchema>, grant: HostedWorkerProviderGrant,
+    mode: "pair" | "revoke" | "deactivate") {
+    const revoke = mode !== "pair";
     return db.transaction(async (tx) => {
       const registration = tx.select().from(agentPools).where(and(
         eq(agentPools.companyId, input.companyId), eq(agentPools.name, input.poolName),
         eq(agentPools.type, "hosted"), eq(agentPools.hostedPoolId, input.poolId),
       ));
-      // Revocation may be a provider callback from update(), which already locks this pool.
+      // Provider retirement callbacks must not wait for the pool's provisioning lock.
       const [pool] = await (revoke ? registration : registration.for("update"));
       if (!pool) {
         if (revoke) return { workerId: input.workerId, created: false, revoked: false };
         throw conflict("Hosted pool is not registered; retry worker bootstrap after provisioning commits");
       }
-      if (pool.hostedApiUrl?.replace(/\/+$/, "") !== grant.apiUrl.replace(/\/+$/, "")
-        || pool.hostedAudience !== grant.audience) {
+      const config = hostedConfig(pool);
+      if (config.apiUrl.replace(/\/+$/, "") !== grant.apiUrl.replace(/\/+$/, "")
+        || config.audience !== grant.audience) {
         throw forbidden("The calling provider does not own this Hosted pool");
       }
       let created = false;
@@ -102,6 +127,7 @@ export function agentPoolService(db: Db) {
           id: input.workerId, poolId: pool.id, name: `hosted-${input.workerId}`,
           clientTokenHash: hashAgentPoolToken(input.clientToken),
           hostedExecutionId: input.executionId ?? null, hostedGeneration: input.generation ?? null,
+          hostedActivationVersion: input.activationVersion ?? 0,
         }).onConflictDoNothing().returning({ id: agentPoolWorkers.id });
         created = inserted.length !== 0;
       }
@@ -110,14 +136,31 @@ export function agentPoolService(db: Db) {
       if (!worker) return { workerId: input.workerId, created: false, revoked: false };
       if (worker.poolId !== pool.id) throw forbidden("The Hosted worker belongs to another pool");
       let reactivated = false;
-      if (revoke) {
+      if (mode === "deactivate") {
+        if (!input.executionId || worker.hostedExecutionId !== input.executionId || worker.hostedGeneration !== input.generation) {
+          return { workerId: worker.id, created: false, revoked: false, reactivated: false, deactivated: false };
+        }
+        await tx.update(agentPoolWorkers).set({ clientTokenHash: null, hostedExecutionId: null })
+          .where(eq(agentPoolWorkers.id, worker.id));
+        return { workerId: worker.id, created: false, revoked: false, reactivated: false, deactivated: true };
+      } else if (revoke) {
         if (input.executionId && (worker.hostedExecutionId !== input.executionId || worker.hostedGeneration !== input.generation)) {
           return { workerId: worker.id, created: false, revoked: false, reactivated: false };
         }
         await tx.update(agentPoolWorkers).set({
           revokedAt: new Date(), clientTokenHash: null, pairingTokenHash: null, pairingExpiresAt: null,
         }).where(eq(agentPoolWorkers.id, worker.id));
-      } else if (worker.revokedAt && input.executionId && input.generation !== worker.hostedGeneration) {
+      } else if (!worker.revokedAt && input.executionId
+        && (input.activationVersion ?? 0) > worker.hostedActivationVersion) {
+        await tx.update(agentPoolWorkers).set({
+          clientTokenHash: hashAgentPoolToken(input.clientToken!),
+          hostedExecutionId: input.executionId, hostedGeneration: input.generation,
+          hostedActivationVersion: input.activationVersion!,
+          pairingTokenHash: null, pairingExpiresAt: null,
+        }).where(eq(agentPoolWorkers.id, worker.id));
+        reactivated = true;
+      } else if (worker.revokedAt && !/^W\d\d$/.test(worker.name) && input.executionId
+        && worker.hostedActivationVersion === 0 && !input.activationVersion && input.generation !== worker.hostedGeneration) {
         await tx.update(agentPoolWorkers).set({
           revokedAt: null, clientTokenHash: hashAgentPoolToken(input.clientToken!),
           hostedExecutionId: input.executionId, hostedGeneration: input.generation,
@@ -125,7 +168,8 @@ export function agentPoolService(db: Db) {
         }).where(eq(agentPoolWorkers.id, worker.id));
         reactivated = true;
       } else if (worker.revokedAt || worker.clientTokenHash !== hashAgentPoolToken(input.clientToken!)
-        || worker.hostedExecutionId !== (input.executionId ?? null) || worker.hostedGeneration !== (input.generation ?? null)) {
+        || worker.hostedExecutionId !== (input.executionId ?? null) || worker.hostedGeneration !== (input.generation ?? null)
+        || worker.hostedActivationVersion !== (input.activationVersion ?? 0)) {
         throw forbidden("The Hosted worker is revoked or already paired to another credential");
       }
       return { workerId: worker.id, created, revoked: revoke, reactivated };
@@ -134,43 +178,33 @@ export function agentPoolService(db: Db) {
 
   return {
     pairHostedWorker: (input: z.infer<typeof hostedAgentPoolWorkerSchema>, grant: HostedWorkerProviderGrant) =>
-      hostedWorker(input, grant, false),
+      hostedWorker(input, grant, "pair"),
     revokeHostedWorker: (input: z.infer<typeof hostedAgentPoolWorkerSchema>, grant: HostedWorkerProviderGrant) =>
-      hostedWorker(input, grant, true),
+      hostedWorker(input, grant, "revoke"),
+    deactivateHostedWorker: (input: z.infer<typeof hostedAgentPoolWorkerSchema>, grant: HostedWorkerProviderGrant) =>
+      hostedWorker(input, grant, "deactivate"),
+    async registerHostedSlots(input: z.infer<typeof hostedAgentPoolSlotsSchema>, grant: HostedWorkerProviderGrant) {
+      return db.transaction(async tx => {
+        const [pool] = await tx.select().from(agentPools).where(and(
+          eq(agentPools.companyId, input.companyId), eq(agentPools.name, input.poolName),
+          eq(agentPools.hostedPoolId, input.poolId), eq(agentPools.type, "hosted"),
+        )).for("update");
+        if (!pool) throw conflict("Hosted pool is not registered");
+        const config = hostedConfig(pool);
+        if (config.apiUrl.replace(/\/+$/, "") !== grant.apiUrl.replace(/\/+$/, "")
+          || config.audience !== grant.audience) throw forbidden("The calling provider does not own this Hosted pool");
+        const existing = await tx.select({ poolId: agentPoolWorkers.poolId }).from(agentPoolWorkers)
+          .where(inArray(agentPoolWorkers.id, input.slots.map(slot => slot.workerId)));
+        if (existing.some(worker => worker.poolId !== pool.id)) throw forbidden("A worker slot belongs to another pool");
+        await tx.insert(agentPoolWorkers).values(input.slots.map(slot => ({
+          id: slot.workerId, poolId: pool.id, name: slot.name,
+        }))).onConflictDoUpdate({ target: agentPoolWorkers.id, set: { name: sql`excluded.name` } });
+        return { registeredSlots: input.slots.length };
+      });
+    },
     list,
     get,
     ensureDefault,
-    async update(companyId: string, poolId: string, input: UpdateAgentPool) {
-      const revoked = await db.transaction(async (tx) => {
-        const [pool] = await tx.select().from(agentPools)
-          .where(and(eq(agentPools.id, poolId), eq(agentPools.companyId, companyId))).for("update");
-        if (!pool) throw notFound("Agent pool not found");
-        const sameProvider = pool.type === "hosted" && input.type === "hosted"
-          && pool.hostedApiUrl === input.config.apiUrl.replace(/\/+$/, "") && pool.hostedAudience === input.config.audience;
-        if (pool.type === "hosted" && !sameProvider && pool.hostedApiUrl && pool.hostedAudience) {
-          const client = hostedWorkerClient({ apiUrl: pool.hostedApiUrl, audience: pool.hostedAudience });
-          const remoteId = pool.hostedPoolId ?? await client.create(companyId, pool.name);
-          await client.delete(remoteId);
-        }
-        const workers = await tx.update(agentPoolWorkers).set({
-          revokedAt: new Date(), clientTokenHash: null, pairingTokenHash: null, pairingExpiresAt: null,
-        }).where(eq(agentPoolWorkers.poolId, pool.id)).returning({ id: agentPoolWorkers.id });
-        await tx.update(agentPools).set(input.type === "hosted" ? {
-          type: "hosted", hostedApiUrl: input.config.apiUrl.replace(/\/+$/, ""), hostedAudience: input.config.audience,
-          hostedPoolId: sameProvider ? pool.hostedPoolId : null,
-        } : { type: "freelance", hostedApiUrl: null, hostedAudience: null, hostedPoolId: null })
-          .where(eq(agentPools.id, pool.id));
-        return workers;
-      });
-      for (const worker of revoked) agentPoolBroker.revoke(worker.id, "AgentPool settings changed; pair again");
-      const pool = await provision(companyId, poolId);
-      if (pool.type === "hosted") {
-        const { client, poolId: remoteId } = provider(pool);
-        await client.status(remoteId);
-        await client.repositories(remoteId);
-      }
-      return pool;
-    },
     async status(companyId: string, poolId: string) {
       const { client, poolId: remoteId } = provider(await provision(companyId, poolId));
       return client.status(remoteId);
@@ -203,6 +237,7 @@ export function agentPoolService(db: Db) {
       const pools = await db.select().from(agentPools).where(eq(agentPools.companyId, companyId));
       for (const pool of pools) {
         if (pool.type !== "hosted") continue;
+        if (!pool.hostedPoolId && !pool.hostedApiUrl && !pool.hostedAudience && !defaultHostedWorkerConfig()) continue;
         const provisioned = await provision(companyId, pool.id);
         const { client, poolId: remoteId } = provider(provisioned);
         await client.delete(remoteId);
@@ -274,10 +309,10 @@ export function agentPoolService(db: Db) {
     },
     async create(companyId: string, name: string) {
       await list(companyId);
-      const [pool] = await db.insert(agentPools).values({ companyId, name: agentPoolNameSchema.parse(name) })
+      const [pool] = await db.insert(agentPools).values({ companyId, name: agentPoolNameSchema.parse(name), type: "devbox" })
         .onConflictDoNothing().returning();
       if (!pool) throw conflict("An agent pool with that name already exists");
-      return pool;
+      return poolView(pool);
     },
     async workers(companyId: string, poolId: string) {
       await get(companyId, poolId);
@@ -290,6 +325,9 @@ export function agentPoolService(db: Db) {
         const [pool] = await tx.select().from(agentPools)
           .where(and(eq(agentPools.id, poolId), eq(agentPools.companyId, companyId))).for("update");
         if (!pool) throw notFound("Agent pool not found");
+        if (pool.type === "hosted" || pool.name === "default") {
+          throw conflict("Only Devbox pools support manual worker pairing.");
+        }
         const [issued] = await tx.insert(agentPoolWorkers).values({
           poolId, name, pairingTokenHash: hashAgentPoolToken(serverToken), pairingExpiresAt: expiresAt,
         }).returning();
@@ -305,6 +343,8 @@ export function agentPoolService(db: Db) {
         eq(agentPoolWorkers.pairingTokenHash, hashAgentPoolToken(serverToken)),
         gt(agentPoolWorkers.pairingExpiresAt, new Date()),
         isNull(agentPoolWorkers.clientTokenHash), isNull(agentPoolWorkers.revokedAt),
+        inArray(agentPoolWorkers.poolId, db.select({ id: agentPools.id }).from(agentPools)
+          .where(and(ne(agentPools.type, "hosted"), ne(agentPools.name, "default")))),
       )).returning();
       if (!worker) throw unauthorized("Invalid, expired, or already used AgentPool pairing token");
       return { workerId: worker.id };

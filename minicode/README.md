@@ -42,7 +42,25 @@ connections. Provider admission and broker execution grouping prevent concurrent
 assignments on one physical container. The winning assignment detaches the other
 bindings; the provider maintains two idle workers per pool and a configurable
 organization busy limit (default 10). Stable worker slot IDs rotate credentials
-by generation when reused.
+by generation and monotonic activation version when reused. W01-W99 are durable
+logical identities registered once per organization, not 99 running containers.
+Routine recycling deactivates connections; it does not revoke registrations.
+
+The `hosted_workspace_v2` capability receives an `all_repositories` descriptor
+instead of primary/reference selections. The parent prepares all repositories
+below a non-Git root and fetches every configured branch's latest ref before
+model execution. Assignments start at that root. Writable checkouts can be edited
+and committed independently; `publish_pull_request` selects a repository and
+registers each PR with Paperclip. Read-only checkouts are reference material.
+AgentAcademy/main is always `worker_shared`; its instructions and same-named
+skills override every repository. Other reference skills are not loaded;
+duplicate writable repository skills are qualified as `Repository/skill`.
+Read-only behavior is instruction policy, not OS isolation.
+
+Engsys packages Git bundles daily at 02:00 UTC. Workers verify the bundle hash
+and still fetch latest before each assignment. Missing first-run manifests use
+direct clone; malformed or corrupt existing bundles fail rather than silently
+using stale content. The Engsys portal owns the global repository catalog.
 
 Completion waits for the broker's retirement receipt before asking Minion to
 fetch/reset/clean all owned repositories and remove old task state. No replacement
@@ -216,21 +234,26 @@ opened.
 
 ## Connect as an AgentPool worker
 
-Clippy keeps every existing adapter and adds **AgentPool** (`agent_pool`). Its
-only adapter setting is the company pool name:
+Clippy keeps every existing adapter and adds **AgentPool** (`agent_pool`). For
+a Devbox pool, select its company pool name:
 
 ```json
-{ "name": "default" }
+{ "name": "devbox" }
 ```
 
-In Clippy's **Company settings → AgentPool workers**, select the automatic
-`default` pool or create a distinct pool (lowercase letters, numbers, hyphens,
+In Clippy's **Company settings → AgentPool workers**, create a named Devbox
+pool or select an existing one (lowercase letters, numbers, hyphens,
 underscores; at most 64 characters). Choose **Pair worker**, give it a display
 name, and copy the one-time server token. Each worker needs its own pairing.
 Choose AgentPool when hiring an agent and enter that pool's name.
 The agent's setup check requires a connected worker in that company's selected
 pool; a busy worker still passes setup, but dispatch requires an idle worker.
 Model access is checked when a task runs, not by the pool connection check.
+
+The `default` pool is Hosted and uses the deployment's built-in agent host, not
+manual pairing. Pool types cannot be changed; new additional pools are always
+Devbox. The worker list initially shows active connections; use its filter to
+inspect disconnected, awaiting-pairing or revoked workers.
 
 Configure Minicode's model/auth on the worker first using the normal `auth`
 commands. Command-line entry points retain their current-directory behavior.
@@ -714,7 +737,9 @@ Other worker implementations can use the same versioned, capability-negotiated
 [AgentPool protocol](../clippy/doc/agent-pool-protocol.md), without depending on
 Minicode internals.
 
-An offline or fully busy pool fails the run visibly rather than waiting forever.
+A Devbox pool without an idle compatible worker fails the run visibly.
+The default Hosted pool requests capacity and waits up to two minutes for a real
+compatible worker, then fails visibly rather than waiting forever.
 An interrupted network connection can resume the **same live execution** for up
 to 60 seconds while both processes survive. Sequenced logs and results are
 acknowledged; the assignment prompt is never replayed. Process restarts, an

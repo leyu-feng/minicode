@@ -31,30 +31,43 @@ Workers send WebSocket pings every 15 seconds and accept either pings or pongs a
 liveness, closing after 45 seconds without either. Client-initiated probes keep
 proxy hops alive even when server-initiated control frames are not forwarded.
 
-## Freelance and Hosted pools
+## Devbox and Hosted pools
 
-Existing pools migrate to `freelance`; their pairing and immediate
-worker-unavailable behavior is unchanged. Hosted pools use an external provider,
-authenticated exclusively with Clippy's managed identity. Configure
+Every newly created company has a `default` Hosted pool. All additional pools
+are Devbox (`devbox`) pools for operator-paired Minicode workers. Pool types
+cannot be changed through the API or UI, and additional Hosted providers cannot
+be configured. Only non-default Devbox pools support manual pairing.
+Legacy stored `freelance` values are presented as `devbox` without rewriting
+records. Existing default pools are left untouched for manual conversion; no
+automatic conversion or data migration runs.
+
+The default pool uses the built-in agent host, an external service connected
+only through deployment environment variables and authenticated exclusively
+with Clippy's managed identity. Configure
 `PAPERCLIP_HOSTED_WORKER_URL` (HTTPS, ending in `/v1/hosted-worker`) and
-`PAPERCLIP_HOSTED_WORKER_AUDIENCE` to provision new-company default pools as
-Hosted. `AZURE_CLIENT_ID` selects a user-assigned managed identity. Without the
-two provider settings, new pools remain Freelance; existing pools are never
-automatically converted.
+`PAPERCLIP_HOSTED_WORKER_AUDIENCE`. `AZURE_CLIENT_ID` selects a user-assigned
+managed identity. Missing settings leave a new default Hosted and unprovisioned;
+status and execution report a visible configuration error rather than falling
+back to Devbox or user credentials. Stored per-pool URL/audience values do not
+override the deployment connection.
 
-Company settings lets a board operator select the pool type, provider URL and
-audience, then **Save and test**. Confirming the change clears all pairings and
-disconnects workers, in either direction. The external provider's `poolId` is
-persisted separately from the local pool ID and reused for all subsequent calls.
-If provisioning or connectivity fails, saved settings and revoked pairings
-remain in effect. The pending pool stays visible; retry saving or loading its
-status after correcting the provider. No fallback to Freelance or user
-credentials occurs. Company deletion also deletes its provider pools.
+Company settings shows observed Hosted capacity and available repositories,
+not editable types, provider URLs, audiences or manual backlog controls. The
+external host's `poolId` is persisted separately from the local pool ID and
+reused for subsequent calls. Failed provisioning stays visible and is retried
+on the next status/repository request. Company deletion deletes provisioned
+host pools; a newly created default with no host configuration or registration
+does not block company deletion. Previously configured pending pools still
+require the deployment connection so cleanup cannot silently abandon them.
+
+The worker inventory defaults to active workers: paired, non-revoked workers
+with an idle or busy connection. Its filter can show disconnected workers
+(including reconnecting and awaiting-pairing workers), revoked workers, or all
+workers. Filtering changes only the view, not registrations or credentials.
 Demand and deletion requests allow up to 90 seconds for Azure job reconciliation;
 reads and pool registration retain a 10-second limit. Caller cancellation still
 applies to every request.
-Provider revocation callbacks do not lock the pool registration: a settings
-update can already hold that lock while waiting for its provider to stop workers.
+Provider retirement callbacks do not wait for the pool's provisioning lock.
 
 The managed-identity-authenticated provider contract is:
 
@@ -80,7 +93,7 @@ Deployment Bicep configures the Clippy managed identity allowlist, audience,
 Cosmos container and repository catalog. `hostedWorkerRepositories` overrides
 the default catalog derived from `sessionRepos` (branch `main`, first default).
 
-Catalogs require unique repository IDs and exactly one default. Every repository
+Legacy v1 catalogs require unique repository IDs and exactly one default. Every repository
 can be primary. Hosted agent configuration saves `primaryRepositoryId` and
 distinct `referenceRepositoryIds`; omitting primary chooses the provider default.
 Assignments include optional `repositories: { primary, references }`, containing
@@ -105,7 +118,7 @@ have 45-minute limits that survive reconnects. A worker with less than one hour
 of its six-hour lifetime remaining retires after completion. Worker heartbeats,
 reservation proofs, start recovery and deletion tombstones are provider-owned.
 
-Managed pairing uses POST/DELETE `/api/agent-pool/hosted/workers`, not public
+Managed pairing uses POST/PUT/DELETE `/api/agent-pool/hosted/workers`, not public
 pairing tokens. `PAPERCLIP_ENTRA_HOSTED_WORKERS` configures the tenant, application
 audience and exact provider client/principal/API URL/audience grants. Only Entra
 application tokens with `AdoPipelines` and that exact provider identity qualify;
@@ -121,6 +134,45 @@ capabilities. After the result ACK, a retiring worker sends
 readmitting the worker and returns `{"type":"retired"}`. Only then does the
 worker close and report stopped; a missing receipt fails explicitly. Normal
 workers continue sending ordinary `ready` messages.
+
+### Persistent Hosted slots and all-repository workspaces
+
+The built-in host registers 99 durable W01-W99 identities per company using
+POST `/api/agent-pool/hosted/slots` with company/pool identifiers and
+`slots: [{workerId, name}]`. Registration is idempotent and does not reset
+credentials or explicit revocations. A partial unique database index permits
+only one Hosted pool per company; additional Devbox pools remain independent.
+These are logical slots, not 99 running containers.
+
+POST worker activation includes `executionId`, `generation`, and a monotonically
+increasing `activationVersion`. A later activation rotates credentials; stale
+activations cannot overwrite it. PUT deactivates only the matching execution and
+generation, clearing the active credential without setting `revokedAt`.
+The broker disconnects without recording a revocation. DELETE remains explicit
+revocation and cannot be undone by slot registration or reactivation. Historical
+routine-revocation rows remain audit records; the new slot namespace does not
+reuse their IDs.
+
+A v2 provider catalog tags every row with `workspaceMode: "all_repositories"`
+and `readOnly`. AgentAcademy/main is fixed read-only and becomes `worker_shared`.
+Clippy ignores/removes old primary/reference selections and sends the whole
+catalog as `repositories: {mode: "all_repositories", repositories: [...]}`.
+Only workers advertising `hosted_workspace_v2` can receive it; v1 and Devbox
+behavior remain unchanged.
+
+The trusted parent prepares every checkout below a non-Git parent, restores
+verified daily Git bundles when available, then fetches every configured branch's
+latest ref before model execution. The model starts at that common parent.
+`worker_shared` guidance and same-named skills override all repository guidance;
+other read-only repositories are reference material, not instruction sources.
+Duplicate writable repository skills are repository-qualified.
+Read-only access is instruction policy, not OS isolation.
+
+The Hosted harness exposes one repository-selecting `publish_pull_request` tool.
+Each writable repository publishes/registers its own PR; the model has no remote
+write credential. Publication requires an admitted active run and current
+writable catalog entry. Retry/reconcile uses the same repository and local
+commit, including after local cleanup. WeWork is restricted to Odin's materializer.
 
 ## Connection and assignment
 
@@ -269,7 +321,7 @@ server-owned stop receipt bound to the run, company, worker process and result
 sequence. A result without `ready`, a lost process, an expired reconnect lease,
 or unacknowledged cancellation is not evidence of a stopped assignment.
 
-For Freelance pools, if no idle compatible worker is available, the broker fails the run with
+For Devbox pools, if no idle compatible worker is available, the broker fails the run with
 `agent_pool_worker_unavailable` and records bootstrap evidence that no assignment
 was dispatched. This remains a failed, explicitly retriable run, not an
 unknown-action reconciliation hold, even after repeated availability failures.
