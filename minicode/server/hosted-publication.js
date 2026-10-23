@@ -3,10 +3,11 @@ import { paperclipPublicationTool } from "./paperclip-publication.js"
 export function createHostedPublicationTool({ repositories, task, apiUrl, projectUrl, request }) {
   const tools = new Map()
   for (const repository of repositories.filter(repo => !repo.readOnly)) {
+    const alias = repository.alias ?? repository.name
     const identity = `${projectUrl.replace(/\/+$/, "")}/_git/${encodeURIComponent(repository.id)}`
-    tools.set(repository.name, paperclipPublicationTool({
+    tools.set(alias, paperclipPublicationTool({
       name: "publish_pull_request",
-      description: `Publish the requested local commit from ${repository.name} through the trusted Hosted harness.`,
+      description: `Publish the requested local commit from ${alias} through the trusted Hosted harness.`,
       parameters: { type: "object", properties: {
         commit: { type: "string" }, title: { type: "string" }, body: { type: "string" },
       }, required: ["commit", "title", "body"], additionalProperties: false },
@@ -32,7 +33,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, projec
     async execute(input, options) {
       const { repository, ...publication } = input ?? {}
       const tool = tools.get(repository)
-      if (!tool) throw new Error("Publication requires a writable repository name from the Hosted catalog")
+      if (!tool) throw new Error("Publication requires a writable repository alias from the Hosted catalog")
       return tool.execute(publication, options)
     },
   }

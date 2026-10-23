@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { createHostedPublicationTool } from "../server/hosted-publication.js"
 
-function fixture(t) {
+function fixture(t, aliases = false) {
   const agentId = "11111111-1111-4111-8111-111111111111"
   const companyId = "22222222-2222-4222-8222-222222222222"
   const issueId = "33333333-3333-4333-8333-333333333333"
@@ -12,6 +12,7 @@ function fixture(t) {
     { id: "55555555-5555-4555-8555-555555555555", name: "Second", readOnly: false },
     { id: "66666666-6666-4666-8666-666666666666", name: "Reference", readOnly: true },
   ]
+  if (aliases) for (const repository of repositories) repository.alias = repository.name.toLowerCase()
   const products = [], comments = [], publications = []
   let failRegistration = false
   t.mock.method(globalThis, "fetch", async (url, options) => {
@@ -64,6 +65,14 @@ function fixture(t) {
     failRegistration(value) { failRegistration = value },
   }
 }
+
+test("Hosted publication selects a writable folder alias while retaining the remote repository identity", async t => {
+  const f = fixture(t, true)
+  assert.deepEqual(f.tool.parameters.properties.repository.enum, ["first", "second"])
+  await f.tool.execute({ ...f.input, repository: "first" })
+  assert.equal(f.publications[0].repositoryId, "44444444-4444-4444-8444-444444444444")
+  await assert.rejects(f.tool.execute({ ...f.input, repository: "reference" }), /writable repository/)
+})
 
 test("Hosted publication registers separate repository PRs and reconciles only the selected saved receipt", async t => {
   const f = fixture(t)
