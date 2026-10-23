@@ -199,14 +199,19 @@ test("Hosted assignments persist busy before repository preparation and retire o
 
 for (const explicitRole of [true, false]) test(`Hosted all-repository assignments use supervisory guidance with explicit metadata=${explicitRole}`, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "hosted-catalog-test-"))
-  const shared = path.join(root, "worker_shared")
+  const shared = path.join(root, "supervisory-checkout")
   const writable = path.join(root, "Main")
   const reference = path.join(root, "Reference")
   for (const directory of [shared, writable, reference]) await fs.mkdir(directory)
   await fs.writeFile(path.join(shared, "AGENTS.md"), "Shared catalog guidance wins.")
   await fs.writeFile(path.join(root, "AGENTS.md"), "Conflicting workspace guidance loses.")
+  for (const directory of [shared, writable]) {
+    const skillDirectory = path.join(directory, ".agents", "skills", "review")
+    await fs.mkdir(skillDirectory, { recursive: true })
+    await fs.writeFile(path.join(skillDirectory, "SKILL.md"), directory === shared ? "Supervisory review" : "Subordinate review")
+  }
   const descriptors = [
-    { id: "shared", name: "AgentAcademy", branch: "main", readOnly: true, path: shared, ...(explicitRole ? { supervisory: true } : {}) },
+    { id: "shared", name: "AgentAcademy", branch: "dev", readOnly: true, path: shared, ...(explicitRole ? { supervisory: true } : {}) },
     { id: "main", name: "Main", branch: "main", readOnly: false, path: writable },
     { id: "ref", name: "Reference", branch: "main", readOnly: true, path: reference },
   ]
@@ -221,6 +226,19 @@ for (const explicitRole of [true, false]) test(`Hosted all-repository assignment
       assert.match(this.options.instructions, /there is no primary repository/)
       assert.match(this.options.instructions, /worker_shared guidance and same-named skills override every repository/)
       assert.match(this.options.instructions, /repository marked supervisory: true in workspace.json/)
+      const lines = this.options.instructions.split("\n")
+      const readOnlyIndex = lines.findIndex(line => line.startsWith("Read-only repositories, including worker_shared"))
+      assert.equal(lines[readOnlyIndex + 1], "Workspace layout (from the trusted AgentPool/worker repository handshake):")
+      assert.ok(lines.includes(`Workspace root (not a Git repository): ${root}`))
+      assert.ok(lines.includes(`Repository manifest: ${path.join(root, "workspace.json")}`))
+      assert.ok(lines.includes(`AgentAcademy: ${shared} (read-only, supervisory / worker_shared)`))
+      assert.ok(lines.includes(`Main: ${writable} (writable)`))
+      assert.ok(lines.includes(`Reference: ${reference} (read-only)`))
+      assert.ok(this.options.instructions.includes(`Load supervisory instructions first from ${path.join(shared, "AGENTS.md")}`))
+      assert.ok(this.options.instructions.includes(`Load applicable skills from ${path.join(shared, ".agents", "skills", "<name>", "SKILL.md")} first`))
+      assert.ok(this.options.instructions.includes(`review [worker_shared]: ${path.join(shared, ".agents", "skills", "review", "SKILL.md")}`))
+      assert.ok(!this.options.instructions.includes(`review [repository:Main]: ${path.join(writable, ".agents", "skills", "review", "SKILL.md")}`))
+      assert.equal(this.options.env.WORKER_SHARED, shared)
       assert.ok(this.options.instructions.indexOf("Shared catalog guidance wins.")
         < this.options.instructions.indexOf("Conflicting workspace guidance loses."))
       assert.deepEqual(JSON.parse(this.options.env.WORKER_REFERENCE_REPOS_JSON), [descriptors[2]])
@@ -245,7 +263,34 @@ for (const explicitRole of [true, false]) test(`Hosted all-repository assignment
   await executeTask(peer, { runId: "catalog", agent, skills: bundle.skills, authToken: "run-credential",
     repositories: { mode: "all_repositories", repositories: descriptors } })
   assert.equal(sessions, 1)
+  const startup = peer.messages.filter(message => message.runId === "catalog" && message.type === "log").map(message => message.data)
+  const layoutIndex = startup.findIndex(message => message.includes("Workspace layout (from the trusted AgentPool/worker repository handshake)"))
+  assert.ok(startup[layoutIndex - 1].includes(`Read-only reference (instruction policy): Reference = ${reference}`))
+  assert.ok(startup.some(message => message.includes(`Loaded read-only shared instructions from AGENTS.md: ${path.join(shared, "AGENTS.md")}`)))
   await assert.rejects(fs.stat(path.join(root, ".git")), { code: "ENOENT" })
+})
+
+test("Hosted logs handshake layout and the missing supervisory instruction path before failing without a model", async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "hosted-missing-guidance-test-"))
+  const shared = path.join(root, "academy")
+  await fs.mkdir(shared)
+  const descriptors = [{ id: "shared", name: "AgentAcademy", branch: "dev", readOnly: true, supervisory: true, path: shared }]
+  let sessions = 0
+  const fixture = await harness(t, () => { sessions++; throw new Error("Model must not start") }, {
+    cwd: root, workspaceMode: "worktree", hostedWorkspaceMode: "all_repositories",
+    prepareHostedRepositories: async () => ({ mode: "all_repositories", cwd: root, workerShared: shared, repositories: descriptors }),
+  })
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const peer = await fixture.welcome(0)
+  const result = await executeTask(peer, { runId: "missing-guidance", agent,
+    repositories: { mode: "all_repositories", repositories: descriptors } }, 1)
+  assert.equal(result.error, `The supervisory repository must provide AGENTS.md: ${path.join(shared, "AGENTS.md")}`)
+  assert.equal(sessions, 0)
+  const layout = peer.messages.find(message => message.runId === "missing-guidance" && message.data?.includes("Workspace layout"))
+  assert.ok(layout.data.includes(`AgentAcademy: ${shared} (read-only, supervisory / worker_shared)`))
+  assert.ok(layout.data.includes(path.join(shared, "AGENTS.md")))
+  assert.ok(layout.data.includes(path.join(shared, ".agents", "skills", "<name>", "SKILL.md")))
+  assert.ok(layout.seq < result.seq)
 })
 
 for (const count of [0, 2]) test(`Hosted rejects ${count} explicitly supervisory repositories before model execution`, async t => {

@@ -42,7 +42,7 @@ export async function readWorkerGuidance({ workspace, workerShared, bundle, repo
   }
   const sharedInstructions = await readInstructions(workerShared)
   if (supervisory.length && sharedInstructions === null) {
-    throw new Error("The supervisory repository must provide AGENTS.md")
+    throw new Error(`The supervisory repository must provide AGENTS.md: ${path.join(workerShared, "AGENTS.md")}`)
   }
   const sharedSkills = await discoverSkills(workerShared, "worker_shared")
   const [workspaceInstructions, workspaceSkills] = await Promise.all([

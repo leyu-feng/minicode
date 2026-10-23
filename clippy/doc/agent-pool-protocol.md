@@ -157,13 +157,14 @@ routine-revocation rows remain audit records; the new slot namespace does not
 reuse their IDs.
 
 A v2 provider catalog tags every row with `workspaceMode: "all_repositories"`
-and `readOnly`. AgentAcademy/main is fixed read-only and becomes `worker_shared`.
+and `readOnly`. AgentAcademy/dev is fixed read-only and becomes `worker_shared`.
 Clippy ignores/removes old primary/reference selections and sends the whole
 catalog as `repositories: {mode: "all_repositories", repositories: [...]}`.
 Only workers advertising `hosted_workspace_v2` can receive it; v1 and Devbox
 behavior remain unchanged.
 
-The trusted parent prepares every checkout below a non-Git parent, restores
+The trusted parent prepares every checkout directly below the non-Git `/ws/repos`
+parent, with `workspace.json` at that root and Academy at `/ws/repos/academy`, restores
 verified daily Git bundles when available, then fetches every configured branch's
 latest ref before model execution. The model starts at that common parent.
 `worker_shared` guidance and same-named skills override all repository guidance;
