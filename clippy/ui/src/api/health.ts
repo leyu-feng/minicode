@@ -49,6 +49,8 @@ export type HealthStatus = {
    * settings-visibility registry). Absent when nothing is hidden.
    */
   hiddenSettings?: string[];
+  /** Public deployment-wide display label; not an access-control policy. */
+  classificationLabel?: string;
 };
 
 export const healthApi = {

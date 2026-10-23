@@ -43,6 +43,17 @@ reload; global sidebar collapse is disabled. Streamlined starred projects sort
 alphabetically. Recents are browser-local by user/company; stars and supported
 ordering are saved server-side. Local-trusted mode does not prove two-user isolation.
 
+A deployment can set `PAPERCLIP_CLASSIFICATION_LABEL` to show a right-aligned
+Shield Lock label in the existing title bar, on a theme-aware gray background
+with an amber icon. Check Tasks, Projects, task-detail and mobile headers in
+both layouts; the notice sits between the title and right-side actions, keeping
+Show/Hide properties at the far right. Titles and controls must remain usable without adding a
+separate top strip. Unset or blank values leave no notice or reserved space.
+This public notice is visual only, not authorization.
+[Label tests](../../ui/src/components/DeploymentClassificationLabel.test.tsx)
+cover configuration and updates; [health tests](../../server/src/__tests__/health.test.ts)
+cover the deployment metadata.
+
 ### `profile-announcements`
 
 Automated: [profile page](../../ui/src/pages/ProfileSettings.test.tsx), [announcement hook](../../ui/src/hooks/useAnnouncement.test.tsx), and [announcement routes](../../server/src/__tests__/announcements-routes.test.ts) cover separate UI/persistence layers.

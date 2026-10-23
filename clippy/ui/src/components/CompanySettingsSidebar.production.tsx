@@ -14,7 +14,7 @@ import {
   SlidersHorizontal,
   Upload,
   UserRoundPen,
-  UserRoundGroup,
+  TicTacToe,
   Users,
 } from "lucide-react";
 import type { PluginRecord } from "@paperclipai/shared";
@@ -122,7 +122,7 @@ export function CompanySettingsSidebar() {
               end
             />
           )}
-          <SidebarNavItem to="/company/settings/agent-pools" label="Agent Pools" icon={UserRoundGroup} end />
+          <SidebarNavItem to="/company/settings/agent-pools" label="Agent Pools" icon={TicTacToe} end />
           {companySettingsPluginSlots
             .filter((slot) => slot.routePath)
             .map((slot) => (

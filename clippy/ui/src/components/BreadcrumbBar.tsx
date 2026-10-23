@@ -17,6 +17,7 @@ import { Fragment, useMemo, type ReactNode } from "react";
 import { PluginSlotOutlet, usePluginSlots } from "@/plugins/slots";
 import { PluginLauncherOutlet, usePluginLaunchers } from "@/plugins/launchers";
 import { cn } from "../lib/utils";
+import { DeploymentClassificationLabel } from "./DeploymentClassificationLabel";
 
 type GlobalToolbarContext = { companyId: string | null; companyPrefix: string | null };
 
@@ -41,6 +42,7 @@ function GlobalToolbar({
   const { launchers } = usePluginLaunchers({ placementZones: ["globalToolbarButton"], companyId: context.companyId, enabled: !!context.companyId });
   return (
     <div className="ml-auto flex shrink-0 items-center gap-1 pl-2 empty:hidden">
+      <DeploymentClassificationLabel />
       {pageToolbar}
       {slots.length > 0 ? (
         <PluginSlotOutlet slotTypes={["globalToolbarButton"]} context={context} className="flex items-center gap-1" />
@@ -84,6 +86,7 @@ export function BreadcrumbBar({ taskDetailLayout = false }: { taskDetailLayout?:
     return (
       <div className="h-(--sz-60px) shrink-0 flex items-center border-b border-border px-2">
         {mobileToolbar}
+        <DeploymentClassificationLabel />
       </div>
     );
   }

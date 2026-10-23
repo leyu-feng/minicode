@@ -3,10 +3,21 @@
 import { act, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BreadcrumbProvider, useBreadcrumbs } from "../context/BreadcrumbContext";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { BreadcrumbProvider as BreadcrumbContextProvider, useBreadcrumbs } from "../context/BreadcrumbContext";
+import { queryKeys } from "../lib/queryKeys";
 import { BreadcrumbBar } from "./BreadcrumbBar";
 
 const viewport = vi.hoisted(() => ({ isMobile: false }));
+const healthClient = new QueryClient();
+
+function BreadcrumbProvider({ children }: { children: ReactNode }) {
+  return (
+    <QueryClientProvider client={healthClient}>
+      <BreadcrumbContextProvider>{children}</BreadcrumbContextProvider>
+    </QueryClientProvider>
+  );
+}
 
 vi.mock("@/lib/router", () => ({
   Link: ({ children, className, to }: { children: ReactNode; className?: string; to: string }) => (
@@ -111,6 +122,73 @@ describe("BreadcrumbBar", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    healthClient.clear();
+  });
+
+  it.each([
+    { title: "Tasks", isMobile: false },
+    { title: "Projects", isMobile: false },
+    { title: "Tasks", isMobile: true },
+  ])("shares the $title title row with the configured classification (mobile=$isMobile)", async ({ title, isMobile }) => {
+    viewport.isMobile = isMobile;
+    healthClient.setQueryData(queryKeys.health, { status: "ok", classificationLabel: "Highly Confidential\\Contoso FTE" });
+    function PageHeader() {
+      const { setBreadcrumbs } = useBreadcrumbs();
+      useEffect(() => setBreadcrumbs([{ label: title }]), [setBreadcrumbs]);
+      return <BreadcrumbBar />;
+    }
+    await act(async () => root.render(<BreadcrumbProvider><PageHeader /></BreadcrumbProvider>));
+    const heading = container.querySelector("h1");
+    const classification = container.querySelector('[role="note"]');
+    expect(heading?.textContent).toBe(title);
+    expect(classification?.textContent).toBe("Highly Confidential\\Contoso FTE");
+    expect(heading?.closest(".h-\\(--sz-60px\\)")).toBe(classification?.closest(".h-\\(--sz-60px\\)"));
+  });
+
+  it("keeps the classification alongside a custom mobile toolbar", async () => {
+    viewport.isMobile = true;
+    healthClient.setQueryData(queryKeys.health, { status: "ok", classificationLabel: "Internal" });
+    function MobileHeader() {
+      const { setMobileToolbar } = useBreadcrumbs();
+      useEffect(() => {
+        setMobileToolbar(<button type="button">Back to inbox</button>);
+        return () => setMobileToolbar(null);
+      }, [setMobileToolbar]);
+      return <BreadcrumbBar />;
+    }
+    await act(async () => root.render(<BreadcrumbProvider><MobileHeader /></BreadcrumbProvider>));
+    expect(container.querySelector("button")?.textContent).toBe("Back to inbox");
+    expect(container.querySelector('[role="note"]')?.textContent).toBe("Internal");
+    expect(container.querySelector("button")?.parentElement).toBe(container.querySelector('[role="note"]')?.parentElement);
+  });
+
+  it.each([false, true])("keeps classification before toolbar actions and the rightmost properties control (open=%s)", async (open) => {
+    healthClient.setQueryData(queryKeys.health, { status: "ok", classificationLabel: "Internal" });
+    const onToggle = vi.fn();
+    await act(async () => {
+      root.render(
+        <BreadcrumbProvider>
+          <TaskBreadcrumbs taskDetailLayout onOpen={vi.fn()} panelControl={{ open, onToggle }} />
+        </BreadcrumbProvider>,
+      );
+    });
+
+    const title = container.querySelector('[data-slot="breadcrumb-page"]');
+    const classification = container.querySelector('[role="note"]');
+    const toolbarAction = container.querySelector('button[aria-label="Show task side panel"]');
+    const properties = container.querySelector<HTMLButtonElement>(
+      `button[aria-label="${open ? "Hide properties" : "Show properties"}"]`,
+    );
+    expect(title).not.toBeNull();
+    expect(classification).not.toBeNull();
+    expect(toolbarAction).not.toBeNull();
+    expect(properties).not.toBeNull();
+    expect(title!.compareDocumentPosition(classification!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(classification!.compareDocumentPosition(toolbarAction!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(toolbarAction!.compareDocumentPosition(properties!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(properties?.parentElement?.lastElementChild).toBe(properties);
+    act(() => properties?.click());
+    expect(onToggle).toHaveBeenCalledOnce();
   });
 
   it("keeps a single task breadcrumb compact with adjacent identity and settings action", async () => {

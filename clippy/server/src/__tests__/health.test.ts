@@ -116,6 +116,44 @@ describe("GET /health", () => {
     });
   });
 
+  it.each([undefined, "", " \t "])("omits an unset or blank classification label (%s)", async (label) => {
+    const app = createApp(undefined, testServerInfo, undefined, {
+      PAPERCLIP_CLASSIFICATION_LABEL: label,
+    });
+    const res = await request(app).get("/health");
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty("classificationLabel");
+  });
+
+  it.each(["local_trusted", "authenticated"] as const)(
+    "publishes the trimmed classification label in %s health",
+    async (deploymentMode) => {
+      const app = express();
+      app.use("/health", healthRoutes(undefined, {
+        deploymentMode,
+        authReady: true,
+        runtimeEnv: { PAPERCLIP_CLASSIFICATION_LABEL: "  Highly Confidential\\Contoso FTE  " },
+      }));
+      const res = await request(app).get("/health");
+      expect(res.status).toBe(200);
+      expect(res.body.classificationLabel).toBe("Highly Confidential\\Contoso FTE");
+      if (deploymentMode === "authenticated") expect(res.body).not.toHaveProperty("serverInfo");
+    },
+  );
+
+  it("includes the classification label during warm standby without probing the database", async () => {
+    const db = createHealthyDb();
+    const app = express();
+    app.use("/health", healthRoutes(db, {
+      isWarmStandby: () => true,
+      runtimeEnv: { PAPERCLIP_CLASSIFICATION_LABEL: "Highly Confidential\\Contoso FTE" },
+    }));
+    const res = await request(app).get("/health");
+    expect(res.status).toBe(200);
+    expect(res.body.classificationLabel).toBe("Highly Confidential\\Contoso FTE");
+    expect(db.execute).not.toHaveBeenCalled();
+  });
+
   it("lists operator-hidden settings and drops unknown keys", async () => {
     const app = createApp(undefined, testServerInfo, undefined, {
       PAPERCLIP_HIDDEN_SETTINGS: "instance.plugins,instance.adapters,instance.bogus",

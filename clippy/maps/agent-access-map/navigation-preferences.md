@@ -24,6 +24,13 @@ Agent access: `partial` — Resource APIs plus user-specific stars; browser-loca
 Policy: Persisted user preferences require board user context; resource reads still
 apply company visibility.
 
+`PAPERCLIP_CLASSIFICATION_LABEL` is operator-configured display metadata exposed
+by `GET /api/health`, including anonymous/redacted responses. The shared
+title-bar label creates no company mutation, permission, or authorization enforcement.
+Keep secrets out of the label. [Health tests](../../server/src/__tests__/health.test.ts)
+cover this public field; [label tests](../../ui/src/components/DeploymentClassificationLabel.test.tsx)
+cover its display and shared-health updates.
+
 Evidence: `source-only` —
 [implementation](../../server/src/routes/sidebar-preferences.ts#L8) at the reviewed
 commit above.
