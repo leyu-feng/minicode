@@ -21,7 +21,8 @@ export function agentPoolPairingRoutes(db: Db) {
     const grant = await authenticateHostedWorkerProvider(req.headers.authorization);
     const input = hostedAgentPoolWorkerSchema.parse(req.body);
     const result = await svc.pairHostedWorker(input, grant);
-    if (result.created) await logActivity(db, {
+    if (result.reactivated) agentPoolBroker.reactivate(result.workerId);
+    if (result.created || result.reactivated) await logActivity(db, {
       companyId: input.companyId, actorType: "system", actorId: grant.clientId,
       action: "agent_pool.hosted_worker_paired", entityType: "agent_pool_worker", entityId: result.workerId,
       details: { providerPoolId: input.poolId },

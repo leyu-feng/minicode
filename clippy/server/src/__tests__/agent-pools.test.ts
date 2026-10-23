@@ -55,6 +55,7 @@ const execFileAsync = promisify(execFile);
       create: vi.fn(async () => poolId), delete: vi.fn(async () => {}),
       status: vi.fn(async () => ({ activeWorkers: 1, provisioningWorkers: 1, isMock: true })),
       repositories: vi.fn(async () => repos), report: vi.fn(async () => {}),
+      claim: vi.fn(async () => {}),
     };
     vi.spyOn(hostedWorkers, "hostedWorkerClient").mockReturnValue(client);
     return { config, client, poolId };
@@ -153,6 +154,29 @@ const execFileAsync = promisify(execFile);
     await svc.revokeHostedWorker(input, grant);
     expect(await svc.authenticate(input.workerId, input.clientToken)).toBeNull();
     await expect(svc.pairHostedWorker(input, grant)).rejects.toThrow("revoked");
+  });
+
+  it("reuses a revoked shared slot with rotated credentials and fences late revocation by generation", async () => {
+    const provider = hostedProvider();
+    const svc = agentPoolService(db);
+    const pool = await svc.create(companyId, "managed-shared");
+    await svc.update(companyId, pool.id, { type: "hosted", clearPairings: true, config: provider.config });
+    const grant = { ...provider.config, clientId: randomUUID(), principalId: randomUUID() };
+    const input = {
+      companyId, poolId: provider.poolId, poolName: pool.name, workerId: randomUUID(),
+      executionId: randomUUID(), generation: randomUUID(), clientToken: "a".repeat(64),
+    };
+    await svc.pairHostedWorker(input, grant);
+    expect(await svc.authenticate(input.workerId, input.clientToken)).toMatchObject({ executionId: input.executionId });
+    const replacement = { ...input, executionId: randomUUID(), generation: randomUUID(), clientToken: "b".repeat(64) };
+    await expect(svc.pairHostedWorker(replacement, grant)).rejects.toThrow("another credential");
+    await svc.revokeHostedWorker(input, grant);
+    await expect(svc.pairHostedWorker(replacement, grant)).resolves.toMatchObject({ created: false, reactivated: true });
+    expect(await svc.authenticate(input.workerId, input.clientToken)).toBeNull();
+    expect(await svc.authenticate(input.workerId, replacement.clientToken)).toMatchObject({ executionId: replacement.executionId });
+    await expect(svc.revokeHostedWorker(input, grant)).resolves.toMatchObject({ revoked: false });
+    expect(await svc.authenticate(input.workerId, replacement.clientToken)).not.toBeNull();
+    expect(await svc.workers(companyId, pool.id)).toHaveLength(1);
   });
 
   it.each(["cancellation", "timeout", "stalled-report"])("does not dispatch mock capacity and bounds waiting after %s", async (kind) => {

@@ -37,6 +37,17 @@ container workflow before enabling Hosted jobs; building it does not publish or
 deploy anything. Hosted workers use 1/2 GiB minimum/target free-space thresholds,
 instead of the regular worker's 24/36 GiB defaults.
 
+With a shared-fleet bootstrap, one parent maintains up to 32 unique pool
+connections. Provider admission and broker execution grouping prevent concurrent
+assignments on one physical container. The winning assignment detaches the other
+bindings; the provider owns idle capacity targets and organization concurrency limits.
+Stable worker slot IDs rotate credentials by generation when reused.
+
+Completion waits for the broker's retirement receipt before asking the provider parent to
+fetch/reset/clean all owned repositories and remove old task state. No replacement
+binding becomes ready until that cleanup succeeds. A cleanup failure stops the
+container. This cleanup is not an OS sandbox.
+
 ## Run the terminal agent
 
 ```cmd
@@ -380,20 +391,20 @@ Attach additional existing Git clones or worktrees with the repeatable worker op
 
 ```powershell
 node .\minicode\cli.js worker `
-  --server https://clippy.example.net `
+  --server https://paperclip.example.com `
   --worker-id <worker-id> `
-  --repo-root "main@D:\Code\workspace\your-repo\main" `
+  --repo-root "main@D:\Code\your-repo" `
   --worker-name w1 `
-  --worker-shared D:\Code\workspace\your-repo\worker_shared `
-  --reference-repo "main@reference-one=D:\Code\workspace\reference-one\main" `
-  --reference-repo "main@reference-two=D:\Code\workspace\reference-two\main" `
+  --worker-shared D:\Code\worker_shared `
+  --reference-repo "main@reference=D:\Code\reference-repo" `
+  --reference-repo "main@services=D:\Code\services" `
   --entra-user <upn>
 ```
 
 Names must be unique (case-insensitive), start with a letter, and contain only
 letters, digits, underscores, or hyphens (up to 64 characters). `primary` and
 `all_references` are reserved. Branch names may contain slashes, for example
-`"feature/example@tools=D:\Code\workspace\tools"`. Relative paths resolve
+`"feature/example@your-repo=D:\Code\your-repo"`. Relative paths resolve
 from the worker process's current directory; quote the entire `branch@name=path` when it
 contains spaces. Each path must be a Git checkout root with a committed HEAD, not a
 bare repository or subdirectory. Canonical paths must not overlap the source

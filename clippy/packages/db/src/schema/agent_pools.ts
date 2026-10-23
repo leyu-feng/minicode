@@ -21,6 +21,8 @@ export const agentPoolWorkers = pgTable("agent_pool_workers", {
   pairingTokenHash: text("pairing_token_hash"),
   pairingExpiresAt: timestamp("pairing_expires_at", { withTimezone: true }),
   clientTokenHash: text("client_token_hash"),
+  hostedExecutionId: uuid("hosted_execution_id"),
+  hostedGeneration: uuid("hosted_generation"),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({

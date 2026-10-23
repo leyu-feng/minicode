@@ -25,7 +25,7 @@ const eventSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
-interface WorkerIdentity { id: string; companyId: string; poolName: string }
+interface WorkerIdentity { id: string; companyId: string; poolName: string; executionId?: string | null }
 interface Run {
   id: string;
   seq: number;
@@ -82,6 +82,7 @@ export class AgentPoolBroker {
     return [...this.peers.values()].some((peer) => peer.identity.companyId === ctx.agent.companyId
       && peer.identity.poolName === (ctx.config.name ?? "default") && peer.ready && !peer.run
       && peer.socket?.readyState === WebSocket.OPEN
+      && this.executionAvailable(peer, ctx.runId)
       && this.requiredCapabilities(ctx).every((capability) => peer.capabilities.includes(capability)));
   }
 
@@ -89,11 +90,22 @@ export class AgentPoolBroker {
     const peer = [...this.peers.values()].find((candidate) => candidate.identity.companyId === ctx.agent.companyId
       && candidate.identity.poolName === (ctx.config.name ?? "default") && candidate.ready && !candidate.run
       && candidate.socket?.readyState === WebSocket.OPEN
+      && this.executionAvailable(candidate, ctx.runId)
       && this.requiredCapabilities(ctx).every((capability) => candidate.capabilities.includes(capability)));
     if (!peer) return false;
     peer.ready = false;
     peer.reservedRunId = ctx.runId;
     return true;
+  }
+
+  reservedWorker(runId: string) {
+    return [...this.peers.values()].find(peer => peer.reservedRunId === runId)?.identity;
+  }
+
+  private executionAvailable(peer: Peer, runId: string) {
+    return !peer.identity.executionId || ![...this.peers.values()].some(other =>
+      other.identity.executionId === peer.identity.executionId
+      && ((other.run && other.run.id !== runId) || (other.reservedRunId && other.reservedRunId !== runId)));
   }
 
   private releaseReservation(runId: string) {
@@ -124,6 +136,11 @@ export class AgentPoolBroker {
   revoke(workerId: string, message = "AgentPool worker was revoked") {
     this.revokedWorkers.add(workerId);
     this.disconnect(workerId, message);
+  }
+
+  reactivate(workerId: string) {
+    this.disconnect(workerId, "Hosted worker slot was reassigned to a new credential generation");
+    this.revokedWorkers.delete(workerId);
   }
 
   private disconnect(workerId: string, message: string) {
@@ -303,9 +320,10 @@ export class AgentPoolBroker {
     const available = [...this.peers.values()].filter((candidate) =>
       candidate.identity.companyId === ctx.agent.companyId && candidate.identity.poolName === name
       && (candidate.ready || candidate.reservedRunId === ctx.runId) && !candidate.run && candidate.socket?.readyState === WebSocket.OPEN);
-    if (!available.length) return unavailable(`AgentPool '${name}' has no available connected worker; connect a worker and retry`);
+    const eligible = available.filter(candidate => this.executionAvailable(candidate, ctx.runId));
+    if (!eligible.length) return unavailable(`AgentPool '${name}' has no available connected worker; connect a worker and retry`);
     const required = this.requiredCapabilities(ctx);
-    const peer = available.find(candidate => required.every(capability => candidate.capabilities.includes(capability)));
+    const peer = eligible.find(candidate => required.every(capability => candidate.capabilities.includes(capability)));
     if (!peer) return unavailable(`AgentPool '${name}' has no available worker supporting ${required.join(", ")}; upgrade or connect a compatible worker and retry`);
     const { paperclipAgentInstructions: _instructions, paperclipHostedRepositories: repositories, ...context } = ctx.context;
     const task = JSON.stringify(agentPoolTaskSchema.parse({
