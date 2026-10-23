@@ -13,6 +13,28 @@ Current implementation status:
 
 - canonical model: `local_trusted` and `authenticated` (with `private/public` exposure)
 
+## Deployment classification label
+
+Set `PAPERCLIP_CLASSIFICATION_LABEL` on the server deployment to display a
+right-aligned Shield Lock label in the existing page title bar:
+
+```powershell
+$env:PAPERCLIP_CLASSIFICATION_LABEL = 'Highly Confidential\Contoso FTE'
+```
+
+The text is read at runtime through `/api/health`, so the same UI image works
+across deployments. Restart the server after changing its environment. Unset
+or whitespace-only values hide the label without reserving any space.
+
+The label shares the title bar with Tasks, Projects, and other page titles in
+both UI layouts, before toolbar actions and the right-aligned Show/Hide properties
+control, without adding another strip. It follows the header's existing
+scrolling and overlay behavior. A gray theme-aware background and amber icon
+keep it distinct in light/dark themes. Long labels use at most two lines, with
+the complete text available on hover. Its label is public display metadata, including on
+anonymous health responses; never put secrets in it. It is a visual notice,
+not an access-control or data-classification enforcement mechanism.
+
 ## Prerequisites
 
 - Node.js 24.11+

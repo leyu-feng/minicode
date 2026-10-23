@@ -92,6 +92,8 @@
 
 :root {
   color-scheme: light;
+  --classification-icon: var(--status-task-icon-todo);
+  --sz-classification-label-max-width: min(24rem,45vw);
   --file-tree-indent-base: calc(var(--spacing) * 2);
   --file-tree-indent-step: calc(var(--spacing) * 6);
   --file-tree-indent-max: 40%;

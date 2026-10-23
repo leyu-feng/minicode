@@ -13,6 +13,7 @@ import {
   Gem,
   Moon,
   MousePointer2,
+  TicTacToe,
   Sparkles,
   Terminal,
   Cpu,
@@ -164,7 +165,7 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
   agent_pool: {
     label: "AgentPool",
     description: "Paired Minicode workers in a named pool",
-    icon: Cpu,
+    icon: TicTacToe,
     recommended: true,
   },
 };

@@ -237,6 +237,7 @@ export function healthRoutes(
       opts.deploymentMode,
     );
     const runtimeEnv = opts.runtimeEnv ?? process.env;
+    const classificationLabel = runtimeEnv.PAPERCLIP_CLASSIFICATION_LABEL?.trim();
     const startupRecovery = getStartupRecoveryState();
     const healthStatus =
       startupRecovery.phase === "ready" ? "ok" : "starting";
@@ -282,6 +283,7 @@ export function healthRoutes(
               serverInfo,
               ...(cloud ? { cloud } : {}),
               ...(hiddenSettings.length ? { hiddenSettings } : {}),
+              ...(classificationLabel ? { classificationLabel } : {}),
             }
           : {
               status: healthStatus,
@@ -289,6 +291,7 @@ export function healthRoutes(
               commit,
               ...(cloud ? { cloud } : {}),
               ...(hiddenSettings.length ? { hiddenSettings } : {}),
+              ...(classificationLabel ? { classificationLabel } : {}),
             },
       );
       return;
@@ -307,6 +310,7 @@ export function healthRoutes(
         warmStandby: true,
         ...(cloud ? { cloud } : {}),
         ...(hiddenSettings.length ? { hiddenSettings } : {}),
+        ...(classificationLabel ? { classificationLabel } : {}),
       });
       return;
     }
@@ -330,6 +334,7 @@ export function healthRoutes(
         ...(exposeFullDetails ? { serverInfo } : {}),
         ...(workspace ? { workspace } : {}),
         ...(cloud ? { cloud } : {}),
+        ...(classificationLabel ? { classificationLabel } : {}),
       });
       return;
     }
@@ -423,6 +428,7 @@ export function healthRoutes(
         ...(workspaceReadiness ? { workspace: workspaceReadiness } : {}),
         ...(cloud ? { cloud } : {}),
         ...(hiddenSettings.length ? { hiddenSettings } : {}),
+        ...(classificationLabel ? { classificationLabel } : {}),
       });
       return;
     }
@@ -450,6 +456,7 @@ export function healthRoutes(
       ...(workspaceReadiness ? { workspace: workspaceReadiness } : {}),
       ...(cloud ? { cloud } : {}),
       ...(hiddenSettings.length ? { hiddenSettings } : {}),
+      ...(classificationLabel ? { classificationLabel } : {}),
     });
   });
 
