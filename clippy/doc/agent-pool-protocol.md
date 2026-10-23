@@ -159,7 +159,8 @@ catalog as `repositories: {mode: "all_repositories", repositories: [...]}`.
 Only workers advertising `hosted_workspace_v2` can receive it; v1 and Devbox
 behavior remain unchanged.
 
-The trusted parent prepares every checkout below a non-Git parent, restores
+The trusted parent prepares every checkout directly below the non-Git `/ws/repos`
+parent, with `workspace.json` at that root and provider-configured checkout paths, restores
 verified daily Git bundles when available, then fetches every configured branch's
 latest ref before model execution. The model starts at that common parent.
 `worker_shared` guidance and same-named skills override all repository guidance;

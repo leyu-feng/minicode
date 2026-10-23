@@ -48,13 +48,14 @@ Routine recycling deactivates connections; it does not revoke registrations.
 
 The `hosted_workspace_v2` capability receives an `all_repositories` descriptor
 instead of primary/reference selections. The parent prepares all repositories
-below a non-Git root and fetches every configured branch's latest ref before
+directly below the non-Git `/ws/repos` root and fetches every configured branch's latest ref before
 model execution. Assignments start at that root. Writable checkouts can be edited
 and committed independently; `publish_pull_request` selects a repository and
 registers each PR with Paperclip. Read-only checkouts are reference material.
-shared-guidance/main is always `worker_shared` and marked `"supervisory": true` in
-the workspace manifest and trusted assignment descriptors. Exactly one read-only
-supervisory checkout is required when supervisory metadata is supplied. Legacy
+The provider selects a supervisory repository by marking it `"supervisory": true`
+in the catalog, workspace manifest and trusted assignment descriptors. Its name,
+branch and checkout path are configurable; its resolved checkout becomes `worker_shared`.
+Exactly one read-only supervisory repository is required in a v2 catalog. Legacy
 descriptors retain configured `worker_shared` precedence during rolling upgrades.
 The explicitly supervisory checkout's `AGENTS.md` must exist and is loaded before
 other repository guidance; its instructions and same-named skills override every
@@ -62,6 +63,16 @@ other repository, while remaining subordinate to built-in worker rules and manag
 agent-specific instructions. Other reference skills are not loaded;
 duplicate writable repository skills are qualified as `Repository/skill`.
 Read-only behavior is instruction policy, not OS isolation.
+
+Immediately after the read-only repository rules, the worker supplies a workspace
+layout derived from the trusted AgentPool/parent repository handshake: the
+non-Git root, `workspace.json`, every checkout's actual path and access mode,
+and the supervisory checkout's `AGENTS.md` and `.agents/skills/<name>/SKILL.md`
+paths. Agents use those paths and the resolved skill catalog, not a guessed
+`worker_shared` folder. The same layout is logged immediately after the read-only
+checkout listing, before guidance loading. A missing required supervisory
+`AGENTS.md` still stops the run before the model starts, with its expected path
+in the error; the layout does not replace missing repository content.
 
 The provider may package Git bundles on its configured schedule. Workers verify the bundle hash
 and still fetch latest before each assignment. Missing first-run manifests use

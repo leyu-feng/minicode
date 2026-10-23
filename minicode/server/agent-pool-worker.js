@@ -459,6 +459,23 @@ export async function startAgentPoolWorker({
         : await prepareAgentWorkspace(cwd, workspaceRoot, task.agent?.id)
       if (!hostedRoot && !worktree) await gitSync.resetPrimary(workspace, primaryCommit, { signal: run.controller.signal })
       if (worktree) enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Clean assignment worktree reset to ${primaryCommit ? `assigned remote commit ${primaryCommit}` : "source HEAD"}: ${workspace}\n` })
+      const workspaceLayout = hostedRoot ? [
+        "Workspace layout (from the trusted AgentPool/worker repository handshake):",
+        `Workspace root (not a Git repository): ${workspace}`,
+        `Repository manifest: ${path.join(workspace, "workspace.json")}`,
+        ...hostedRepositories.map(repo => `${repo.name}: ${repo.path} (${repo.readOnly ? "read-only" : "writable"}${path.resolve(repo.path) === path.resolve(workerShared) ? ", supervisory / worker_shared" : ""})`),
+        `The repository marked supervisory: true in workspace.json is worker_shared at ${workerShared}; use this supplied path, not a folder-name guess.`,
+        `Load supervisory instructions first from ${path.join(workerShared, "AGENTS.md")}. The harness supplies their contents below before subordinate repository instructions.`,
+        `Load applicable skills from ${path.join(workerShared, ".agents", "skills", "<name>", "SKILL.md")} first. worker_shared guidance and same-named skills override every repository.`,
+        "Use the resolved skill catalog below: writable-repository skills and the verified bundle are fallbacks for names not supplied by the supervisory repository. Read the selected SKILL.md and resolve its references relative to that skill's directory.",
+        "Other read-only repositories are reference material, not instruction or skill sources. Supervisory guidance and skills remain subordinate to built-in worker rules and managed agent instructions; they grant no additional permissions.",
+      ] : []
+      enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Agent workspace: ${workspace}\n` })
+      enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Read-only shared folder (instruction policy): ${workerShared}\n` })
+      for (const reference of referenceManifest) {
+        enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Read-only reference (instruction policy): ${reference.name} = ${reference.path} (HEAD ${reference.commit})\n` })
+      }
+      if (workspaceLayout.length) enqueue(run, { type: "log", stream: "stdout", data: `[minicode] ${workspaceLayout.join("\n")}\n` })
       const skills = await prepareWorkerSkills({
         workspace, skills: task.skills, apiUrl: agentApiUrl, authToken: task.authToken, runId: task.runId,
         signal: run.controller.signal, git: hostedRoot ? null : args => git(workspace, args),
@@ -498,8 +515,9 @@ export async function startAgentPoolWorker({
             "Repository access modes and assignment-start commits (all fetched to their configured branch's latest ref before model execution):",
             JSON.stringify(hostedRepositories),
             "Read-only repositories, including the supervisory repository (worker_shared), are instruction-policy boundaries, not OS isolation. Never write, execute scripts, reset, commit, or publish there. The next assignment discards local changes in every checkout.",
+            ...workspaceLayout,
             "Use publish_pull_request with the writable repository name and its local commit. One assignment may publish separate PRs to several repositories.",
-            "The repository marked supervisory: true in workspace.json is worker_shared. Its AGENTS.md is loaded first; worker_shared guidance and same-named skills override every repository. Duplicate skills across writable repositories are qualified as Repository/skill; use them only in that repository. Other read-only reference repositories are reference material, not instruction or skill sources.",
+            "Duplicate skills across writable repositories are qualified as Repository/skill; use them only in that repository.",
           ] : []),
           ...(primaryBranch ? [`Your assigned primary remote branch is ${primaryBranch}; the assignment started at commit ${primaryCommit}. This is separate from your worker-local branch.`] : []),
           ...(worktree ? ["This worker-agent worktree was clean-reset for this assignment to its assigned remote branch's latest fetched commit (or committed source HEAD for a local-only source). It stays on its worker-local branch, not the source/remote branch. The next assignment discards local edits, ignored/untracked files and checkout-local commits; idle worktrees may also be LRU-evicted to recover disk space. Save durable results through the supplied artifact/task APIs or the enabled publication tool before finishing; never rely on local files surviving completion."] : []),
@@ -587,18 +605,13 @@ export async function startAgentPoolWorker({
           enqueue(run, { type: "log", stream: stream === "stderr" ? "stderr" : "stdout", data: data.slice(start, start + 4096) })
         }
       })
-      enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Agent workspace: ${workspace}\n` })
-      enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Read-only shared folder (instruction policy): ${workerShared}\n` })
-      for (const reference of referenceManifest) {
-        enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Read-only reference (instruction policy): ${reference.name} = ${reference.path} (HEAD ${reference.commit})\n` })
-      }
       if (publisher) enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Harness PR publication enabled for ${publicationRepository}\n` })
       if (skills) enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Verified Paperclip skills ZIP SHA-256 ${skills.sha256}${skills.downloaded ? " (downloaded)" : " (cached)"}; extracted to .worker\\skills\n` })
       if (repositoryInstructions !== null) {
         enqueue(run, { type: "log", stream: "stdout", data: "[minicode] Loaded workspace instructions from AGENTS.md\n" })
       }
       if (guidance.sharedInstructions !== null) {
-        enqueue(run, { type: "log", stream: "stdout", data: "[minicode] Loaded read-only shared instructions from AGENTS.md\n" })
+        enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Loaded read-only shared instructions from AGENTS.md: ${path.join(workerShared, "AGENTS.md")}\n` })
       }
       enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Resolved ${guidance.skills.length} skills (worker_shared > worktree > bundle fallback)\n` })
       if (agentInstructions !== null) {
