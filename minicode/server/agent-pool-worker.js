@@ -292,7 +292,7 @@ export async function startAgentPoolWorker({
   const endpoint = new URL("/api/agent-pool/worker", origin)
   endpoint.protocol = origin.protocol === "https:" ? "wss:" : "ws:"
   endpoint.searchParams.set("workerId", workerId)
-  let socket, reconnectTimer, leaseTimer, heartbeatTimer, diskTimer, idleTimer, retirementTimer
+  let socket, reconnectTimer, leaseTimer, heartbeatTimer, pingTimer, diskTimer, idleTimer, retirementTimer
   let diskCheck = Promise.resolve()
   let stopped = false
   let connected = false
@@ -328,6 +328,7 @@ export async function startAgentPoolWorker({
     clearTimeout(reconnectTimer)
     clearTimeout(leaseTimer)
     clearTimeout(heartbeatTimer)
+    clearInterval(pingTimer)
     clearTimeout(diskTimer)
     clearTimeout(idleTimer)
     clearTimeout(retirementTimer)
@@ -627,11 +628,17 @@ export async function startAgentPoolWorker({
     }
     current.on("open", () => {
       heartbeat()
+      // Reverse proxies may terminate server-initiated pings; probe from this hop too.
+      pingTimer = setInterval(() => {
+        if (current.readyState === WebSocket.OPEN) current.ping()
+      }, 15_000)
+      pingTimer.unref()
       send({ type: "hello", protocolVersion: PROTOCOL_VERSION,
         capabilities: [INLINE_INSTRUCTIONS, SKILL_BUNDLE, ...(prepareHostedRepositories ? ["hosted_repositories_v1", "retiring_ready_v1"] : [])],
         instanceId, runId: active?.id ?? null })
     })
     current.on("ping", heartbeat)
+    current.on("pong", heartbeat)
     let messages = Promise.resolve()
     current.on("message", (data, binary) => {
       messages = messages.then(async () => {
@@ -694,6 +701,7 @@ export async function startAgentPoolWorker({
     current.on("close", (code) => {
       connected = false
       clearTimeout(heartbeatTimer)
+      clearInterval(pingTimer)
       clearTimeout(diskTimer)
       if (stopped || current.renewingEntra) return
       if (code === 1008) { void stop(new Error("AgentPool execution or credentials rejected; retry explicitly")); return }

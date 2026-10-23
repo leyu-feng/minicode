@@ -27,6 +27,10 @@ The canonical TypeScript schemas and types are exported from
 `@paperclipai/shared/agent-pools`. Non-TypeScript workers implement the same JSON
 contract. Do not depend on Minicode's internal session or prompt representation.
 
+Workers send WebSocket pings every 15 seconds and accept either pings or pongs as
+liveness, closing after 45 seconds without either. Client-initiated probes keep
+proxy hops alive even when server-initiated control frames are not forwarded.
+
 ## Freelance and Hosted pools
 
 Existing pools migrate to `freelance`; their pairing and immediate

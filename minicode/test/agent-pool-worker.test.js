@@ -123,6 +123,22 @@ async function harness(t, factory, workerOptions = {}) {
   }
 }
 
+test("worker stays connected when the peer answers pings but does not initiate them", async t => {
+  const timeout = globalThis.setTimeout
+  const interval = globalThis.setInterval
+  t.mock.method(globalThis, "setTimeout", (callback, delay, ...args) =>
+    timeout(callback, delay === 45_000 ? 150 : delay, ...args))
+  t.mock.method(globalThis, "setInterval", (callback, delay, ...args) =>
+    interval(callback, delay === 15_000 ? 30 : delay, ...args))
+  const fixture = await harness(t, () => { throw new Error("An idle worker must not start a model") })
+  const peer = await fixture.welcome(0)
+  let pings = 0
+  peer.socket.on("ping", () => { pings++ })
+  await waitUntil(() => pings >= 6)
+  assert.equal(fixture.connections.length, 1)
+  assert.equal(peer.socket.readyState, 1)
+})
+
 test("Hosted assignments persist busy before repository preparation and retire only after final result acknowledgement", async t => {
   const transitions = []
   let fixture
