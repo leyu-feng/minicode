@@ -106,6 +106,26 @@ const execFileAsync = promisify(execFile);
     expect(provider.client.delete).toHaveBeenCalledWith(provider.poolId);
   });
 
+  it("pairs only the owning Hosted provider and refuses credential takeover or revoked worker resurrection", async () => {
+    const provider = hostedProvider();
+    const svc = agentPoolService(db);
+    const pool = await svc.create(companyId, "managed-hosted");
+    await svc.update(companyId, pool.id, { type: "hosted", clearPairings: true, config: provider.config });
+    const grant = { ...provider.config, clientId: randomUUID(), principalId: randomUUID() };
+    const input = { companyId, poolId: provider.poolId, poolName: pool.name, workerId: randomUUID(), clientToken: "a".repeat(64) };
+    await expect(svc.pairHostedWorker(input, { ...grant, audience: "api://wrong" })).rejects.toThrow("does not own");
+    await expect(svc.pairHostedWorker({ ...input, companyId: otherCompanyId }, grant)).rejects.toThrow("not registered");
+    await expect(svc.pairHostedWorker(input, grant)).resolves.toMatchObject({ created: true });
+    await expect(svc.pairHostedWorker(input, grant)).resolves.toMatchObject({ created: false });
+    await expect(svc.pairHostedWorker({ ...input, clientToken: "b".repeat(64) }, grant)).rejects.toThrow("another credential");
+    expect(await svc.authenticate(input.workerId, input.clientToken)).toMatchObject({ companyId, poolName: pool.name });
+    await expect(svc.revokeHostedWorker({ ...input, companyId: otherCompanyId }, grant)).resolves.toMatchObject({ revoked: false });
+    expect(await svc.authenticate(input.workerId, input.clientToken)).not.toBeNull();
+    await svc.revokeHostedWorker(input, grant);
+    expect(await svc.authenticate(input.workerId, input.clientToken)).toBeNull();
+    await expect(svc.pairHostedWorker(input, grant)).rejects.toThrow("revoked");
+  });
+
   it.each(["cancellation", "timeout", "stalled-report"])("does not dispatch mock capacity and bounds waiting after %s", async (kind) => {
     const provider = hostedProvider();
     const svc = agentPoolService(db);

@@ -103,6 +103,14 @@ export const pairAgentPoolWorkerSchema = z.object({
   clientToken: z.string().regex(/^[a-f0-9]{64}$/),
 });
 
+export const hostedAgentPoolWorkerSchema = z.object({
+  companyId: z.string().uuid(),
+  poolId: z.string().uuid(),
+  poolName: agentPoolNameSchema,
+  workerId: z.string().uuid(),
+  clientToken: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+}).strict();
+
 export interface AgentPool {
   id: string;
   companyId: string;

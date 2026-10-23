@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { createAgentPoolSchema, createAgentPoolWorkerSchema, pairAgentPoolWorkerSchema,
-  updateAgentPoolSchema, hostedWorkerDemandSchema } from "@paperclipai/shared";
+  updateAgentPoolSchema, hostedWorkerDemandSchema, hostedAgentPoolWorkerSchema } from "@paperclipai/shared";
 import { z } from "zod";
 import { validate } from "../middleware/validate.js";
 import { assertBoard, assertBoardOrAgent, assertCompanyAccess } from "./authz.js";
@@ -11,10 +11,31 @@ import { agentPoolBroker } from "../services/agent-pool-broker.js";
 import { unauthorized, notFound } from "../errors.js";
 import { agentPoolSkillsArchive } from "../services/agent-pool-skills.js";
 import { defaultHostedWorkerConfig } from "../services/hosted-worker-client.js";
+import { authenticateHostedWorkerProvider } from "../services/entra-hosted-workers.js";
 
 export function agentPoolPairingRoutes(db: Db) {
   const router = Router();
   const svc = agentPoolService(db);
+  router.post("/api/agent-pool/hosted/workers", validate(hostedAgentPoolWorkerSchema), async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const grant = await authenticateHostedWorkerProvider(req.headers.authorization);
+    const input = hostedAgentPoolWorkerSchema.parse(req.body);
+    const result = await svc.pairHostedWorker(input, grant);
+    if (result.created) await logActivity(db, {
+      companyId: input.companyId, actorType: "system", actorId: grant.clientId,
+      action: "agent_pool.hosted_worker_paired", entityType: "agent_pool_worker", entityId: result.workerId,
+      details: { providerPoolId: input.poolId },
+    });
+    res.json({ workerId: result.workerId });
+  });
+  router.delete("/api/agent-pool/hosted/workers", validate(hostedAgentPoolWorkerSchema), async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const grant = await authenticateHostedWorkerProvider(req.headers.authorization);
+    const input = hostedAgentPoolWorkerSchema.parse(req.body);
+    const result = await svc.revokeHostedWorker(input, grant);
+    if (result.revoked) agentPoolBroker.revoke(result.workerId);
+    res.status(204).end();
+  });
   router.post("/api/agent-pool/pair", validate(pairAgentPoolWorkerSchema), async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     const body = pairAgentPoolWorkerSchema.parse(req.body);

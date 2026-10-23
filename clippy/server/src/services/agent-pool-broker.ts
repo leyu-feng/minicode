@@ -13,7 +13,7 @@ import { AGENT_POOL_STOP_SCHEMA } from "./agent-pool-execution-stop.js";
 export const AGENT_POOL_RECONNECT_MS = 60_000;
 export const AGENT_POOL_MAX_FRAME = 256 * 1024;
 const MAX_RUN_OUTPUT = 2 * 1024 * 1024;
-const readySchema = z.object({ type: z.literal("ready") });
+const readySchema = z.object({ type: z.literal("ready"), retiring: z.boolean().optional() });
 const eventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("log"), runId: z.string(), seq: z.number().int().positive(),
@@ -186,6 +186,7 @@ export class AgentPoolBroker {
           clearTimeout(handshakeTimeout);
           this.send(peer, {
             type: "welcome", protocolVersion: AGENT_POOL_PROTOCOL_VERSION, serverInstanceId: this.serverInstanceId,
+            capabilities: ["retiring_ready_v1"],
             runId: peer.run?.id ?? null, ack: peer.run?.seq ?? 0,
             completed: peer.run?.completed ?? false,
           });
@@ -193,11 +194,12 @@ export class AgentPoolBroker {
           return;
         }
         if (!peer || peer.socket !== socket) return;
-        if (readySchema.safeParse(value).success) {
+        const ready = readySchema.safeParse(value);
+        if (ready.success) {
           if (peer.run && !peer.run.completed) throw new Error("Worker cannot become idle during a run");
           const run = peer.run;
           peer.run = null;
-          peer.ready = !peer.reservedRunId;
+          peer.ready = !ready.data.retiring && !peer.reservedRunId;
           if (run?.result) {
             run.cleanup();
             run.resolve({
@@ -210,6 +212,7 @@ export class AgentPoolBroker {
               } },
             });
           }
+          if (ready.data.retiring) this.send(peer, { type: "retired" });
           return;
         }
         const event = eventSchema.parse(value);

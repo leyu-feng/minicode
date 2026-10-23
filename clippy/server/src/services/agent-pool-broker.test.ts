@@ -63,6 +63,21 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("settles an acknowledged result with retirement without making the worker available again", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker();
+    expect(client.welcome).toMatchObject({ capabilities: ["retiring_ready_v1"] });
+    const ctx = context();
+    const result = broker.execute(ctx);
+    await client.take("task");
+    client.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await client.take("ack");
+    client.send({ type: "ready", retiring: true });
+    await client.take("retired");
+    await expect(result).resolves.toMatchObject({ exitCode: 0 });
+    expect(broker.hasAvailableWorker(context())).toBe(false);
+  });
+
   it("reserves a compatible Hosted worker for only one waiter and releases it before an aborted dispatch", async () => {
     const { broker, worker } = await harness();
     const legacy = await worker();
