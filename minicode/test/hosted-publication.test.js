@@ -20,6 +20,7 @@ function fixture(t, aliases = false, provider = "azure_devops") {
       branchTemplate: provider === "azure_devops" ? "u/hosted/{agentId}/{commit}" : "agent/{agentId}/{commit}",
     }
   }
+  if (aliases) for (const repository of repositories) repository.alias = repository.name.toLowerCase()
   const products = [], comments = [], publications = []
   let failRegistration = false
   t.mock.method(globalThis, "fetch", async (url, options) => {
@@ -72,6 +73,14 @@ function fixture(t, aliases = false, provider = "azure_devops") {
     failRegistration(value) { failRegistration = value },
   }
 }
+
+test("Hosted publication selects a writable folder alias while retaining the remote repository identity", async t => {
+  const f = fixture(t, true)
+  assert.deepEqual(f.tool.parameters.properties.repository.enum, ["first", "second"])
+  await f.tool.execute({ ...f.input, repository: "first" })
+  assert.equal(f.publications[0].repositoryId, "44444444-4444-4444-8444-444444444444")
+  await assert.rejects(f.tool.execute({ ...f.input, repository: "reference" }), /writable repository/)
+})
 
 test("Hosted publication registers separate repository PRs and reconciles only the selected saved receipt", async t => {
   const f = fixture(t)

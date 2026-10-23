@@ -3,6 +3,7 @@ import { paperclipPublicationTool } from "./paperclip-publication.js"
 export function createHostedPublicationTool({ repositories, task, apiUrl, request }) {
   const tools = new Map()
   for (const repository of repositories.filter(repo => !repo.readOnly)) {
+    const alias = repository.alias ?? repository.name
     const publication = repository.publication
     if (!publication || typeof publication.provider !== "string" || !publication.provider.trim()
       || typeof publication.repository !== "string" || !publication.repository.trim()
@@ -16,9 +17,9 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
       throw new Error(`Writable repository ${repository.name} requires an HTTPS pull request URL template without credentials, query or fragment`)
     }
-    tools.set(repository.name, paperclipPublicationTool({
+    tools.set(alias, paperclipPublicationTool({
       name: "publish_pull_request",
-      description: `Publish the requested local commit from ${repository.name} through the trusted Hosted harness.`,
+      description: `Publish the requested local commit from ${alias} through the trusted Hosted harness.`,
       parameters: { type: "object", properties: {
         commit: { type: "string" }, title: { type: "string" }, body: { type: "string" },
       }, required: ["commit", "title", "body"], additionalProperties: false },
@@ -44,7 +45,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
     async execute(input, options) {
       const { repository, ...publication } = input ?? {}
       const tool = tools.get(repository)
-      if (!tool) throw new Error("Publication requires a writable repository name from the Hosted catalog")
+      if (!tool) throw new Error("Publication requires a writable repository alias from the Hosted catalog")
       return tool.execute(publication, options)
     },
   }
