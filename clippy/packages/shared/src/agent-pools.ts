@@ -4,6 +4,7 @@ export const AGENT_POOL_PROTOCOL_VERSION = 1;
 export const AGENT_POOL_INLINE_INSTRUCTIONS = "inline_instructions_v1";
 export const AGENT_POOL_SKILL_BUNDLE = "skill_bundle_v1";
 export const AGENT_POOL_HOSTED_REPOSITORIES = "hosted_repositories_v1";
+export const AGENT_POOL_HOSTED_WORKSPACE = "hosted_workspace_v2";
 
 export const agentPoolHelloSchema = z.object({
   type: z.literal("hello"),
@@ -47,16 +48,21 @@ export const agentPoolTaskSchema = z.object({
   continuation: z.unknown().nullable(),
   runtimeTools: z.unknown().nullable(),
   authToken: z.string().nullable(),
-  repositories: z.object({
+  repositories: z.union([z.object({
     primary: z.object({ id: z.string(), name: z.string(), branch: z.string() }),
     references: z.array(z.object({ id: z.string(), name: z.string(), branch: z.string() })),
-  }).optional(),
+  }), z.object({
+    mode: z.literal("all_repositories"),
+    repositories: z.array(z.object({
+      id: z.string(), name: z.string(), branch: z.string(), readOnly: z.boolean(), supervisory: z.boolean().optional(),
+    })).min(1).max(101),
+  })]).optional(),
 });
 
 export type AgentPoolTask = z.infer<typeof agentPoolTaskSchema>;
 
 export const agentPoolNameSchema = z.string().trim().min(1).max(64).regex(/^[a-z0-9][a-z0-9_-]*$/);
-export const createAgentPoolSchema = z.object({ name: agentPoolNameSchema });
+export const createAgentPoolSchema = z.object({ name: agentPoolNameSchema }).strict();
 export const hostedWorkerConfigSchema = z.object({
   apiUrl: z.string().url().refine((value) => {
     if (!URL.canParse(value)) return false;
@@ -66,10 +72,6 @@ export const hostedWorkerConfigSchema = z.object({
   }, "Use an HTTPS URL ending in /v1/hosted-worker, without credentials, a query or a fragment."),
   audience: z.string().trim().min(1).max(500).regex(/^\S+$/),
 });
-export const updateAgentPoolSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("freelance"), clearPairings: z.literal(true) }),
-  z.object({ type: z.literal("hosted"), clearPairings: z.literal(true), config: hostedWorkerConfigSchema }),
-]);
 export const hostedWorkerStatusSchema = z.object({
   activeWorkers: z.number().int().nonnegative(),
   provisioningWorkers: z.number().int().nonnegative(),
@@ -81,11 +83,17 @@ export const hostedWorkerRepositorySchema = z.object({
   name: z.string().min(1).max(200),
   branch: z.string().min(1).max(200),
   isDefault: z.boolean(),
+  readOnly: z.boolean().optional(),
+  supervisory: z.boolean().optional(),
+  workspaceMode: z.literal("all_repositories").optional(),
 });
 export const hostedWorkerRepositoriesSchema = z.array(hostedWorkerRepositorySchema).min(1).max(1000)
-  .refine((repos) => repos.filter((repo) => repo.isDefault).length === 1
-    && new Set(repos.map((repo) => repo.id)).size === repos.length,
-  "The provider must return unique repository IDs and exactly one default.");
+  .refine((repos) => new Set(repos.map((repo) => repo.id)).size === repos.length
+    && (repos.every(repo => repo.workspaceMode === "all_repositories")
+      ? repos.every(repo => typeof repo.readOnly === "boolean" && (!repo.supervisory || repo.readOnly))
+        && repos.filter(repo => repo.supervisory === true).length === 1
+      : repos.every(repo => repo.workspaceMode === undefined) && repos.filter(repo => repo.isDefault).length === 1),
+  "The provider must return a consistent all-repository workspace with exactly one read-only supervisory repository, or a legacy catalog with exactly one default.");
 export const hostedWorkerDemandSchema = z.object({ itemsWaiting: z.number().int().min(0).max(2147483646) });
 export const hostedAgentRepositoriesSchema = z.object({
   primaryRepositoryId: z.string().min(1).max(200).optional(),
@@ -96,7 +104,6 @@ export const hostedAgentRepositoriesSchema = z.object({
 export type HostedWorkerConfig = z.infer<typeof hostedWorkerConfigSchema>;
 export type HostedWorkerStatus = z.infer<typeof hostedWorkerStatusSchema>;
 export type HostedWorkerRepository = z.infer<typeof hostedWorkerRepositorySchema>;
-export type UpdateAgentPool = z.infer<typeof updateAgentPoolSchema>;
 export const createAgentPoolWorkerSchema = z.object({ name: z.string().trim().min(1).max(100) });
 export const pairAgentPoolWorkerSchema = z.object({
   workerId: z.string().uuid(),
@@ -112,14 +119,24 @@ export const hostedAgentPoolWorkerSchema = z.object({
   clientToken: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
   executionId: z.string().uuid().optional(),
   generation: z.string().uuid().optional(),
+  activationVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
 }).strict().refine(input => Boolean(input.executionId) === Boolean(input.generation),
   "Shared Hosted workers require both executionId and generation.");
+
+export const hostedAgentPoolSlotsSchema = z.object({
+  companyId: z.string().uuid(),
+  poolId: z.string().uuid(),
+  poolName: agentPoolNameSchema,
+  slots: z.array(z.object({ workerId: z.string().uuid(), name: z.string().trim().min(1).max(200) }).strict())
+    .min(1).max(1000).refine(slots => new Set(slots.map(slot => slot.workerId)).size === slots.length
+      && new Set(slots.map(slot => slot.name)).size === slots.length, "Worker slot IDs and names must be unique."),
+}).strict();
 
 export interface AgentPool {
   id: string;
   companyId: string;
   name: string;
-  type: "freelance" | "hosted";
+  type: "devbox" | "hosted";
   hostedApiUrl: string | null;
   hostedAudience: string | null;
   hostedPoolId: string | null;

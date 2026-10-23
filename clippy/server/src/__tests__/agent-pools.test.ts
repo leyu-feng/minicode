@@ -11,8 +11,8 @@ import express from "express";
 import request from "supertest";
 import { WebSocket } from "ws";
 import { and, eq } from "drizzle-orm";
-import { beforeAll, afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createDb, companies, agentPoolWorkers, activityLog } from "@paperclipai/db";
+import { beforeAll, beforeEach, afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { createDb, companies, agentPools, agentPoolWorkers, activityLog } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentPoolService, hashAgentPoolToken } from "../services/agent-pools.js";
 import { agentPoolPairingRoutes, agentPoolRoutes } from "../routes/agent-pools.js";
@@ -25,7 +25,7 @@ import type { AdapterExecutionContext } from "../adapters/types.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 if (!support.supported) console.warn(`AgentPool DB tests unavailable: ${support.reason}`);
-const companyId = randomUUID();
+let companyId: string;
 const otherCompanyId = randomUUID();
 const execFileAsync = promisify(execFile);
 
@@ -36,10 +36,12 @@ const execFileAsync = promisify(execFile);
     const started = await startEmbeddedPostgresTestDatabase("agent-pools");
     cleanup = started.cleanup;
     db = createDb(started.connectionString);
-    await db.insert(companies).values([
-      { id: companyId, name: "AgentPool test", issuePrefix: "AP" },
-      { id: otherCompanyId, name: "Other company", issuePrefix: "AO" },
-    ]);
+    await db.insert(companies).values({ id: otherCompanyId, name: "Other company", issuePrefix: "AO" });
+  });
+  beforeEach(async () => {
+    companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "AgentPool test", issuePrefix: `AP${companyId.slice(0, 8)}` });
+    vi.spyOn(hostedWorkers, "defaultHostedWorkerConfig").mockReturnValue(null);
   });
   afterAll(async () => { agentPoolBroker.close(); await cleanup?.(); });
   afterEach(() => vi.restoreAllMocks());
@@ -58,18 +60,15 @@ const execFileAsync = promisify(execFile);
       claim: vi.fn(async () => {}),
     };
     vi.spyOn(hostedWorkers, "hostedWorkerClient").mockReturnValue(client);
+    vi.mocked(hostedWorkers.defaultHostedWorkerConfig).mockReturnValue(config);
     return { config, client, poolId };
   }
 
-  it("retains provider IDs, resets pairings in both directions, and validates company-scoped repository choices", async () => {
+  it("retains the built-in host's pool ID and validates company-scoped repository choices", async () => {
     const provider = hostedProvider();
     const svc = agentPoolService(db);
-    const pool = await svc.create(companyId, "hosted-conversion");
-    const pairing = await svc.issuePairing(companyId, pool.id, "old-worker");
-    await svc.pair(pairing.workerId, pairing.serverToken, "a".repeat(64));
-    const hosted = await svc.update(companyId, pool.id, { type: "hosted", clearPairings: true, config: provider.config });
-    expect(hosted).toMatchObject({ type: "hosted", hostedPoolId: provider.poolId });
-    expect(await svc.authenticate(pairing.workerId, "a".repeat(64))).toBeNull();
+    const pool = await svc.ensureDefault(companyId);
+    expect(pool).toMatchObject({ type: "hosted", hostedPoolId: provider.poolId });
     expect(await svc.validateAgentRepositories(companyId, { name: pool.name })).toMatchObject({ primaryRepositoryId: "main" });
     expect(await svc.validateAgentRepositories(companyId, {
       name: pool.name, primaryRepositoryId: "other", referenceRepositoryIds: ["main"],
@@ -83,18 +82,86 @@ const execFileAsync = promisify(execFile);
     await svc.report(companyId, pool.id, 4);
     expect(provider.client.report).toHaveBeenCalledWith(provider.poolId, 4);
     await expect(svc.status(otherCompanyId, pool.id)).rejects.toThrow("not found");
-    const hostedPair = await svc.issuePairing(companyId, pool.id, "hosted-worker");
-    await svc.pair(hostedPair.workerId, hostedPair.serverToken, "b".repeat(64));
-    expect(await svc.update(companyId, pool.id, { type: "freelance", clearPairings: true }))
-      .toMatchObject({ type: "freelance", hostedPoolId: null, hostedApiUrl: null });
-    expect(await svc.authenticate(hostedPair.workerId, "b".repeat(64))).toBeNull();
-    expect(provider.client.delete).toHaveBeenCalledWith(provider.poolId);
+    await expect(svc.issuePairing(companyId, pool.id, "manual-worker")).rejects.toThrow("Only Devbox pools");
+    expect(provider.client.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the entire v2 repository catalog without retaining primary or reference selections", async () => {
+    const provider = hostedProvider();
+    vi.mocked(hostedWorkers.hostedWorkerClient).mockReturnValue({
+      ...provider.client, repositories: vi.fn(async () => [
+        { id: "supervisory", name: "shared-guidance", branch: "main", readOnly: true, supervisory: true, isDefault: false, workspaceMode: "all_repositories" as const },
+        { id: "writable", name: "Main", branch: "main", readOnly: false, isDefault: false, workspaceMode: "all_repositories" as const },
+        { id: "reference", name: "Reference", branch: "release", readOnly: true, isDefault: false, workspaceMode: "all_repositories" as const },
+      ]),
+    });
+    const svc = agentPoolService(db);
+    const pool = await svc.ensureDefault(companyId);
+    expect(await svc.validateAgentRepositories(companyId, {
+      name: pool.name, primaryRepositoryId: "removed", referenceRepositoryIds: ["removed"], keep: "setting",
+    })).toEqual({ name: pool.name, keep: "setting" });
+  });
+
+  it("keeps an unconfigured default Hosted, reports missing deployment settings, and still permits company deletion", async () => {
+    const svc = agentPoolService(db);
+    const pool = await svc.ensureDefault(companyId);
+    expect(pool).toMatchObject({ type: "hosted", name: "default", hostedPoolId: null });
+    await expect(svc.status(companyId, pool.id)).rejects.toThrow("built-in agent host is not configured");
+    expect(await deleteCompany(db, companyId)).toMatchObject({ id: companyId });
+  });
+
+  it("reads legacy pools as Devbox without converting an existing default or its stored settings", async () => {
+    const [legacy] = await db.insert(agentPools).values({ companyId, name: "default", type: "freelance" }).returning();
+    const provider = hostedProvider();
+    const svc = agentPoolService(db);
+    expect(await svc.ensureDefault(companyId)).toMatchObject({ id: legacy.id, type: "devbox", hostedPoolId: null });
+    expect(await svc.list(companyId)).toContainEqual(expect.objectContaining({ id: legacy.id, type: "devbox" }));
+    const [stored] = await db.select().from(agentPools).where(eq(agentPools.id, legacy.id));
+    expect(stored.type).toBe("freelance");
+    expect(provider.client.create).not.toHaveBeenCalled();
+  });
+
+  it("does not silently abandon a previously configured pending host pool when deployment settings disappear", async () => {
+    hostedProvider();
+    const svc = agentPoolService(db);
+    const [pool] = await svc.list(companyId);
+    vi.mocked(hostedWorkers.defaultHostedWorkerConfig).mockReturnValue(null);
+    await expect(deleteCompany(db, companyId)).rejects.toThrow("built-in agent host is not configured");
+    expect(await svc.get(companyId, pool.id)).toMatchObject({ type: "hosted", hostedPoolId: null });
+  });
+
+  it.each(["default", "hosted"])("refuses an outstanding manual pairing token on a %s pool", async (kind) => {
+    const [pool] = await db.insert(agentPools).values({
+      companyId, name: kind === "default" ? "default" : "managed", type: kind === "default" ? "freelance" : "hosted",
+    }).returning();
+    const serverToken = "s".repeat(64);
+    const [worker] = await db.insert(agentPoolWorkers).values({
+      poolId: pool.id, name: "previously-issued", pairingTokenHash: hashAgentPoolToken(serverToken),
+      pairingExpiresAt: new Date(Date.now() + 60_000),
+    }).returning();
+    await expect(agentPoolService(db).pair(worker.id, serverToken, "a".repeat(64))).rejects.toThrow("pairing token");
+  });
+
+  it("creates only Devbox additional pools and exposes no type or provider-settings mutation", async () => {
+    const provider = hostedProvider();
+    const base = `/api/companies/${companyId}/agent-pools`;
+    const svc = agentPoolService(db);
+    const hosted = await svc.ensureDefault(companyId);
+    const created = await request(app()).post(base).send({ name: "dev-machines" }).expect(201);
+    expect(created.body).toMatchObject({ type: "devbox", hostedPoolId: null });
+    const pairing = await svc.issuePairing(companyId, created.body.id, "devbox");
+    const token = "a".repeat(64);
+    await svc.pair(pairing.workerId, pairing.serverToken, token);
+    await request(app()).patch(`${base}/${created.body.id}`).send({ type: "hosted", clearPairings: true, config: provider.config }).expect(404);
+    await request(app()).patch(`${base}/${hosted.id}`).send({ type: "devbox", clearPairings: true }).expect(404);
+    await request(app()).post(base).send({ name: "third-party", type: "hosted", config: provider.config }).expect(400);
+    await request(app()).post(`${base}/${hosted.id}/workers`).send({ name: "manual" }).expect(409);
+    expect(await svc.authenticate(pairing.workerId, token)).not.toBeNull();
     expect(provider.client.create).toHaveBeenCalledTimes(1);
   });
 
   it("bootstraps a new company's default Hosted pool once when a provider is configured", async () => {
     const provider = hostedProvider();
-    vi.spyOn(hostedWorkers, "defaultHostedWorkerConfig").mockReturnValue(provider.config);
     const id = randomUUID();
     await db.insert(companies).values({ id, name: "Hosted company", issuePrefix: "HC" });
     const svc = agentPoolService(db);
@@ -107,11 +174,10 @@ const execFileAsync = promisify(execFile);
     expect(provider.client.delete).toHaveBeenCalledWith(provider.poolId);
   });
 
-  it("allows provider revocation callbacks while a pool settings update holds the registration lock", async () => {
+  it("allows the built-in host to revoke workers during company deletion", async () => {
     const provider = hostedProvider();
     const svc = agentPoolService(db);
-    const pool = await svc.create(companyId, "hosted-revocation-callback");
-    await svc.update(companyId, pool.id, { type: "hosted", clearPairings: true, config: provider.config });
+    const pool = await svc.ensureDefault(companyId);
     const grant = { ...provider.config, clientId: randomUUID(), principalId: randomUUID() };
     const input = { companyId, poolId: provider.poolId, poolName: pool.name, workerId: randomUUID(), clientToken: "c".repeat(64) };
     await svc.pairHostedWorker(input, grant);
@@ -128,19 +194,22 @@ const execFileAsync = promisify(execFile);
       }
     });
     try {
-      await expect(svc.update(companyId, pool.id, { type: "freelance", clearPairings: true }))
-        .resolves.toMatchObject({ type: "freelance", hostedPoolId: null });
+      await expect(deleteCompany(db, companyId)).resolves.toMatchObject({ id: companyId });
       expect(await svc.authenticate(input.workerId, input.clientToken)).toBeNull();
     } finally {
       await revocation;
     }
   });
 
-  it("pairs only the owning Hosted provider and refuses credential takeover or revoked worker resurrection", async () => {
+  it("uses deployment settings rather than stored provider overrides and refuses takeover or revoked resurrection", async () => {
     const provider = hostedProvider();
     const svc = agentPoolService(db);
-    const pool = await svc.create(companyId, "managed-hosted");
-    await svc.update(companyId, pool.id, { type: "hosted", clearPairings: true, config: provider.config });
+    const pool = await svc.ensureDefault(companyId);
+    await db.update(agentPools).set({
+      hostedApiUrl: "https://old-provider.example/v1/hosted-worker", hostedAudience: "api://old",
+    }).where(eq(agentPools.id, pool.id));
+    await svc.status(companyId, pool.id);
+    expect(hostedWorkers.hostedWorkerClient).toHaveBeenLastCalledWith(provider.config);
     const grant = { ...provider.config, clientId: randomUUID(), principalId: randomUUID() };
     const input = { companyId, poolId: provider.poolId, poolName: pool.name, workerId: randomUUID(), clientToken: "a".repeat(64) };
     await expect(svc.pairHostedWorker(input, { ...grant, audience: "api://wrong" })).rejects.toThrow("does not own");
@@ -159,8 +228,7 @@ const execFileAsync = promisify(execFile);
   it("reuses a revoked shared slot with rotated credentials and fences late revocation by generation", async () => {
     const provider = hostedProvider();
     const svc = agentPoolService(db);
-    const pool = await svc.create(companyId, "managed-shared");
-    await svc.update(companyId, pool.id, { type: "hosted", clearPairings: true, config: provider.config });
+    const pool = await svc.ensureDefault(companyId);
     const grant = { ...provider.config, clientId: randomUUID(), principalId: randomUUID() };
     const input = {
       companyId, poolId: provider.poolId, poolName: pool.name, workerId: randomUUID(),
@@ -179,11 +247,47 @@ const execFileAsync = promisify(execFile);
     expect(await svc.workers(companyId, pool.id)).toHaveLength(1);
   });
 
+  it("registers provider-defined persistent slots idempotently and fences activation/deactivation without revoking", async () => {
+    const provider = hostedProvider();
+    const svc = agentPoolService(db);
+    const pool = await svc.ensureDefault(companyId);
+    const grant = { ...provider.config, clientId: randomUUID(), principalId: randomUUID() };
+    const registration = { companyId, poolId: provider.poolId, poolName: pool.name,
+      slots: Array.from({ length: 3 }, (_, index) => ({ workerId: randomUUID(), name: `worker-${index + 1}` })) };
+    await svc.registerHostedSlots(registration, grant);
+    await svc.registerHostedSlots(registration, grant);
+    expect(await svc.workers(companyId, pool.id)).toHaveLength(3);
+    const input = { companyId, poolId: provider.poolId, poolName: pool.name, workerId: registration.slots[0].workerId,
+      executionId: randomUUID(), generation: randomUUID(), activationVersion: 1, clientToken: "a".repeat(64) };
+    await svc.pairHostedWorker(input, grant);
+    await expect(svc.deactivateHostedWorker(input, grant)).resolves.toMatchObject({ deactivated: true, revoked: false });
+    expect(await svc.authenticate(input.workerId, input.clientToken)).toBeNull();
+    const replacement = { ...input, executionId: randomUUID(), generation: randomUUID(), activationVersion: 2, clientToken: "b".repeat(64) };
+    await svc.pairHostedWorker(replacement, grant);
+    await expect(svc.deactivateHostedWorker(input, grant)).resolves.toMatchObject({ deactivated: false });
+    await expect(svc.pairHostedWorker(input, grant)).rejects.toThrow("another credential");
+    expect(await svc.authenticate(input.workerId, replacement.clientToken)).toMatchObject({ executionId: replacement.executionId });
+    await svc.registerHostedSlots(registration, grant);
+    expect(await svc.authenticate(input.workerId, replacement.clientToken)).not.toBeNull();
+    await svc.revokeHostedWorker(replacement, grant);
+    await svc.registerHostedSlots(registration, grant);
+    await expect(svc.pairHostedWorker({ ...replacement, activationVersion: 3 }, grant)).rejects.toThrow("revoked");
+    expect((await svc.workers(companyId, pool.id)).filter(worker => worker.name === "worker-1")).toHaveLength(1);
+  });
+
+  it("enforces one Hosted pool per organization while preserving additional Devbox pools", async () => {
+    hostedProvider();
+    const svc = agentPoolService(db);
+    await svc.ensureDefault(companyId);
+    await expect(db.insert(agentPools).values({ companyId, name: "duplicate-hosted", type: "hosted" }))
+      .rejects.toThrow();
+    expect(await svc.create(companyId, "additional-devbox")).toMatchObject({ type: "devbox" });
+  });
+
   it.each(["cancellation", "timeout", "stalled-report"])("does not dispatch mock capacity and bounds waiting after %s", async (kind) => {
     const provider = hostedProvider();
     const svc = agentPoolService(db);
-    const pool = await svc.create(companyId, `hosted-${kind}`);
-    await svc.update(companyId, pool.id, { type: "hosted", clearPairings: true, config: provider.config });
+    const pool = await svc.ensureDefault(companyId);
     const controller = new AbortController();
     let releaseReport: (() => void) | undefined;
     if (kind !== "cancellation") {
@@ -215,20 +319,19 @@ const execFileAsync = promisify(execFile);
     expect(ctx.onDispatch).not.toHaveBeenCalled();
   });
 
-  it("preserves saving a Freelance agent before its workers or named pool exist", async () => {
+  it("preserves saving a Devbox agent before its workers or named pool exist", async () => {
     const config = { name: "pool-to-provision-later" };
     expect(await agentPoolService(db).validateAgentRepositories(companyId, config)).toEqual(config);
     expect(await agentPoolService(db).validateAgentRepositories(companyId, { ...config, referenceRepositoryIds: [] }))
       .toEqual({ ...config, referenceRepositoryIds: [] });
   });
 
-  it("keeps failed provisioning visible and retries without falling back to Freelance", async () => {
+  it("keeps failed provisioning visible and retries without falling back to Devbox", async () => {
     const provider = hostedProvider();
     const svc = agentPoolService(db);
-    const pool = await svc.create(companyId, "hosted-retry");
+    const [pool] = await svc.list(companyId);
     provider.client.create.mockRejectedValueOnce(new Error("Provider unavailable"));
-    await expect(svc.update(companyId, pool.id, { type: "hosted", clearPairings: true, config: provider.config }))
-      .rejects.toThrow("Provider unavailable");
+    await expect(svc.ensureDefault(companyId)).rejects.toThrow("Provider unavailable");
     expect(await svc.get(companyId, pool.id)).toMatchObject({ type: "hosted", hostedPoolId: null });
     expect(await svc.list(companyId)).toContainEqual(expect.objectContaining({ id: pool.id, type: "hosted" }));
     await svc.status(companyId, pool.id);
@@ -239,8 +342,7 @@ const execFileAsync = promisify(execFile);
   it("accepts an absolute backlog with 202 and denies invalid demand and agent administration", async () => {
     const provider = hostedProvider();
     const svc = agentPoolService(db);
-    const pool = await svc.create(companyId, "hosted-api");
-    await svc.update(companyId, pool.id, { type: "hosted", clearPairings: true, config: provider.config });
+    const pool = await svc.ensureDefault(companyId);
     const url = `/api/companies/${companyId}/agent-pools/${pool.id}`;
     await request(app()).post(url).send({ itemsWaiting: 3 }).expect(202);
     expect(provider.client.report).toHaveBeenCalledWith(provider.poolId, 3);
@@ -267,9 +369,11 @@ const execFileAsync = promisify(execFile);
     const svc = agentPoolService(db);
     const initial = await svc.list(companyId);
     expect(initial.filter((pool) => pool.name === "default")).toHaveLength(1);
+    expect(initial[0].type).toBe("hosted");
     await Promise.all([svc.list(companyId), svc.list(companyId)]);
     expect((await svc.list(companyId)).filter((pool) => pool.name === "default")).toHaveLength(1);
     const pool = await svc.create(companyId, "coding");
+    expect(pool.type).toBe("devbox");
     await expect(svc.create(companyId, "coding")).rejects.toThrow("already exists");
     await expect(svc.get(otherCompanyId, pool.id)).rejects.toThrow("not found");
     expect((await svc.create(otherCompanyId, "coding")).companyId).toBe(otherCompanyId);
@@ -282,7 +386,7 @@ const execFileAsync = promisify(execFile);
 
   it("pairs atomically with expiring one-time tokens, stores only hashes, and revokes client credentials", async () => {
     const svc = agentPoolService(db);
-    const pool = (await svc.list(companyId)).find((row) => row.name === "default")!;
+    const pool = await svc.create(companyId, "devbox");
     const pairing = await svc.issuePairing(companyId, pool.id, "test-worker");
     const clientToken = "1".repeat(64);
     expect(await svc.authenticate(pairing.workerId, clientToken)).toBeNull();
@@ -295,7 +399,7 @@ const execFileAsync = promisify(execFile);
     expect(row!.pairingTokenHash).toBeNull();
     expect(row!.clientTokenHash).not.toBe(clientToken);
     const winner = row!.clientTokenHash === hashAgentPoolToken(clientToken) ? clientToken : "2".repeat(64);
-    expect(await svc.authenticate(pairing.workerId, winner)).toMatchObject({ companyId, poolName: "default" });
+    expect(await svc.authenticate(pairing.workerId, winner)).toMatchObject({ companyId, poolName: "devbox" });
     expect(await svc.authenticate(pairing.workerId, "3".repeat(64))).toBeNull();
     await svc.revoke(companyId, pool.id, pairing.workerId);
     expect(await svc.authenticate(pairing.workerId, winner)).toBeNull();

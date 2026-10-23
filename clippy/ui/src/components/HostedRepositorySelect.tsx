@@ -21,6 +21,11 @@ export function HostedRepositorySelect({ companyId, poolName, primaryId, referen
   if (pool?.type !== "hosted") return null;
   if (repos.isPending) return <p role="status" className="text-sm text-muted-foreground">Loading hosted repositories...</p>;
   if (repos.error) return <p role="alert" className="text-sm text-destructive">{repos.error.message}</p>;
+  if (repos.data.every(repo => repo.workspaceMode === "all_repositories")) return <div className="space-y-2 text-sm">
+    <p>Hosted assignments start above all configured repositories. No primary repository selection is needed.</p>
+    <p>{repos.data.map(repo => `${repo.name} (${repo.branch}, ${repo.readOnly ? "read-only" : "writable"})`).join("; ")}</p>
+    <p className="text-muted-foreground">The supervisory repository supplies shared guidance as worker_shared. Operators manage this catalog through the AgentPool provider.</p>
+  </div>;
   const selected = primaryId ?? repos.data.find((repo) => repo.isDefault)?.id ?? "";
   const invalid = !repos.data.some((repo) => repo.id === selected)
     || referenceIds.some((id) => id === selected || !repos.data.some((repo) => repo.id === id));

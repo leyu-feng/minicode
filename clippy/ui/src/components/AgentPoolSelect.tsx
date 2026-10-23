@@ -109,8 +109,8 @@ export function AgentPoolSelect({
               onChange={(event) => selection.select(event.target.value)}
             >
               <option value="" disabled>Select an existing pool</option>
-              {pools.data?.map((pool) => <option key={pool.id} value={pool.name}>{pool.name} ({pool.type === "hosted" ? "Hosted" : "Freelance"})</option>)}
-              <option value="__new__">Create a new pool</option>
+              {pools.data?.map((pool) => <option key={pool.id} value={pool.name}>{pool.name} ({pool.type === "hosted" ? "Hosted" : "Devbox"})</option>)}
+              <option value="__new__">Create a new Devbox pool</option>
             </select>
           </label>
           {mode === "new" && (
@@ -131,7 +131,7 @@ export function AgentPoolSelect({
                 />
               </label>
               <p className="text-xs text-muted-foreground">
-                Use a unique name: 1-64 lowercase letters, numbers, underscores or hyphens, starting with a letter or number.
+                New pools are always Devbox. Use a unique name: 1-64 lowercase letters, numbers, underscores or hyphens, starting with a letter or number.
               </p>
               {duplicate && (
                 <p role="alert" className="text-sm text-destructive">
@@ -144,7 +144,7 @@ export function AgentPoolSelect({
       )}
       <p className="text-xs text-muted-foreground">
         No connected worker is required to save this agent. New pools are saved with the agent.
-        Freelance pools need a paired Minicode worker. Hosted pools request capacity and wait up to two minutes
+        Devbox pools need a paired Minicode worker. The default Hosted pool uses the built-in agent host, requests capacity and waits up to two minutes
         for a real worker; mock provider counts do not make a worker available.
       </p>
       {mode === "existing" && <HostedRepositorySelect companyId={selection.companyId} poolName={name}

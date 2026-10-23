@@ -41,16 +41,18 @@ export async function prepareWorkerSkills({ workspace, skills, apiUrl, authToken
   }
   if (!names.has("paperclip/skill.md")) throw new Error("Skill bundle is missing paperclip/SKILL.md")
   signal?.throwIfAborted()
-  if (await git(["ls-files", "--", ":(icase).worker"])) throw new Error("Reserved .worker cache must not contain tracked files")
+  if (git && await git(["ls-files", "--", ":(icase).worker"])) throw new Error("Reserved .worker cache must not contain tracked files")
   const cache = path.join(workspace, ".worker")
   if (!await existing(cache, true)) await fs.mkdir(cache)
-  const exclude = path.resolve(workspace, await git(["rev-parse", "--git-path", "info/exclude"]))
-  const info = path.dirname(exclude)
-  if (!await existing(info, true)) await fs.mkdir(info)
-  if (await existing(exclude)) {
-    const text = await fs.readFile(exclude, "utf8")
-    if (!text.split(/\r?\n/).includes("/.worker/")) await fs.appendFile(exclude, "\n/.worker/\n")
-  } else await fs.writeFile(exclude, "/.worker/\n", { flag: "wx" })
+  if (git) {
+    const exclude = path.resolve(workspace, await git(["rev-parse", "--git-path", "info/exclude"]))
+    const info = path.dirname(exclude)
+    if (!await existing(info, true)) await fs.mkdir(info)
+    if (await existing(exclude)) {
+      const text = await fs.readFile(exclude, "utf8")
+      if (!text.split(/\r?\n/).includes("/.worker/")) await fs.appendFile(exclude, "\n/.worker/\n")
+    } else await fs.writeFile(exclude, "/.worker/\n", { flag: "wx" })
+  }
   const zipFile = path.join(cache, "skills.zip")
   const zipInfo = await existing(zipFile)
   let archive = zipInfo && zipInfo.size <= MAX_ZIP ? await fs.readFile(zipFile) : null

@@ -227,8 +227,7 @@ the failed Test setup does not qualify successful live cleanup.
 Review: `baseline`.
 
 API: `present` — GET/POST /api/companies/{companyId}/agent-pools;
-GET /api/companies/{companyId}/agent-pools/hosted-defaults;
-PATCH/POST /api/companies/{companyId}/agent-pools/{poolId};
+POST /api/companies/{companyId}/agent-pools/{poolId};
 GET /api/companies/{companyId}/agent-pools/{poolId}/status;
 GET /api/companies/{companyId}/agent-pools/{poolId}/repos;
 GET/POST /api/companies/{companyId}/agent-pools/{poolId}/workers;
@@ -246,17 +245,25 @@ its assigned run context and transient run-scoped tool credentials, not board
 authority or the credentials of another pool.
 Hosted provider calls use Clippy's managed identity, not agent credentials.
 The provider allowlists the caller and scopes persisted pool IDs to it.
-Pool conversion revokes credentials and disconnects workers in both directions.
+New defaults are Hosted; additional pool creation accepts only a name and
+creates Devbox pools. Type changes and provider-configuration routes are absent.
+The built-in host connection comes only from deployment environment variables;
+stored per-pool URL/audience values cannot redirect it. Manual pairing is
+restricted to non-default Devbox pools. Legacy `freelance` records are exposed
+as Devbox without rewriting them or automatically converting existing defaults.
+The settings worker filter initially hides revoked and disconnected workers;
+other filters only change visibility, not credential validity or operator access.
 Repository selection remains company/catalog-scoped; reference metadata grants
 no operational instruction authority. Observed active/provisioning counts cannot
 dispatch a run: only a compatible actual socket advertising
-`hosted_repositories_v1` qualifies. Provider configuration, demand and status
-remain board-only. Focused fixture tests do not qualify a live managed-identity
+`hosted_repositories_v1` qualifies. Demand and status remain board-only;
+provider connection configuration belongs to deployment operators.
+Focused fixture tests do not qualify a live managed-identity
 deployment or a permitted-agent journey.
 POST/DELETE /api/agent-pool/hosted/workers additionally require an Entra
 application token with `AdoPipelines` and an exact configured provider identity,
-bound to the stored company/pool/provider. They do not accept agent keys,
-delegated user tokens or unrelated providers. The provider parent owns managed-identity
+bound to the stored company/pool/provider ID and environment-connected host. They do not accept agent keys,
+delegated user tokens or unrelated providers. The trusted provider parent owns managed-identity
 credentials and catalog restoration; the worker receives transient capabilities
 over private stdio. Busy/idle state is provider-persisted, and retirement requires
 the broker's final result and stop receipts. The deployed Hosted path requires
@@ -300,6 +307,24 @@ is granted. Source and fixture controls:
 The core skill is injected and standard task/wake/auth environment is populated
 per assignment. Agents use the existing issue comments/update APIs for task-chat
 progress and completion under their normal ownership, company and run gates.
+
+Updated Hosted workers negotiate `hosted_workspace_v2` and receive the entire
+operator-owned catalog, not an agent-selected primary repository. Provider-defined slot
+registrations persist across execution-fenced activation/deactivation; explicit
+revocation remains authoritative. One Hosted pool per company is enforced in
+the database; additional Devbox pools retain their independent lifecycle.
+All catalog checkouts are siblings under a non-Git root. The read-only
+`worker_shared` guidance/skills override writable repository copies; other
+read-only references do not activate skills. Read-only is instruction policy,
+not process isolation. A repository-selecting Hosted publication tool sends
+committed changes only from writable catalog checkouts through the trusted
+provider publisher, then uses the same run-bound Paperclip registration and
+reconciliation gates above. No repository write credential is given to the
+model. Source and fixture controls:
+[Hosted publication](../../../minicode/server/hosted-publication.js),
+[multi-repository regressions](../../../minicode/test/hosted-publication.test.js),
+[guidance regressions](../../../minicode/test/worker-guidance.test.js).
+This describes source/fixture evidence, not live multi-repository qualification.
 
 Policy: board and company access for management, pool ownership for worker
 creation/revocation; company and pool binding for dispatch. Tokens are hashed at

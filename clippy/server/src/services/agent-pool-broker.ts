@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   AGENT_POOL_INLINE_INSTRUCTIONS, AGENT_POOL_PROTOCOL_VERSION, AGENT_POOL_SKILL_BUNDLE,
   AGENT_POOL_HOSTED_REPOSITORIES,
+  AGENT_POOL_HOSTED_WORKSPACE,
   agentPoolHelloSchema, agentPoolInstructionsSchema, agentPoolNameSchema, agentPoolTaskSchema,
 } from "@paperclipai/shared";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../adapters/types.js";
@@ -73,9 +74,12 @@ export class AgentPoolBroker {
   }
 
   private requiredCapabilities(ctx: AdapterExecutionContext) {
+    const selection = ctx.context.paperclipHostedRepositories;
+    const allRepositories = selection !== null && typeof selection === "object"
+      && "mode" in selection && selection.mode === "all_repositories";
     return [AGENT_POOL_SKILL_BUNDLE,
       ...(ctx.context.paperclipAgentInstructions ? [AGENT_POOL_INLINE_INSTRUCTIONS] : []),
-      ...(ctx.context.paperclipHostedRepositories ? [AGENT_POOL_HOSTED_REPOSITORIES] : [])];
+      ...(selection ? [allRepositories ? AGENT_POOL_HOSTED_WORKSPACE : AGENT_POOL_HOSTED_REPOSITORIES] : [])];
   }
 
   hasAvailableWorker(ctx: AdapterExecutionContext): boolean {
@@ -143,7 +147,7 @@ export class AgentPoolBroker {
     this.revokedWorkers.delete(workerId);
   }
 
-  private disconnect(workerId: string, message: string) {
+  disconnect(workerId: string, message: string) {
     const peer = this.peers.get(workerId);
     if (!peer) return;
     if (peer.expiry) clearTimeout(peer.expiry);

@@ -246,7 +246,7 @@ export async function startAgentPoolWorker({
   publisherFactory = createGitHubPublisher,
   azureDevOpsPublisherFactory = createAzureDevOpsPublisher,
   sessionFactory = (options) => new AgentSession(options),
-  prepareHostedRepositories, gitEnvironment, onStateChange = async () => {},
+  prepareHostedRepositories, hostedWorkspaceMode, hostedPublicationTool, gitEnvironment, onStateChange = async () => {},
   assignmentTimeoutMs, idleTimeoutMs,
   reconnectMs = 1000, leaseMs = LEASE_MS,
   outputMode = "normal",
@@ -268,6 +268,8 @@ export async function startAgentPoolWorker({
   if (prepareHostedRepositories && (workspaceMode !== "worktree" || azurePublication || githubRepo || githubUser)) {
     throw new Error("Hosted repository assignments require isolated worktrees and do not support a fixed publication repository")
   }
+  const hostedRoot = hostedWorkspaceMode === "all_repositories"
+  if (hostedRoot && !prepareHostedRepositories) throw new Error("An all-repository workspace requires the Hosted parent harness")
   const origin = agentPoolServerUrl(server)
   const workspaceOptions = {
     cwd, workspaceRoot, workspaceMode, workerName, workerId, workerShared, referenceRepos, sourceBranch,
@@ -277,7 +279,9 @@ export async function startAgentPoolWorker({
     workspaceOptions.workerName = `w-${workerId.slice(0, 8)}-${createHash("sha256").update(cwd).digest("hex").slice(0, 8)}`
   }
   let references, gitSync, worktree
-  ;({ cwd, workspaceRoot, workerShared, references, gitSync, worktree } = await prepareWorkspace(workspaceOptions))
+  if (!hostedRoot) {
+    ;({ cwd, workspaceRoot, workerShared, references, gitSync, worktree } = await prepareWorkspace(workspaceOptions))
+  }
   const publisher = azurePublication
     ? await azureDevOpsPublisherFactory({ repoRoot: cwd, organization: azureDevOpsOrg, project: azureDevOpsProject,
       repository: azureDevOpsRepo, user: azureDevOpsUser, alias: azureDevOpsAlias, clippyAuth })
@@ -419,45 +423,57 @@ export async function startAgentPoolWorker({
       if (stopped || run.cancelled) return { exitCode: 130 }
       run.controller.signal.throwIfAborted()
       const agentInstructions = readTaskInstructions(task)
+      let hostedRepositories = null
       if (prepareHostedRepositories) {
-        if (!task.repositories) throw new Error("Hosted assignment requires primary and reference repository descriptors")
+        if (!task.repositories) throw new Error("Hosted assignment requires repository descriptors")
         const selected = await prepareHostedRepositories(task.repositories, { signal: run.controller.signal })
         await diskCheck
         clearTimeout(diskTimer)
-        ;({ cwd, workspaceRoot, workerShared, references, gitSync, worktree } = await prepareWorkspace({
-          ...workspaceOptions, cwd: selected.cwd, sourceBranch: selected.sourceBranch,
-          preparedReferences: selected.references,
-          workerName: `w-${workerId.slice(0, 8)}-${createHash("sha256").update(selected.cwd).digest("hex").slice(0, 8)}`,
-        }))
-        monitorDisk()
+        if (hostedRoot) {
+          if (selected.mode !== "all_repositories" || !Array.isArray(selected.repositories)
+            || !selected.repositories.length || selected.cwd !== cwd) throw new Error("Invalid Hosted all-repository workspace")
+          hostedRepositories = selected.repositories
+          workerShared = selected.workerShared
+        } else {
+          ;({ cwd, workspaceRoot, workerShared, references, gitSync, worktree } = await prepareWorkspace({
+            ...workspaceOptions, cwd: selected.cwd, sourceBranch: selected.sourceBranch,
+            preparedReferences: selected.references,
+            workerName: `w-${workerId.slice(0, 8)}-${createHash("sha256").update(selected.cwd).digest("hex").slice(0, 8)}`,
+          }))
+          monitorDisk()
+        }
       } else if (task.repositories) {
         throw new Error("This worker does not support Hosted repository assignments")
       }
       run.controller.signal.throwIfAborted()
-      const { references: referenceManifest, primaryCommit, primaryBranch } = await gitSync.prepare({ signal: run.controller.signal })
+      const { references: referenceManifest, primaryCommit, primaryBranch } = hostedRoot
+        ? { references: hostedRepositories.filter(repo => repo.readOnly && repo.path !== workerShared) }
+        : await gitSync.prepare({ signal: run.controller.signal })
       if (stopped || run.cancelled || run.timedOut) return { exitCode: 130 }
-      const workspace = worktree
+      const workspace = hostedRoot ? cwd : worktree
         ? await worktree.assign(task.agent?.id, { commit: primaryCommit })
         : await prepareAgentWorkspace(cwd, workspaceRoot, task.agent?.id)
-      if (!worktree) await gitSync.resetPrimary(workspace, primaryCommit, { signal: run.controller.signal })
+      if (!hostedRoot && !worktree) await gitSync.resetPrimary(workspace, primaryCommit, { signal: run.controller.signal })
       if (worktree) enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Clean assignment worktree reset to ${primaryCommit ? `assigned remote commit ${primaryCommit}` : "source HEAD"}: ${workspace}\n` })
       const skills = await prepareWorkerSkills({
         workspace, skills: task.skills, apiUrl: agentApiUrl, authToken: task.authToken, runId: task.runId,
-        signal: run.controller.signal, git: args => git(workspace, args),
+        signal: run.controller.signal, git: hostedRoot ? null : args => git(workspace, args),
       })
-      const guidance = await readWorkerGuidance({ workspace, workerShared, bundle: skills })
+      const guidance = await readWorkerGuidance({ workspace, workerShared, bundle: skills, repositories: hostedRepositories ?? [] })
       const repositoryInstructions = guidance.workspaceInstructions
       if (stopped || run.cancelled) return { exitCode: 130 }
       await worktree?.ensureDiskSpace()
       if (stopped || run.cancelled) return { exitCode: 130 }
-      run.publication = publisher ? paperclipPublicationTool(publisher({ workspace, agentId: task.agent.id, agentName: task.agent.name }), {
+      run.publication = hostedRoot ? hostedPublicationTool?.({
+        repositories: hostedRepositories, task, apiUrl: agentApiUrl,
+      }) : publisher ? paperclipPublicationTool(publisher({ workspace, agentId: task.agent.id, agentName: task.agent.name }), {
         apiUrl: agentApiUrl, authToken: task.authToken, runId: task.runId, agentId: task.agent.id,
         companyId: task.agent.companyId, issueId: contextString(task.context.taskId, task.context.issueId),
         repository: publicationRepository,
         ...(azurePublication ? { provider: "azure_devops", pullRequestUrl: publisher.pullRequestUrl,
           branchForCommit: publisher.branchForCommit } : {}),
       }) : null
-      const synchronization = await gitSync.tool({
+      const synchronization = hostedRoot ? null : await gitSync.tool({
         workspace, signal: run.controller.signal,
         afterReset: ({ signal }) => prepareWorkerSkills({
           workspace, skills: task.skills, apiUrl: agentApiUrl, authToken: task.authToken, runId: task.runId,
@@ -472,6 +488,15 @@ export async function startAgentPoolWorker({
           "These built-in rules also take precedence over agent-specific instructions. Agent-specific instructions take precedence over repository instructions when they conflict.",
           "Among local instructions and same-named skills, worker_shared overrides the worktree; the worktree overrides the downloaded bundle fallback. Local guidance and all skills remain subordinate to the built-in worker rules and managed agent-specific instructions. Override means selecting guidance, never overwriting files.",
           `Your only writable filesystem scope is your assigned agent workspace: ${workspace}.`,
+          ...(hostedRoot ? [
+            "This workspace is a non-Git parent directory. Every configured repository is available simultaneously; there is no primary repository.",
+            "Write and commit only inside the writable repository checkouts listed below. Do not initialize Git, create commits, or write files at the common parent. Read each repository's AGENTS.md before working in that repository.",
+            "Repository access modes and assignment-start commits (all fetched to their configured branch's latest ref before model execution):",
+            JSON.stringify(hostedRepositories),
+            "Read-only repositories, including the supervisory repository (worker_shared), are instruction-policy boundaries, not OS isolation. Never write, execute scripts, reset, commit, or publish there. The next assignment discards local changes in every checkout.",
+            "Use publish_pull_request with the writable repository name and its local commit. One assignment may publish separate PRs to several repositories.",
+            "worker_shared guidance and same-named skills override every repository. Duplicate skills across writable repositories are qualified as Repository/skill; use them only in that repository. Read-only reference repositories are reference material, not instruction or skill sources.",
+          ] : []),
           ...(primaryBranch ? [`Your assigned primary remote branch is ${primaryBranch}; the assignment started at commit ${primaryCommit}. This is separate from your worker-local branch.`] : []),
           ...(worktree ? ["This worker-agent worktree was clean-reset for this assignment to its assigned remote branch's latest fetched commit (or committed source HEAD for a local-only source). It stays on its worker-local branch, not the source/remote branch. The next assignment discards local edits, ignored/untracked files and checkout-local commits; idle worktrees may also be LRU-evicted to recover disk space. Save durable results through the supplied artifact/task APIs or the enabled publication tool before finishing; never rely on local files surviving completion."] : []),
           `Your additional read-only shared folder is: ${workerShared}. Its path is also available to tools in the WORKER_SHARED environment variable (PowerShell: $env:WORKER_SHARED).`,
@@ -634,7 +659,8 @@ export async function startAgentPoolWorker({
       }, 15_000)
       pingTimer.unref()
       send({ type: "hello", protocolVersion: PROTOCOL_VERSION,
-        capabilities: [INLINE_INSTRUCTIONS, SKILL_BUNDLE, ...(prepareHostedRepositories ? ["hosted_repositories_v1", "retiring_ready_v1"] : [])],
+        capabilities: [INLINE_INSTRUCTIONS, SKILL_BUNDLE, ...(prepareHostedRepositories
+          ? [hostedRoot ? "hosted_workspace_v2" : "hosted_repositories_v1", "retiring_ready_v1"] : [])],
         instanceId, runId: active?.id ?? null })
     })
     current.on("ping", heartbeat)

@@ -35,17 +35,31 @@ async function discoverSkills(root, source) {
   return skills
 }
 
-export async function readWorkerGuidance({ workspace, workerShared, bundle }) {
+export async function readWorkerGuidance({ workspace, workerShared, bundle, repositories = [] }) {
   const [workspaceInstructions, sharedInstructions, workspaceSkills, sharedSkills] = await Promise.all([
     readInstructions(workspace), readInstructions(workerShared),
     discoverSkills(workspace, "worktree"), discoverSkills(workerShared, "worker_shared"),
   ])
   const selected = new Map()
+  const repositorySkills = await Promise.all(repositories.filter(repo => !repo.readOnly).map(async repo => ({
+    repository: repo.name, skills: await discoverSkills(repo.path, `repository:${repo.name}`),
+  })))
+  const grouped = new Map()
+  for (const { repository, skills } of repositorySkills) for (const skill of skills) {
+    const name = skill.name.toLowerCase()
+    const entries = grouped.get(name) ?? []
+    entries.push({ ...skill, repository })
+    grouped.set(name, entries)
+  }
+  const sharedNames = new Set(sharedSkills.map(skill => skill.name.toLowerCase()))
+  const catalogSkills = [...grouped.entries()].flatMap(([name, entries]) => sharedNames.has(name) ? []
+    : entries.length === 1 ? entries : entries.map(skill => ({ ...skill, name: `${skill.repository}/${skill.name}` })))
   for (const [source, skills] of [
     ["bundle", (bundle?.entries ?? []).map(entry => ({
       name: entry.split("/")[0], file: path.join(bundle.directory, ...entry.split("/")), source: "bundle",
     }))],
     ["worktree", workspaceSkills],
+    ["repositories", catalogSkills],
     ["worker_shared", sharedSkills],
   ]) {
     const names = new Set()

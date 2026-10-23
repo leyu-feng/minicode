@@ -138,7 +138,7 @@ export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issue
         return { ...receipt, paperclip: { issueId: target, workProductId: product.id, commentId: comment.id } }
       } catch (cause) {
         const message = receipt
-          ? `${provider === "github" ? "GitHub" : "Azure DevOps"} PR exists, but Paperclip registration is incomplete. Retry the same commit to reconcile. Receipt: ${JSON.stringify(receipt)}. ${cause.message}`
+          ? `${provider === "github" ? "GitHub" : provider === "azure_devops" ? "Azure DevOps" : provider} PR exists, but Paperclip registration is incomplete. Retry the same commit to reconcile. Receipt: ${JSON.stringify(receipt)}. ${cause.message}`
           : `PR publication/registration failed: ${cause.message}`
         if (receipt) failures.set(key, message)
         throw new Error(message, { cause })

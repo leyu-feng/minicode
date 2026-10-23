@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { createAgentPoolSchema, createAgentPoolWorkerSchema, pairAgentPoolWorkerSchema,
-  updateAgentPoolSchema, hostedWorkerDemandSchema, hostedAgentPoolWorkerSchema } from "@paperclipai/shared";
+  hostedWorkerDemandSchema, hostedAgentPoolWorkerSchema, hostedAgentPoolSlotsSchema } from "@paperclipai/shared";
 import { z } from "zod";
 import { validate } from "../middleware/validate.js";
 import { assertBoard, assertBoardOrAgent, assertCompanyAccess } from "./authz.js";
@@ -10,12 +10,24 @@ import { agentPoolService } from "../services/agent-pools.js";
 import { agentPoolBroker } from "../services/agent-pool-broker.js";
 import { unauthorized, notFound } from "../errors.js";
 import { agentPoolSkillsArchive } from "../services/agent-pool-skills.js";
-import { defaultHostedWorkerConfig } from "../services/hosted-worker-client.js";
 import { authenticateHostedWorkerProvider } from "../services/entra-hosted-workers.js";
 
 export function agentPoolPairingRoutes(db: Db) {
   const router = Router();
   const svc = agentPoolService(db);
+  router.post("/api/agent-pool/hosted/slots", validate(hostedAgentPoolSlotsSchema), async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const grant = await authenticateHostedWorkerProvider(req.headers.authorization);
+    const input = hostedAgentPoolSlotsSchema.parse(req.body);
+    res.json(await svc.registerHostedSlots(input, grant));
+  });
+  router.put("/api/agent-pool/hosted/workers", validate(hostedAgentPoolWorkerSchema), async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const grant = await authenticateHostedWorkerProvider(req.headers.authorization);
+    const result = await svc.deactivateHostedWorker(hostedAgentPoolWorkerSchema.parse(req.body), grant);
+    if (result.deactivated) agentPoolBroker.disconnect(result.workerId, "Hosted worker connection is inactive");
+    res.status(204).end();
+  });
   router.post("/api/agent-pool/hosted/workers", validate(hostedAgentPoolWorkerSchema), async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     const grant = await authenticateHostedWorkerProvider(req.headers.authorization);
@@ -82,7 +94,6 @@ export function agentPoolRoutes(db: Db) {
   const company = (value: unknown) => z.string().uuid().parse(value);
   const id = company;
   router.get(base, async (req, res) => res.json(await svc.list(company(req.params.companyId))));
-  router.get(`${base}/hosted-defaults`, (_req, res) => res.json(defaultHostedWorkerConfig()));
   router.post(base, validate(createAgentPoolSchema), async (req, res) => {
     const companyId = company(req.params.companyId);
     const pool = await svc.create(companyId, createAgentPoolSchema.parse(req.body).name);
@@ -91,18 +102,6 @@ export function agentPoolRoutes(db: Db) {
       action: "agent_pool.created", entityType: "agent_pool", entityId: pool.id, details: { name: pool.name },
     });
     res.status(201).json(pool);
-  });
-  router.patch(`${base}/:poolId`, validate(updateAgentPoolSchema), async (req, res) => {
-    const companyId = company(req.params.companyId);
-    const poolId = id(req.params.poolId);
-    const input = updateAgentPoolSchema.parse(req.body);
-    await svc.get(companyId, poolId);
-    await logActivity(db, {
-      companyId, actorType: "user", actorId: req.actor.userId ?? "local-board",
-      action: "agent_pool.settings_update_attempted", entityType: "agent_pool", entityId: poolId,
-      details: { type: input.type },
-    });
-    res.json(await svc.update(companyId, poolId, input));
   });
   router.get(`${base}/:poolId/status`, async (req, res) =>
     res.json(await svc.status(company(req.params.companyId), id(req.params.poolId))));
@@ -124,7 +123,7 @@ export function agentPoolRoutes(db: Db) {
     const workers = await svc.workers(company(req.params.companyId), id(req.params.poolId));
     res.json(workers.map((worker) => ({
       id: worker.id, poolId: worker.poolId, name: worker.name,
-      paired: Boolean(worker.clientTokenHash), revoked: Boolean(worker.revokedAt),
+      paired: /^W\d\d$/.test(worker.name) || Boolean(worker.clientTokenHash), revoked: Boolean(worker.revokedAt),
       status: agentPoolBroker.status(worker.id),
     })));
   });

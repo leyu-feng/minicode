@@ -345,8 +345,10 @@ function isArcPrimary(text: string): boolean {
 describe("OnboardingWizard restore-gate (stale localStorage across accounts)", () => {
   beforeEach(() => {
     mockAgentPoolsApi.list.mockReset().mockResolvedValue([{ id: "pool-default", companyId: "company-new", name: "default",
-      type: "freelance", hostedApiUrl: null, hostedAudience: null, hostedPoolId: null }]);
-    mockAgentPoolsApi.create.mockReset().mockImplementation(async (companyId, name) => ({ id: `pool-${name}`, companyId, name }));
+      type: "devbox", hostedApiUrl: null, hostedAudience: null, hostedPoolId: null }]);
+    mockAgentPoolsApi.create.mockReset().mockImplementation(async (companyId, name) => ({
+      id: `pool-${name}`, companyId, name, type: "devbox", hostedApiUrl: null, hostedAudience: null, hostedPoolId: null,
+    }));
     mockAdaptersApi.list.mockReset().mockResolvedValue([]);
     mockEnvironmentsApi.probe.mockReset().mockResolvedValue({ ok: true, driver: "sandbox", summary: "Measured image", details: { platformQualificationRecorded: true, leaseId: "platform-lease" } });
     localHealth.get.mockResolvedValue({ deploymentMode: "authenticated" });
@@ -899,9 +901,9 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
 
       it("reuses a selected existing pool without creating another one", async () => {
         mockAgentPoolsApi.list.mockResolvedValue([
-          { id: "pool-default", companyId: "company-new", name: "default", type: "freelance", hostedApiUrl: null, hostedAudience: null, hostedPoolId: null },
-          { id: "pool-build", companyId: "company-new", name: "build", type: "freelance", hostedApiUrl: null, hostedAudience: null, hostedPoolId: null },
-          { id: "pool-review", companyId: "company-new", name: "review", type: "freelance", hostedApiUrl: null, hostedAudience: null, hostedPoolId: null },
+          { id: "pool-default", companyId: "company-new", name: "default", type: "devbox", hostedApiUrl: null, hostedAudience: null, hostedPoolId: null },
+          { id: "pool-build", companyId: "company-new", name: "build", type: "devbox", hostedApiUrl: null, hostedAudience: null, hostedPoolId: null },
+          { id: "pool-review", companyId: "company-new", name: "review", type: "devbox", hostedApiUrl: null, hostedAudience: null, hostedPoolId: null },
         ]);
         const { root, clickByText } = await openConnectStep({ agentPool: true });
         await selectPool("review");

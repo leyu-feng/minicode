@@ -41,24 +41,41 @@ turn; do not count a nested discovery interval twice.
 ### `agent-pool-setup`
 
 Open Company settings and its AgentPool workers section. The `default` pool is
-automatic; create distinct named pools there, generate one-time pairing tokens
-for workers, and inspect or revoke them. Hire an agent with AgentPool and select
+always Hosted for new companies; create distinct named Devbox pools there, generate
+one-time pairing tokens for Devbox workers, and inspect or revoke them. The worker
+list defaults to active (paired, non-revoked idle/busy) connections. Select
+Disconnected to include offline, reconnecting and awaiting-pairing workers,
+Revoked for revoked registrations, or All for the complete inventory.
+Hire an agent with AgentPool and select
 the pool name. Follow [worker setup](../../../minicode/README.md#connect-as-an-agentpool-worker)
 on the worker machine.
 
-Existing pools are Freelance. Select Hosted to configure a managed-identity
-provider and confirm clearing all pairings; switching back also disconnects
-workers. Inspect the persisted provider pool ID, observed capacity and repository
-catalog. Configure an agent's primary and distinct read-only references; all
-catalog repositories may be primary and the marked default is preselected.
-The provider owns capacity targets, execution lifetimes and reconciliation
-schedules. Counts reflect worker heartbeats and real reservations; repeated
-backlog reports do not accumulate. Assignment and idle limits are provider-configured. The harness prepares catalog-selected repositories
+The default Hosted pool uses the deployment's built-in agent host through
+environment variables and managed identity. Pool types are fixed; additional
+pools are always Devbox. There are no type-switching, provider URL/audience or
+manual backlog controls. Missing host configuration is a visible blocker, not
+a Devbox fallback. Legacy Freelance rows display as Devbox; existing defaults
+require manual conversion and are never rewritten automatically.
+Inspect observed capacity and the repository catalog. Updated Hosted workers
+prepare the entire global catalog below one non-Git workspace root; there is no
+primary repository selection. Provider operators manage writable and read-only
+entries through their repository administration surface. Exactly one read-only
+supervisory repository becomes `worker_shared` and takes priority over repository-local guidance and
+skills. Read-only references do not activate their own skills. Legacy workers
+retain their primary/reference selection contract.
+The provider allocates executions from persistent logical worker identities,
+multiplexing idle connections across organizations. Capacity targets, slot
+names, catalog size and execution lifetimes are provider-configured.
+Normal recycling deactivates connections without revoking their registrations.
+Provider reconciliation heals missing capacity. Counts reflect worker heartbeats
+and real reservations; repeated backlog reports do not accumulate. Assignment
+and idle waits have configured bounds; workers retire according to provider
+policy after completion. The harness prepares catalog-selected repositories
 before model execution. Without an actual compatible worker, a Hosted task
 must request capacity, wait at most two minutes and fail visibly, never claim
 execution from counts. Managed workers retire only after a broker receipt.
 Local checks are not evidence of a live Hosted deployment.
-See the [provider contract](../../doc/agent-pool-protocol.md#freelance-and-hosted-pools).
+See the [provider contract](../../doc/agent-pool-protocol.md#devbox-and-hosted-pools).
 
 Updated workers download Paperclip's bundled operational and onboarding skills into the assigned
 checkout's Git-ignored `.worker/skills`, not the host-owned shared folder. Confirm

@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto"
 import { AgentSession } from "./agent-session.js"
 import { startAgentPoolWorker } from "./agent-pool-worker.js"
 import { hostedBindingToken, startHostedFleet } from "./hosted-fleet.js"
+import { createHostedPublicationTool } from "./hosted-publication.js"
 
 // The parent owns managed identity and repository restoration. Credentials cross this private
 // stdio channel only, never argv, model context, inherited shell environment or a saved auth file.
@@ -78,6 +79,10 @@ export async function runHostedWorkerCli() {
       clientToken: binding ? hostedBindingToken(clientToken, binding) : clientToken,
       cwd: configuration.cwd, sourceBranch: configuration.branch, entraSession,
       workerShared: configuration.workerShared,
+      hostedWorkspaceMode: configuration.workspaceMode,
+      hostedPublicationTool: options => createHostedPublicationTool({
+        ...options, request,
+      }),
       minFreeGiB: configuration.minFreeGiB, targetFreeGiB: configuration.targetFreeGiB,
       assignmentTimeoutMs: configuration.assignmentTimeoutSeconds * 1000,
       idleTimeoutMs: configuration.idleTimeoutSeconds * 1000,

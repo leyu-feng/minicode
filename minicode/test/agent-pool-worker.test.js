@@ -170,6 +170,7 @@ test("Hosted assignments persist busy before repository preparation and retire o
       return report.state !== "idle" || transitions.length === 1
     },
   })
+
   selectedSource = path.join(path.dirname(fixture.source), "selected")
   const selectedRemote = path.join(path.dirname(fixture.source), "selected-remote.git")
   await fixture.git("clone", "--", fixture.remote, selectedSource)
@@ -194,6 +195,53 @@ test("Hosted assignments persist busy before repository preparation and retire o
   peer.send({ type: "retired" })
   assert.equal(await fixture.worker.finished, null)
   assert.deepEqual(transitions, ["idle", "busy", "repositories", "idle", "stopped"])
+})
+
+test("Hosted all-repository assignments run at a non-Git parent with readonly references and shared guidance", async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "hosted-catalog-test-"))
+  const shared = path.join(root, "worker_shared")
+  const writable = path.join(root, "Main")
+  const reference = path.join(root, "Reference")
+  for (const directory of [shared, writable, reference]) await fs.mkdir(directory)
+  await fs.writeFile(path.join(shared, "AGENTS.md"), "Shared catalog guidance wins.")
+  const descriptors = [
+    { id: "shared", name: "shared-guidance", branch: "main", readOnly: true, path: shared },
+    { id: "main", name: "Main", branch: "main", readOnly: false, path: writable },
+    { id: "ref", name: "Reference", branch: "main", readOnly: true, path: reference },
+  ]
+  const bundle = skillBundle()
+  let sessions = 0
+  class Session extends EventEmitter {
+    constructor(options) { super(); this.options = options }
+    async write() {
+      sessions++
+      assert.equal(this.options.cwd, root)
+      assert.match(this.options.instructions, /Shared catalog guidance wins/)
+      assert.match(this.options.instructions, /there is no primary repository/)
+      assert.match(this.options.instructions, /worker_shared guidance and same-named skills override every repository/)
+      assert.deepEqual(JSON.parse(this.options.env.WORKER_REFERENCE_REPOS_JSON), [descriptors[2]])
+      assert.equal(this.options.tools.length, 0)
+      assert.equal(await fs.readFile(path.join(root, ".worker", "skills", "paperclip", "SKILL.md"), "utf8"),
+        "# Paperclip skill\nPost progress with the issue comments API and verify task completion.")
+      return { exitCode: 0 }
+    }
+    dispose() {}
+    interrupt() {}
+  }
+  const fixture = await harness(t, options => new Session(options), {
+    cwd: root, workspaceMode: "worktree", hostedWorkspaceMode: "all_repositories", bundle,
+    prepareHostedRepositories: async selection => {
+      assert.equal(selection.mode, "all_repositories")
+      return { mode: "all_repositories", cwd: root, workerShared: shared, repositories: descriptors }
+    },
+  })
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const peer = await fixture.welcome(0)
+  assert.ok(peer.messages.find(message => message.type === "hello").capabilities.includes("hosted_workspace_v2"))
+  await executeTask(peer, { runId: "catalog", agent, skills: bundle.skills, authToken: "run-credential",
+    repositories: { mode: "all_repositories", repositories: descriptors } })
+  assert.equal(sessions, 1)
+  await assert.rejects(fs.stat(path.join(root, ".git")), { code: "ENOENT" })
 })
 
 test("an assignment deadline cancels repository preparation before any model starts", async t => {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { hostedWorkerConfigSchema } from "@paperclipai/shared";
+import { hostedAgentPoolSlotsSchema, hostedWorkerConfigSchema, hostedWorkerRepositoriesSchema } from "@paperclipai/shared";
 import { guardedRemoteHttpFetch } from "../services/remote-http-fetch.js";
 import { hostedWorkerClient } from "../services/hosted-worker-client.js";
 
@@ -87,5 +87,33 @@ describe("Hosted worker managed identity client", () => {
       "https://user:password@provider.example/v1/hosted-worker", "https://provider.example/v1/hosted-worker?token=x"]) {
       expect(hostedWorkerConfigSchema.safeParse({ ...config, apiUrl }).success).toBe(false);
     }
+  });
+
+  it("accepts any supervisory repository name and preserves its role through the provider client", async () => {
+    const repositories = [
+      { id: "guide", name: "your-guidance-repo", branch: "release", readOnly: true, supervisory: true, isDefault: false, workspaceMode: "all_repositories" },
+      { id: "code", name: "your-repo", branch: "main", readOnly: false, isDefault: false, workspaceMode: "all_repositories" },
+    ];
+    fetch.mockResolvedValueOnce(Response.json(repositories));
+    expect(await hostedWorkerClient(config).repositories(randomUUID())).toEqual(repositories);
+    for (const invalid of [
+      repositories.map(repo => ({ ...repo, supervisory: false })),
+      repositories.map(repo => ({ ...repo, supervisory: true })),
+      repositories.map(repo => ({ ...repo, readOnly: false })),
+      repositories.map(repo => ({ ...repo, readOnly: undefined })),
+    ]) expect(hostedWorkerRepositoriesSchema.safeParse(invalid).success).toBe(false);
+  });
+
+  it("accepts provider-sized slot catalogs with distinct IDs and names", () => {
+    const input = {
+      companyId: randomUUID(), poolId: randomUUID(), poolName: "default",
+      slots: [{ workerId: randomUUID(), name: "worker-a" }, { workerId: randomUUID(), name: "worker-b" }],
+    };
+    expect(hostedAgentPoolSlotsSchema.parse(input)).toEqual(input);
+    expect(hostedAgentPoolSlotsSchema.safeParse({ ...input, slots: [] }).success).toBe(false);
+    expect(hostedAgentPoolSlotsSchema.safeParse({ ...input, slots: [input.slots[0], input.slots[0]] }).success).toBe(false);
+    expect(hostedAgentPoolSlotsSchema.safeParse({
+      ...input, slots: input.slots.map(slot => ({ ...slot, name: "same" })),
+    }).success).toBe(false);
   });
 });
