@@ -19,7 +19,8 @@ export function hostedWorkerClient(config: HostedWorkerConfig) {
   const validated = hostedWorkerConfigSchema.parse(config);
   const base = validated.apiUrl.replace(/\/+$/, "");
   async function request(method: string, path: string, expected: number, body?: unknown, signal?: AbortSignal) {
-    const deadline = AbortSignal.timeout(10_000);
+    const reconcilesWorkers = method === "DELETE" || (method === "POST" && path !== "");
+    const deadline = AbortSignal.timeout(reconcilesWorkers ? 90_000 : 10_000);
     const abortSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     credential ??= new ManagedIdentityCredential(process.env.AZURE_CLIENT_ID
       ? { clientId: process.env.AZURE_CLIENT_ID } : {});

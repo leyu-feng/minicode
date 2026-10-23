@@ -50,6 +50,9 @@ If provisioning or connectivity fails, saved settings and revoked pairings
 remain in effect. The pending pool stays visible; retry saving or loading its
 status after correcting the provider. No fallback to Freelance or user
 credentials occurs. Company deletion also deletes its provider pools.
+Demand and deletion requests allow up to 90 seconds for provider reconciliation;
+reads and pool registration retain a 10-second limit. Caller cancellation still
+applies to every request.
 
 The managed-identity-authenticated provider contract is:
 

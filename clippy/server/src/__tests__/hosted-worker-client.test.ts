@@ -57,6 +57,31 @@ describe("Hosted worker managed identity client", () => {
     await expect(client.status(poolId)).rejects.toThrow("HTTP 403; expected 200");
   });
 
+  it.each(["report", "delete"] as const)("allows %s to finish a slow Azure job reconciliation", async (operation) => {
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((milliseconds) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new Error("Provider deadline exceeded")), milliseconds);
+      return controller.signal;
+    });
+    try {
+      fetch.mockImplementation(async (_url, init) => new Promise<Response>((resolve, reject) => {
+        const signal = init.signal!;
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        setTimeout(() => resolve(new Response(null, { status: operation === "report" ? 202 : 204 })), 15_000);
+      }));
+      const client = hostedWorkerClient(config);
+      const poolId = randomUUID();
+      const completion = expect(operation === "report" ? client.report(poolId, 0) : client.delete(poolId))
+        .resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(15_000);
+      await completion;
+    } finally {
+      timeout.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("validates provider endpoints safely while the URL field is incomplete", () => {
     for (const apiUrl of ["", "http://provider.example/v1/hosted-worker", "not-a-url",
       "https://user:password@provider.example/v1/hosted-worker", "https://provider.example/v1/hosted-worker?token=x"]) {
