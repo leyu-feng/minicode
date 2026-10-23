@@ -2430,6 +2430,13 @@
       "when": 1792711406820,
       "tag": "0348_nappy_leo",
       "breakpoints": true
+    },
+    {
+      "idx": 349,
+      "version": "7",
+      "when": 1792732675720,
+      "tag": "0349_clumsy_banshee",
+      "breakpoints": true
     }
   ]
 }

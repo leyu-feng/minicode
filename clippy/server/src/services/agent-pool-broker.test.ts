@@ -19,6 +19,7 @@ function context(runId = randomUUID(), companyId = "company-a"): AdapterExecutio
 
 async function harness(reconnectMs = 1000) {
   const broker = new AgentPoolBroker(reconnectMs);
+  const identities = new Map<string, { executionId?: string; poolName?: string }>();
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await once(server, "listening");
   const address = server.address();
@@ -26,14 +27,16 @@ async function harness(reconnectMs = 1000) {
   const port = address.port;
   server.on("connection", (socket, req) => {
     const id = new URL(req.url!, "http://localhost").searchParams.get("id")!;
-    broker.attach({ id, companyId: "company-a", poolName: "default" }, socket);
+    broker.attach({ id, companyId: "company-a", poolName: "default", ...identities.get(id) }, socket);
   });
   resources.push(async () => {
     broker.close();
     for (const socket of server.clients) socket.terminate();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
-  async function worker(id = randomUUID(), instanceId = randomUUID(), runId: string | null = null, ready = true, capabilities: string[] = ["skill_bundle_v1"]) {
+  async function worker(id = randomUUID(), instanceId = randomUUID(), runId: string | null = null, ready = true, capabilities: string[] = ["skill_bundle_v1"],
+    identity: { executionId?: string; poolName?: string } = {}) {
+    identities.set(id, identity);
     const socket = new WebSocket(`ws://127.0.0.1:${port}?id=${id}`);
     const messages: Array<Record<string, unknown>> = [];
     socket.on("message", (data) => messages.push(JSON.parse(data.toString())));
@@ -63,6 +66,23 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("reserves only one pool binding of a shared execution and releases it after failed admission", async () => {
+    const { broker, worker } = await harness();
+    const executionId = randomUUID();
+    const first = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1"], { executionId });
+    await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1"], { executionId, poolName: "other" });
+    const ctx = context();
+    const other = context();
+    other.config.name = "other";
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    expect(broker.reservedWorker(ctx.runId)).toMatchObject({ id: first.id, executionId });
+    expect(broker.reserveAvailableWorker(other)).toBe(false);
+    broker.prepareExecution = async () => { throw new Error("Organization busy limit reached"); };
+    await expect(broker.execute(ctx)).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
+    expect(first.messages).toEqual([]);
+    expect(broker.reserveAvailableWorker(other)).toBe(true);
+  });
+
   it("settles an acknowledged result with retirement without making the worker available again", async () => {
     const { broker, worker } = await harness();
     const client = await worker();

@@ -74,6 +74,7 @@ export const hostedWorkerStatusSchema = z.object({
   activeWorkers: z.number().int().nonnegative(),
   provisioningWorkers: z.number().int().nonnegative(),
   isMock: z.boolean(),
+  sharedFleet: z.boolean().optional(),
 });
 export const hostedWorkerRepositorySchema = z.object({
   id: z.string().min(1).max(200),
@@ -109,7 +110,10 @@ export const hostedAgentPoolWorkerSchema = z.object({
   poolName: agentPoolNameSchema,
   workerId: z.string().uuid(),
   clientToken: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
-}).strict();
+  executionId: z.string().uuid().optional(),
+  generation: z.string().uuid().optional(),
+}).strict().refine(input => Boolean(input.executionId) === Boolean(input.generation),
+  "Shared Hosted workers require both executionId and generation.");
 
 export interface AgentPool {
   id: string;

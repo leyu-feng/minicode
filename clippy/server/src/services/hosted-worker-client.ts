@@ -57,6 +57,10 @@ export function hostedWorkerClient(config: HostedWorkerConfig) {
     async report(poolId: string, itemsWaiting: number, signal?: AbortSignal) {
       await request("POST", path(poolId), 202, hostedWorkerDemandSchema.parse({ itemsWaiting }), signal);
     },
+    async claim(poolId: string, assignment: { workerId: string; runId: string; agentId: string }, signal?: AbortSignal) {
+      const input = z.object({ workerId: z.string().uuid(), runId: z.string().uuid(), agentId: z.string().uuid() }).parse(assignment);
+      await request("POST", `${path(poolId)}/claim`, 200, input, signal);
+    },
     async delete(poolId: string) { await request("DELETE", path(poolId), 204); },
   };
 }

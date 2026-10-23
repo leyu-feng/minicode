@@ -101,6 +101,7 @@ export function agentPoolService(db: Db) {
         const inserted = await tx.insert(agentPoolWorkers).values({
           id: input.workerId, poolId: pool.id, name: `hosted-${input.workerId}`,
           clientTokenHash: hashAgentPoolToken(input.clientToken),
+          hostedExecutionId: input.executionId ?? null, hostedGeneration: input.generation ?? null,
         }).onConflictDoNothing().returning({ id: agentPoolWorkers.id });
         created = inserted.length !== 0;
       }
@@ -108,14 +109,26 @@ export function agentPoolService(db: Db) {
         .where(eq(agentPoolWorkers.id, input.workerId)).for("update");
       if (!worker) return { workerId: input.workerId, created: false, revoked: false };
       if (worker.poolId !== pool.id) throw forbidden("The Hosted worker belongs to another pool");
+      let reactivated = false;
       if (revoke) {
+        if (input.executionId && (worker.hostedExecutionId !== input.executionId || worker.hostedGeneration !== input.generation)) {
+          return { workerId: worker.id, created: false, revoked: false, reactivated: false };
+        }
         await tx.update(agentPoolWorkers).set({
           revokedAt: new Date(), clientTokenHash: null, pairingTokenHash: null, pairingExpiresAt: null,
         }).where(eq(agentPoolWorkers.id, worker.id));
-      } else if (worker.revokedAt || worker.clientTokenHash !== hashAgentPoolToken(input.clientToken!)) {
+      } else if (worker.revokedAt && input.executionId && input.generation !== worker.hostedGeneration) {
+        await tx.update(agentPoolWorkers).set({
+          revokedAt: null, clientTokenHash: hashAgentPoolToken(input.clientToken!),
+          hostedExecutionId: input.executionId, hostedGeneration: input.generation,
+          pairingTokenHash: null, pairingExpiresAt: null,
+        }).where(eq(agentPoolWorkers.id, worker.id));
+        reactivated = true;
+      } else if (worker.revokedAt || worker.clientTokenHash !== hashAgentPoolToken(input.clientToken!)
+        || worker.hostedExecutionId !== (input.executionId ?? null) || worker.hostedGeneration !== (input.generation ?? null)) {
         throw forbidden("The Hosted worker is revoked or already paired to another credential");
       }
-      return { workerId: worker.id, created, revoked: revoke };
+      return { workerId: worker.id, created, revoked: revoke, reactivated };
     });
   }
 
@@ -207,7 +220,15 @@ export function agentPoolService(db: Db) {
       const resolved = resolveRepositories(ctx.config, repos);
       Object.assign(ctx.config, resolved.config);
       ctx.context.paperclipHostedRepositories = resolved.repositories;
-      if (agentPoolBroker.reserveAvailableWorker(ctx)) return;
+      const reserve = async () => {
+        if (!agentPoolBroker.reserveAvailableWorker(ctx)) return false;
+        const worker = agentPoolBroker.reservedWorker(ctx.runId);
+        if (worker?.executionId) await client.claim(remoteId, {
+          workerId: worker.id, runId: ctx.runId, agentId: ctx.agent.id,
+        }, signal);
+        return true;
+      };
+      if (await reserve()) return;
       const pending = waiting.get(pool.id) ?? { runs: new Set<string>(), tail: Promise.resolve() };
       waiting.set(pool.id, pending);
       pending.runs.add(ctx.runId);
@@ -227,7 +248,7 @@ export function agentPoolService(db: Db) {
       try {
         await client.status(remoteId, signal);
         await report(signal);
-        while (!agentPoolBroker.reserveAvailableWorker(ctx)) {
+        while (!await reserve()) {
           await delay(250, undefined, { signal });
           const current = await get(ctx.agent.companyId, pool.id);
           if (current.type !== "hosted" || current.hostedPoolId !== remoteId
@@ -292,6 +313,7 @@ export function agentPoolService(db: Db) {
       if (!/^[a-f0-9]{64}$/.test(token)) return null;
       const [worker] = await db.select({
         id: agentPoolWorkers.id, companyId: agentPools.companyId, poolName: agentPools.name,
+        executionId: agentPoolWorkers.hostedExecutionId,
       }).from(agentPoolWorkers).innerJoin(agentPools, eq(agentPoolWorkers.poolId, agentPools.id))
         .where(and(eq(agentPoolWorkers.id, workerId),
           eq(agentPoolWorkers.clientTokenHash, hashAgentPoolToken(token)), isNull(agentPoolWorkers.revokedAt)));

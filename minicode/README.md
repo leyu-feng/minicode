@@ -37,6 +37,18 @@ container workflow before enabling Hosted jobs; building it does not publish or
 deploy anything. Hosted workers use 1/2 GiB minimum/target free-space thresholds,
 instead of the regular worker's 24/36 GiB defaults.
 
+With a shared-fleet bootstrap, one parent maintains up to 32 unique pool
+connections. Provider admission and broker execution grouping prevent concurrent
+assignments on one physical container. The winning assignment detaches the other
+bindings; the provider maintains two idle workers per pool and a configurable
+organization busy limit (default 10). Stable worker slot IDs rotate credentials
+by generation when reused.
+
+Completion waits for the broker's retirement receipt before asking Minion to
+fetch/reset/clean all owned repositories and remove old task state. No replacement
+binding becomes ready until that cleanup succeeds. A cleanup failure stops the
+container. This cleanup is not an OS sandbox.
+
 ## Run the terminal agent
 
 ```cmd

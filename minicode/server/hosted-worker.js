@@ -2,6 +2,7 @@ import readline from "node:readline"
 import { randomBytes, randomUUID } from "node:crypto"
 import { AgentSession } from "./agent-session.js"
 import { startAgentPoolWorker } from "./agent-pool-worker.js"
+import { hostedBindingToken, startHostedFleet } from "./hosted-fleet.js"
 
 // The parent owns managed identity and repository restoration. Credentials cross this private
 // stdio channel only, never argv, model context, inherited shell environment or a saved auth file.
@@ -31,6 +32,10 @@ export async function runHostedWorkerCli() {
     try {
       if (line.length > 2 * 1024 * 1024) throw new Error("Hosted parent response exceeded its limit")
       const message = JSON.parse(line)
+      if (message.control === "bindings") {
+        void worker?.updateBindings?.(message.bindings).catch(error => worker.stop(error))
+        return
+      }
       if (message.control === "stop") {
         closing = true
         void worker?.stop()
@@ -68,8 +73,9 @@ export async function runHostedWorkerCli() {
       },
     } : null
     await entraSession?.renew()
-    worker = await startAgentPoolWorker({
-      server: configuration.server, workerId: configuration.workerId, instanceId, clientToken,
+    const start = (binding, onStateChange) => startAgentPoolWorker({
+      server: configuration.server, workerId: binding?.workerId ?? configuration.workerId, instanceId,
+      clientToken: binding ? hostedBindingToken(clientToken, binding) : clientToken,
       cwd: configuration.cwd, sourceBranch: configuration.branch, entraSession,
       workerShared: configuration.workerShared,
       minFreeGiB: configuration.minFreeGiB, targetFreeGiB: configuration.targetFreeGiB,
@@ -77,10 +83,10 @@ export async function runHostedWorkerCli() {
       idleTimeoutMs: configuration.idleTimeoutSeconds * 1000,
       prepareHostedRepositories: (repositories, options) => request("repositories", { repositories }, options),
       gitEnvironment: options => request("git", {}, options),
-      onStateChange: async state => {
+      onStateChange: onStateChange ?? (async state => {
         const result = await request("state", state)
         return result.accepting
-      },
+      }),
       sessionFactory: options => new AgentSession({
         ...options,
         modelConfigProvider: async () => ({
@@ -89,6 +95,9 @@ export async function runHostedWorkerCli() {
         }),
       }),
     })
+    worker = Array.isArray(configuration.bindings)
+      ? await startHostedFleet({ bindings: configuration.bindings, startWorker: start, request })
+      : await start()
     if (closing) await worker.stop()
     const stop = () => { void worker.stop() }
     process.once("SIGINT", stop)
