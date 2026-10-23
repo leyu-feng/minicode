@@ -111,7 +111,7 @@ async function harness(t, factory, workerOptions = {}) {
     await waitUntil(() => connections[index]?.messages.some((message) => message.type === "hello"))
     const peer = connections[index]
     const hello = peer.messages.find((message) => message.type === "hello")
-    peer.send({ type: "welcome", serverInstanceId, runId: hello.runId, ack, completed })
+    peer.send({ type: "welcome", serverInstanceId, runId: hello.runId, ack, completed, capabilities: ["retiring_ready_v1"] })
     return peer
   }
   return {
@@ -122,6 +122,101 @@ async function harness(t, factory, workerOptions = {}) {
     },
   }
 }
+
+test("Hosted assignments persist busy before repository preparation and retire only after final result acknowledgement", async t => {
+  const transitions = []
+  let fixture
+  let selectedSource
+  class Session extends EventEmitter {
+    constructor(options) { super(); this.options = options }
+    async write() {
+      assert.deepEqual(transitions.slice(-2), ["busy", "repositories"])
+      assert.equal(await fs.readFile(path.join(this.options.cwd, "tracked.txt"), "utf8"), "selected repository")
+      const references = JSON.parse(this.options.env.WORKER_REFERENCE_REPOS_JSON)
+      assert.equal(references.length, 1)
+      assert.equal(references[0].name, "reference")
+      assert.equal(await fs.realpath(references[0].path), await fs.realpath(fixture.source))
+      return { exitCode: 0 }
+    }
+    dispose() {}
+    interrupt() {}
+  }
+  fixture = await harness(t, options => new Session(options), {
+    workspaceMode: "worktree", remoteSource: true,
+    prepareHostedRepositories: async repositories => {
+      assert.equal(repositories.primary.id, "selected")
+      transitions.push("repositories")
+      return { cwd: selectedSource, sourceBranch: "main",
+        references: [{ name: "reference", path: fixture.source, branch: "main" }] }
+    },
+    onStateChange: async report => {
+      transitions.push(report.state)
+      return report.state !== "idle" || transitions.length === 1
+    },
+  })
+  selectedSource = path.join(path.dirname(fixture.source), "selected")
+  const selectedRemote = path.join(path.dirname(fixture.source), "selected-remote.git")
+  await fixture.git("clone", "--", fixture.remote, selectedSource)
+  await fs.writeFile(path.join(selectedSource, "tracked.txt"), "selected repository")
+  await fixture.git("-C", selectedSource, "add", "tracked.txt")
+  await fixture.git("-C", selectedSource, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+    "-c", "commit.gpgsign=false", "commit", "-m", "Selected repository")
+  await fixture.git("clone", "--bare", "--no-hardlinks", "--", selectedSource, selectedRemote)
+  await fixture.git("-C", selectedSource, "remote", "set-url", "origin", selectedRemote)
+  const peer = await fixture.welcome(0)
+  await waitUntil(() => peer.messages.some(message => message.type === "ready"))
+  assert.ok(peer.messages.find(message => message.type === "hello").capabilities.includes("hosted_repositories_v1"))
+  peer.send({ type: "task", runId: "hosted", agent, context: {},
+    repositories: { primary: { id: "selected", name: "Selected", branch: "main" }, references: [] } })
+  await waitUntil(() => peer.messages.some(message => message.type === "result"))
+  const result = peer.messages.find(message => message.type === "result")
+  assert.equal(result.exitCode, 0, result.error)
+  assert.deepEqual(transitions, ["idle", "busy", "repositories"])
+  peer.send({ type: "ack", runId: "hosted", seq: result.seq, completed: true })
+  await waitUntil(() => peer.messages.some(message => message.type === "ready" && message.retiring))
+  assert.equal(transitions.includes("stopped"), false)
+  peer.send({ type: "retired" })
+  assert.equal(await fixture.worker.finished, null)
+  assert.deepEqual(transitions, ["idle", "busy", "repositories", "idle", "stopped"])
+})
+
+test("an assignment deadline cancels repository preparation before any model starts", async t => {
+  let started = false
+  const fixture = await harness(t, () => { started = true; throw new Error("Model must not start") }, {
+    workspaceMode: "worktree", assignmentTimeoutMs: 30,
+    prepareHostedRepositories: async (_repositories, { signal }) => {
+      await new Promise((resolve, reject) => {
+        if (signal.aborted) reject(new Error("Cancelled"))
+        else signal.addEventListener("abort", () => reject(new Error("Cancelled")), { once: true })
+      })
+    },
+  })
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, { runId: "deadline", agent,
+    repositories: { primary: { id: "selected", name: "Selected", branch: "main" }, references: [] } }, 124)
+  assert.equal(started, false)
+})
+
+test("disk monitoring does not cancel the assignment deadline after repository preparation", async t => {
+  let started = false
+  let resolve
+  class Session extends EventEmitter {
+    async write() {
+      started = true
+      return new Promise(done => { resolve = done })
+    }
+    interrupt() { resolve?.({ exitCode: 130 }) }
+    dispose() {}
+  }
+  const fixture = await harness(t, () => new Session(), {
+    workspaceMode: "worktree", assignmentTimeoutMs: 4_000, diskMonitorMs: 25,
+    prepareHostedRepositories: async () => ({ cwd: fixture.source, references: [] }),
+  })
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, { runId: "model-deadline", agent,
+    repositories: { primary: { id: "selected", name: "Selected", branch: "main" }, references: [] } }, 124)
+  assert.equal(started, true)
+})
 
 test("an unresolved PR registration failure fails the run even if the model claims success", async t => {
   const issueId = "11111111-1111-4111-8111-111111111111"

@@ -48,14 +48,16 @@ on the worker machine.
 
 Existing pools are Freelance. Select Hosted to configure a managed-identity
 provider and confirm clearing all pairings; switching back also disconnects
-workers. Inspect the persisted provider pool ID, mock capacity and repository
+workers. Inspect the persisted provider pool ID, observed capacity and repository
 catalog. Configure an agent's primary and distinct read-only references; all
 catalog repositories may be primary and the marked default is preselected.
-Provider status is mock: create starts at one active/one provisioning; reporting
-backlog N sets active to 1 + N and leaves provisioning at one. Verify repeated
-reports do not accumulate. Without an actual compatible worker, a Hosted task
+The provider owns capacity targets, execution lifetimes and reconciliation
+schedules. Counts reflect worker heartbeats and real reservations; repeated
+backlog reports do not accumulate. Assignment and idle limits are provider-configured. The harness prepares catalog-selected repositories
+before model execution. Without an actual compatible worker, a Hosted task
 must request capacity, wait at most two minutes and fail visibly, never claim
-execution from mock counts. This version does not provision Hosted compute.
+execution from counts. Managed workers retire only after a broker receipt.
+Local checks are not evidence of a live Hosted deployment.
 See the [provider contract](../../doc/agent-pool-protocol.md#freelance-and-hosted-pools).
 
 Updated workers download Paperclip's bundled operational and onboarding skills into the assigned

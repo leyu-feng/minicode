@@ -1,6 +1,7 @@
 import { exportJWK, generateKeyPair, SignJWT, type JWK, type JWTPayload } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { authenticateEntraRoutineWebhook } from "./entra-routine-webhook.js";
+import { authenticateHostedWorkerProvider } from "./entra-hosted-workers.js";
 
 const { jwks } = vi.hoisted(() => ({ jwks: { keys: [] as JWK[] } }));
 vi.mock("jose", async (importOriginal) => {
@@ -53,6 +54,15 @@ describe("Entra routine webhook authorization", () => {
   function configure() {
     vi.stubEnv("PAPERCLIP_ENTRA_ROUTINE_WEBHOOKS", JSON.stringify(configuration));
   }
+
+  it("authorizes managed Hosted pairing only for the exact AdoPipelines provider identity", async () => {
+    const grant = { clientId, principalId, apiUrl: "https://provider.example/v1/hosted-worker", audience: "api://provider" };
+    vi.stubEnv("PAPERCLIP_ENTRA_HOSTED_WORKERS", JSON.stringify({ tenantId, applicationId, audience, providers: [grant] }));
+    expect(await authenticateHostedWorkerProvider(`Bearer ${await token()}`)).toEqual(grant);
+    for (const claims of [{ roles: ["Developer"] }, { oid: companyId }, { appid: applicationId }, { scp: "user_impersonation" }]) {
+      await expect(authenticateHostedWorkerProvider(`Bearer ${await token(claims)}`)).rejects.toMatchObject({ status: 403 });
+    }
+  });
 
   it("leaves existing webhook authentication unchanged when not configured or not granted", async () => {
     vi.stubEnv("PAPERCLIP_ENTRA_ROUTINE_WEBHOOKS", "");

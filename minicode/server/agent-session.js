@@ -298,12 +298,13 @@ export function callModelOnce(config, messages) {
  * for the lifetime of the session.
  */
 export class AgentSession extends EventEmitter {
-  constructor({ id, cwd, env, instructions = "", tools = [] }) {
+  constructor({ id, cwd, env, instructions = "", tools = [], modelConfigProvider = resolveModelConfig }) {
     super()
     this.id = id
     this.kind = "agent"
     this.cwd = cwd
     this.env = env
+    this.modelConfigProvider = modelConfigProvider
     this.tools = new Map()
     for (const tool of tools) {
       if (!/^[a-z][a-z0-9_]*$/.test(tool.name) || this.tools.has(tool.name)
@@ -388,7 +389,7 @@ export class AgentSession extends EventEmitter {
 
     try {
       if (!this.config) {
-        const config = await resolveModelConfig()
+        const config = await this.modelConfigProvider()
         this.#throwIfInactive(run)
         this.config = config
       }

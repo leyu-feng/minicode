@@ -248,11 +248,19 @@ Hosted provider calls use Clippy's managed identity, not agent credentials.
 The provider allowlists the caller and scopes persisted pool IDs to it.
 Pool conversion revokes credentials and disconnects workers in both directions.
 Repository selection remains company/catalog-scoped; reference metadata grants
-no operational instruction authority. Mock active/provisioning counts cannot
+no operational instruction authority. Observed active/provisioning counts cannot
 dispatch a run: only a compatible actual socket advertising
 `hosted_repositories_v1` qualifies. Provider configuration, demand and status
 remain board-only. Focused fixture tests do not qualify a live managed-identity
 deployment or a permitted-agent journey.
+POST/DELETE /api/agent-pool/hosted/workers additionally require an Entra
+application token with `AdoPipelines` and an exact configured provider identity,
+bound to the stored company/pool/provider. They do not accept agent keys,
+delegated user tokens or unrelated providers. The provider parent owns managed-identity
+credentials and catalog restoration; the worker receives transient capabilities
+over private stdio. Busy/idle state is provider-persisted, and retirement requires
+the broker's final result and stop receipts. The deployed Hosted path requires
+public Paperclip/Easy Auth; private-only deployments leave it disabled.
 Its actual tools run outside the source checkout, initialized from committed
 source files. Every pool worker can serve every pool agent; different setups
 require separate pools. Minicode defaults to stable short sibling Git worktrees

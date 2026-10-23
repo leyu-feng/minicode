@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>minicode</ToolCommandName>
+    <PackageId>Minicode.Contained</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Minicode CLI and Hosted AgentPool harness. Requires Node.js 22 or later.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="..\cli.js;..\package.json" Pack="true" PackagePath="tools\net8.0\any\minicode\" />
+    <Content Include="..\server\**\*" Pack="true" PackagePath="tools\net8.0\any\minicode\server\" />
+    <Content Include="..\public\**\*" Pack="true" PackagePath="tools\net8.0\any\minicode\public\" />
+    <Content Include="..\node_modules\**\*" Exclude="..\node_modules\.bin\**\*"
+             Pack="true" PackagePath="tools\net8.0\any\minicode\node_modules\" />
+  </ItemGroup>
+</Project>

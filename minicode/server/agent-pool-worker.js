@@ -49,10 +49,10 @@ function workspaceEnv() {
   return env
 }
 
-async function git(cwd, args, { signal } = {}) {
+async function git(cwd, args, { signal, env } = {}) {
   signal?.throwIfAborted()
   const { stdout } = await execFileAsync("git", args, {
-    cwd, env: { ...workspaceEnv(), GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never" },
+    cwd, env: { ...workspaceEnv(), ...env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never" },
     windowsHide: true, timeout: 120_000, signal,
   })
   return stdout.trim()
@@ -172,31 +172,10 @@ export async function loadWorkerCredential({ server, workerId, cwd, stateDir }) 
   return state
 }
 
-export async function startAgentPoolWorker({
-  server, workerId, cwd, clientToken, entraSession = null,
-  workspaceRoot, workspaceMode = "worktree", workerName,
-  workerShared, referenceRepos = [], sourceBranch,
-  minFreeGiB, targetFreeGiB, diskFreeBytes, diskMonitorMs = 60_000,
-  githubRepo, githubUser,
-  azureDevOpsOrg, azureDevOpsProject, azureDevOpsRepo, azureDevOpsUser, azureDevOpsAlias, clippyAuth,
-  publisherFactory = createGitHubPublisher,
-  azureDevOpsPublisherFactory = createAzureDevOpsPublisher,
-  sessionFactory = (options) => new AgentSession(options),
-  reconnectMs = 1000, leaseMs = LEASE_MS,
-  outputMode = "normal",
-  log = (message) => process.stderr.write(`${message}\n`),
+async function prepareWorkspace({
+  cwd, workspaceRoot, workspaceMode, workerName, workerId, workerShared, referenceRepos,
+  preparedReferences, sourceBranch, minFreeGiB, targetFreeGiB, diskFreeBytes, origin, gitEnvironment, log,
 }) {
-  const azurePublication = [azureDevOpsOrg, azureDevOpsProject, azureDevOpsRepo, azureDevOpsUser, azureDevOpsAlias]
-    .some(value => value !== undefined)
-  if (azurePublication && (githubRepo || githubUser)) throw new Error("Select either GitHub or Azure DevOps publication, not both")
-  if (!["normal", "verbose"].includes(outputMode)) throw new Error("Worker --output-mode must be normal or verbose")
-  if (!["worktree", "clone"].includes(workspaceMode)) throw new Error("--workspace-mode must be worktree or clone")
-  if (workspaceMode === "clone" && workerName !== undefined) throw new Error("--worker-name requires --workspace-mode worktree")
-  if (workspaceMode === "clone" && (minFreeGiB !== undefined || targetFreeGiB !== undefined)) {
-    throw new Error("Worker disk cleanup flags require --workspace-mode worktree")
-  }
-  if (!Number.isFinite(diskMonitorMs) || diskMonitorMs <= 0) throw new Error("Invalid worker disk monitor interval")
-  const origin = agentPoolServerUrl(server)
   if (!(await fs.stat(cwd)).isDirectory()) throw new Error("--repo-root must be an existing directory")
   cwd = await fs.realpath(cwd)
   if (await fs.realpath(await git(cwd, ["rev-parse", "--show-toplevel"])) !== cwd) {
@@ -214,11 +193,18 @@ export async function startAgentPoolWorker({
   const sharedOverlapsWorkspace = () => [cwd, workspaceRoot].some(
     (root) => isInside(root, workerShared) || isInside(workerShared, root))
   if (sharedOverlapsWorkspace()) throw new Error("--worker-shared must not overlap the source checkout or agent workspace storage")
-  const references = parseWorkerReferences(referenceRepos)
+  const references = preparedReferences
+    ? parseWorkerReferences(preparedReferences.map(reference => `${reference.name}=${reference.path}`))
+      .map((reference, index) => ({ ...reference, branch: preparedReferences[index].branch }))
+    : parseWorkerReferences(referenceRepos)
   for (const reference of references) reference.path = await fs.realpath(reference.path)
   await inspectWorkerReferences(references, [cwd, workspaceRoot, workerShared])
+  const workerGit = async (directory, args, options = {}) => git(directory, args, {
+    ...options,
+    ...(gitEnvironment && args[0] === "fetch" ? { env: await gitEnvironment({ signal: options.signal }) } : {}),
+  })
   const gitSync = await prepareWorkerGitSync({
-    source: cwd, sourceBranch, references, workerId, git,
+    source: cwd, sourceBranch, references, workerId, git: workerGit,
     validate: () => inspectWorkerReferences(references, [cwd, workspaceRoot, workerShared]),
     log: message => log(`[minicode] ${message}`),
   })
@@ -232,7 +218,7 @@ export async function startAgentPoolWorker({
   await inspectWorkerReferences(references, [cwd, workspaceRoot, workerShared])
   const worktree = workspaceMode === "worktree"
     ? await prepareWorkerWorktrees({
-      source: cwd, workspace: workspaceRoot, workerId, server: origin.origin, git,
+      source: cwd, workspace: workspaceRoot, workerId, server: origin.origin, git: workerGit,
       minFreeGiB, targetFreeGiB, readFreeBytes: diskFreeBytes, log,
       validateWorkspace: workspace => {
         if (isInside(cwd, workspace) || isInside(workspace, cwd)
@@ -246,6 +232,52 @@ export async function startAgentPoolWorker({
   log(`AgentPool workspace mode: ${workspaceMode}; storage: ${workspaceRoot}`)
   log(`AgentPool read-only shared folder (instruction policy): ${workerShared}`)
   for (const reference of references) log(`AgentPool read-only reference (instruction policy): ${reference.name} = ${reference.path}`)
+  return { cwd, workspaceRoot, workerShared, references, gitSync, worktree }
+}
+
+export async function startAgentPoolWorker({
+  server, workerId, cwd, clientToken, entraSession = null,
+  instanceId = randomUUID(),
+  workspaceRoot, workspaceMode = "worktree", workerName,
+  workerShared, referenceRepos = [], sourceBranch,
+  minFreeGiB, targetFreeGiB, diskFreeBytes, diskMonitorMs = 60_000,
+  githubRepo, githubUser,
+  azureDevOpsOrg, azureDevOpsProject, azureDevOpsRepo, azureDevOpsUser, azureDevOpsAlias, clippyAuth,
+  publisherFactory = createGitHubPublisher,
+  azureDevOpsPublisherFactory = createAzureDevOpsPublisher,
+  sessionFactory = (options) => new AgentSession(options),
+  prepareHostedRepositories, gitEnvironment, onStateChange = async () => {},
+  assignmentTimeoutMs, idleTimeoutMs,
+  reconnectMs = 1000, leaseMs = LEASE_MS,
+  outputMode = "normal",
+  log = (message) => process.stderr.write(`${message}\n`),
+}) {
+  const azurePublication = [azureDevOpsOrg, azureDevOpsProject, azureDevOpsRepo, azureDevOpsUser, azureDevOpsAlias]
+    .some(value => value !== undefined)
+  if (azurePublication && (githubRepo || githubUser)) throw new Error("Select either GitHub or Azure DevOps publication, not both")
+  if (!["normal", "verbose"].includes(outputMode)) throw new Error("Worker --output-mode must be normal or verbose")
+  if (!["worktree", "clone"].includes(workspaceMode)) throw new Error("--workspace-mode must be worktree or clone")
+  if (workspaceMode === "clone" && workerName !== undefined) throw new Error("--worker-name requires --workspace-mode worktree")
+  if (workspaceMode === "clone" && (minFreeGiB !== undefined || targetFreeGiB !== undefined)) {
+    throw new Error("Worker disk cleanup flags require --workspace-mode worktree")
+  }
+  if (!Number.isFinite(diskMonitorMs) || diskMonitorMs <= 0) throw new Error("Invalid worker disk monitor interval")
+  for (const value of [assignmentTimeoutMs, idleTimeoutMs]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) throw new Error("Invalid Hosted worker timeout")
+  }
+  if (prepareHostedRepositories && (workspaceMode !== "worktree" || azurePublication || githubRepo || githubUser)) {
+    throw new Error("Hosted repository assignments require isolated worktrees and do not support a fixed publication repository")
+  }
+  const origin = agentPoolServerUrl(server)
+  const workspaceOptions = {
+    cwd, workspaceRoot, workspaceMode, workerName, workerId, workerShared, referenceRepos, sourceBranch,
+    minFreeGiB, targetFreeGiB, diskFreeBytes, origin, gitEnvironment, log,
+  }
+  if (prepareHostedRepositories) {
+    workspaceOptions.workerName = `w-${workerId.slice(0, 8)}-${createHash("sha256").update(cwd).digest("hex").slice(0, 8)}`
+  }
+  let references, gitSync, worktree
+  ;({ cwd, workspaceRoot, workerShared, references, gitSync, worktree } = await prepareWorkspace(workspaceOptions))
   const publisher = azurePublication
     ? await azureDevOpsPublisherFactory({ repoRoot: cwd, organization: azureDevOpsOrg, project: azureDevOpsProject,
       repository: azureDevOpsRepo, user: azureDevOpsUser, alias: azureDevOpsAlias, clippyAuth })
@@ -260,13 +292,14 @@ export async function startAgentPoolWorker({
   const endpoint = new URL("/api/agent-pool/worker", origin)
   endpoint.protocol = origin.protocol === "https:" ? "wss:" : "ws:"
   endpoint.searchParams.set("workerId", workerId)
-  const instanceId = randomUUID()
-  let socket, reconnectTimer, leaseTimer, heartbeatTimer, diskTimer
+  let socket, reconnectTimer, leaseTimer, heartbeatTimer, diskTimer, idleTimer, retirementTimer
   let diskCheck = Promise.resolve()
   let stopped = false
   let connected = false
   let active = null
   let previousServer = null
+  let retiring = false
+  let idleSince = null
   let settle
   const finished = new Promise((resolve) => { settle = resolve })
 
@@ -296,6 +329,9 @@ export async function startAgentPoolWorker({
     clearTimeout(leaseTimer)
     clearTimeout(heartbeatTimer)
     clearTimeout(diskTimer)
+    clearTimeout(idleTimer)
+    clearTimeout(retirementTimer)
+    clearTimeout(active?.deadline)
     active?.controller.abort()
     active?.session?.interrupt()
     socket?.close(1000, "worker stopped")
@@ -305,20 +341,38 @@ export async function startAgentPoolWorker({
     worktree?.release()
     active?.session?.dispose()
     await proxy?.close()
+    try { await onStateChange({ state: "stopped", runId: null, agentId: null }) }
+    catch (stateError) { error ??= stateError }
     settle(error)
   }
 
-  function ack(seq, completed) {
+  async function enterIdle() {
+    const accepting = await onStateChange({ state: "idle", runId: null, agentId: null })
+    if (stopped) return
+    retiring = accepting === false
+    send({ type: "ready", ...(retiring ? { retiring: true } : {}) })
+    clearTimeout(idleTimer)
+    if (retiring) {
+      retirementTimer = setTimeout(() => void stop(new Error("AgentPool retirement acknowledgement timed out")), 10_000)
+    } else if (idleTimeoutMs !== undefined) {
+      idleSince ??= Date.now()
+      idleTimer = setTimeout(() => void stop(), Math.max(0, idleTimeoutMs - (Date.now() - idleSince)))
+    }
+  }
+
+  async function ack(seq, completed) {
     if (!active || !Number.isSafeInteger(seq) || seq < 0 || seq > active.seq) {
       throw new Error("AgentPool acknowledgement mismatch")
     }
     active.events = active.events.filter((event) => event.seq > seq)
     if (completed) {
       if (!active.done || seq !== active.seq) throw new Error("AgentPool completed an unfinished execution")
+      await active.execution
+      clearTimeout(active.deadline)
       active.session?.dispose()
       worktree?.release()
       active = null
-      send({ type: "ready" })
+      await enterIdle()
     }
   }
 
@@ -329,7 +383,7 @@ export async function startAgentPoolWorker({
   }
 
   function execute(task) {
-    if (active || typeof task.runId !== "string" || !task.context || typeof task.context !== "object") {
+    if (active || retiring || typeof task.runId !== "string" || !task.context || typeof task.context !== "object") {
       throw new Error("AgentPool task received while busy or invalid")
     }
     const reachableUrl = (value) => {
@@ -346,14 +400,41 @@ export async function startAgentPoolWorker({
         connectionRequest: reachableUrl(task.runtimeTools.rest.connectionRequest),
       },
     } : null
-    const run = { id: task.runId, session: null, seq: 0, events: [], bytes: 0, done: false,
+    const run = { id: task.runId, agentId: task.agent?.id, session: null, seq: 0, events: [], bytes: 0, done: false,
       execution: null, overflow: false, cancelled: false, controller: new AbortController() }
     active = run
+    clearTimeout(idleTimer)
+    idleSince = null
+    if (assignmentTimeoutMs !== undefined) {
+      run.deadline = setTimeout(() => {
+        run.timedOut = true
+        run.controller.abort()
+        run.session?.interrupt()
+      }, assignmentTimeoutMs)
+    }
     run.execution = Promise.resolve().then(async () => {
       if (stopped || run.cancelled) return { exitCode: 130 }
-      const agentInstructions = readTaskInstructions(task)
-      const { references: referenceManifest, primaryCommit, primaryBranch } = await gitSync.prepare({ signal: run.controller.signal })
+      await onStateChange({ state: "busy", runId: task.runId, agentId: task.agent?.id })
       if (stopped || run.cancelled) return { exitCode: 130 }
+      run.controller.signal.throwIfAborted()
+      const agentInstructions = readTaskInstructions(task)
+      if (prepareHostedRepositories) {
+        if (!task.repositories) throw new Error("Hosted assignment requires primary and reference repository descriptors")
+        const selected = await prepareHostedRepositories(task.repositories, { signal: run.controller.signal })
+        await diskCheck
+        clearTimeout(diskTimer)
+        ;({ cwd, workspaceRoot, workerShared, references, gitSync, worktree } = await prepareWorkspace({
+          ...workspaceOptions, cwd: selected.cwd, sourceBranch: selected.sourceBranch,
+          preparedReferences: selected.references,
+          workerName: `w-${workerId.slice(0, 8)}-${createHash("sha256").update(selected.cwd).digest("hex").slice(0, 8)}`,
+        }))
+        monitorDisk()
+      } else if (task.repositories) {
+        throw new Error("This worker does not support Hosted repository assignments")
+      }
+      run.controller.signal.throwIfAborted()
+      const { references: referenceManifest, primaryCommit, primaryBranch } = await gitSync.prepare({ signal: run.controller.signal })
+      if (stopped || run.cancelled || run.timedOut) return { exitCode: 130 }
       const workspace = worktree
         ? await worktree.assign(task.agent?.id, { commit: primaryCommit })
         : await prepareAgentWorkspace(cwd, workspaceRoot, task.agent?.id)
@@ -516,15 +597,17 @@ export async function startAgentPoolWorker({
       run.done = true
       const registrationError = run.publication?.registrationError
       enqueue(run, {
-        type: "result", exitCode: run.cancelled ? 130 : run.overflow || registrationError ? 1 : result?.exitCode ?? 1,
-        ...(run.overflow ? { error: "AgentPool output limit exceeded" }
+        type: "result", exitCode: run.timedOut ? 124 : run.cancelled ? 130 : run.overflow || registrationError ? 1 : result?.exitCode ?? 1,
+        ...(run.timedOut ? { error: "AgentPool assignment exceeded its execution time limit" }
+          : run.overflow ? { error: "AgentPool output limit exceeded" }
           : registrationError ? { error: registrationError.slice(0, 2000) }
           : result?.error ? { error: String(result.error).slice(0, 2000) } : {}),
       })
     }).catch((error) => {
       if (stopped) return
       run.done = true
-      enqueue(run, { type: "result", exitCode: run.cancelled ? 130 : 1, error: String(error.message).slice(0, 2000) })
+      enqueue(run, { type: "result", exitCode: run.timedOut ? 124 : run.cancelled ? 130 : 1,
+        error: run.timedOut ? "AgentPool assignment exceeded its execution time limit" : String(error.message).slice(0, 2000) })
     })
   }
 
@@ -544,16 +627,23 @@ export async function startAgentPoolWorker({
     }
     current.on("open", () => {
       heartbeat()
-      send({ type: "hello", protocolVersion: PROTOCOL_VERSION, capabilities: [INLINE_INSTRUCTIONS, SKILL_BUNDLE], instanceId, runId: active?.id ?? null })
+      send({ type: "hello", protocolVersion: PROTOCOL_VERSION,
+        capabilities: [INLINE_INSTRUCTIONS, SKILL_BUNDLE, ...(prepareHostedRepositories ? ["hosted_repositories_v1", "retiring_ready_v1"] : [])],
+        instanceId, runId: active?.id ?? null })
     })
     current.on("ping", heartbeat)
+    let messages = Promise.resolve()
     current.on("message", (data, binary) => {
-      try {
+      messages = messages.then(async () => {
+        if (stopped || current !== socket) return
         if (binary) throw new Error("AgentPool expects JSON text")
         const message = JSON.parse(data.toString())
         if (message.type === "welcome") {
           if (message.protocolVersion !== undefined && message.protocolVersion !== PROTOCOL_VERSION) {
             throw new Error("Unsupported AgentPool protocol version")
+          }
+          if (prepareHostedRepositories && !message.capabilities?.includes("retiring_ready_v1")) {
+            throw new Error("Hosted workers require a server supporting acknowledged retirement")
           }
           if (connected || typeof message.serverInstanceId !== "string" || message.runId !== (active?.id ?? null)
             || (active && previousServer && previousServer !== message.serverInstanceId)) {
@@ -565,24 +655,25 @@ export async function startAgentPoolWorker({
           connected = true
           log("AgentPool worker connected")
           if (active) {
-            ack(message.ack, message.completed)
+            if (!message.completed) await onStateChange({ state: "busy", runId: active.id, agentId: active.agentId })
+            await ack(message.ack, message.completed)
             for (const event of active?.events ?? []) send(event)
-          } else send({ type: "ready" })
+          } else await enterIdle()
           monitorDisk()
         } else if (!connected) throw new Error("AgentPool welcome required")
         else if (message.type === "task") execute(message)
         else if (message.type === "ack") {
           if (message.runId !== active?.id) throw new Error("AgentPool run acknowledgement mismatch")
-          ack(message.seq, message.completed)
+          await ack(message.seq, message.completed)
+        } else if (message.type === "retired" && retiring && !active) {
+          await stop()
         } else if (message.type === "cancel") {
           if (message.runId !== active?.id) throw new Error("AgentPool cancellation mismatch")
           active.cancelled = true
           active.controller.abort()
           active.session?.interrupt()
         } else throw new Error("Unknown AgentPool message")
-      } catch (error) {
-        void stop(error)
-      }
+      }).catch(error => stop(error))
     })
     current.on("unexpected-response", (_request, response) => {
       response.resume()
@@ -607,6 +698,8 @@ export async function startAgentPoolWorker({
       if (stopped || current.renewingEntra) return
       if (code === 1008) { void stop(new Error("AgentPool execution or credentials rejected; retry explicitly")); return }
       log("AgentPool disconnected; reconnecting without replay")
+      void onStateChange({ state: "reconnecting", runId: active?.id ?? null, agentId: active?.agentId ?? null })
+        .catch(error => stop(error))
       if (active && !leaseTimer) {
         leaseTimer = setTimeout(() => void stop(new Error("AgentPool reconnect lease expired; execution stopped")), leaseMs)
       }

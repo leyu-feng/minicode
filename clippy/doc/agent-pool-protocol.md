@@ -52,16 +52,17 @@ The managed-identity-authenticated provider contract is:
 | Method | Path | Body / response |
 | --- | --- | --- |
 | POST | `/v1/hosted-worker` | `{ "companyId": "<uuid>", "name": "default" }`; 201 with `poolId`, `companyId`, `name` |
-| GET | `/v1/hosted-worker/{poolId}` | 200 with persisted pool and mock counts |
+| GET | `/v1/hosted-worker/{poolId}` | 200 with persisted pool and observed counts |
 | POST | `/v1/hosted-worker/{poolId}` | `{ "itemsWaiting": 4 }`; 202 |
 | DELETE | `/v1/hosted-worker/{poolId}` | 204, idempotent |
-| GET | `/v1/hosted-worker/{poolId}/status` | `{ "activeWorkers": 5, "provisioningWorkers": 1, "isMock": true }` |
+| GET | `/v1/hosted-worker/{poolId}/status` | `{ "activeWorkers": 1, "provisioningWorkers": 0, "isMock": false }` |
 | GET | `/v1/hosted-worker/{poolId}/repos` | Repository array: `id`, `name`, `branch`, `isDefault` |
 
-The AgentPool provider owns mock state and storage. Create is idempotent for the caller identity, company
-and pool name. Initially `activeWorkers = 1`, `provisioningWorkers = 1` and
-`itemsWaiting = 0`. Demand replaces the backlog snapshot and sets
-`activeWorkers = 1 + itemsWaiting`; `provisioningWorkers` always remains 1.
+The AgentPool provider owns worker state and storage. Create is idempotent for the caller identity, company
+and pool name. Active counts require recent worker heartbeats; provisioning
+counts require actual unexpired reservations. Demand replaces the backlog
+snapshot; the provider reconciles configured waiting/provisioning capacity from the
+backlog without counting busy workers.
 Repeated demand is not additive. The provider enforces its configured caller identity grants. Pool IDs cannot cross caller identities.
 Storage technology and repository catalog sources are provider implementation details.
 
@@ -75,11 +76,36 @@ code context, not operational instruction authority.
 
 Hosted runs request capacity using the current waiting-run count and wait at
 most two minutes for an actual idle, compatible worker connection. Admission,
-cancellation and timeout update the backlog. Provider mock counts never authorize
+cancellation and timeout update the backlog. Provider counts never authorize
 dispatch. No compatible worker produces a visible, retriable bootstrap failure.
-This release does not provision compute or implement Hosted repository
-materialization in Minicode; existing workers deliberately do not advertise the
-new capability. The mock API and settings are not evidence of working hosting.
+The trusted provider parent validates every selected ID, name and branch against
+the trusted provider catalog and restores repository snapshots. Before model
+execution, Minicode fetches the exact branches, prepares an owned primary
+worktree and resolves reference context. Only this configured harness advertises
+`hosted_repositories_v1`; ordinary workers retain their existing setup.
+
+Hosted workers persist `busy` before repository preparation and `idle` after
+the broker acknowledges the final result. Busy updates provider capacity demand.
+Assignment and idle limits survive reconnects; the provider configures these
+limits and execution retirement policy. Worker heartbeats,
+reservation proofs, start recovery and deletion tombstones are provider-owned.
+
+Managed pairing uses POST/DELETE `/api/agent-pool/hosted/workers`, not public
+pairing tokens. `PAPERCLIP_ENTRA_HOSTED_WORKERS` configures the tenant, application
+audience and exact provider client/principal/API URL/audience grants. Only Entra
+application tokens with `AdoPipelines` and that exact provider identity qualify;
+the company, Hosted pool type, name and external provider pool ID must match
+the database. Existing credentials cannot be taken over or resurrected.
+The parent exchanges Entra authentication for an Easy Auth session, preserving
+run-scoped Authorization headers. This deployment path requires public
+Paperclip/Easy Auth; private-only deployments leave Hosted disabled.
+
+Graceful retirement requires `retiring_ready_v1` in the server's welcome
+capabilities. After the result ACK, a retiring worker sends
+`{"type":"ready","retiring":true}`. The broker settles the result without
+readmitting the worker and returns `{"type":"retired"}`. Only then does the
+worker close and report stopped; a missing receipt fails explicitly. Normal
+workers continue sending ordinary `ready` messages.
 
 ## Connection and assignment
 

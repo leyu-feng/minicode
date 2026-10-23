@@ -206,6 +206,27 @@ test("AgentSession returns a failed result when the model request fails", async 
   }
 })
 
+test("Hosted model configuration uses parent tokens without local auth resolution or token prompt exposure", async t => {
+  let tokens = 0
+  const session = new AgentSession({
+    id: "hosted-model", cwd: process.cwd(),
+    modelConfigProvider: async () => ({
+      api: "chat-completions", endpoint: "https://hosted.example/v1/chat/completions", model: "hosted",
+      getAccessToken: async () => `parent-token-${++tokens}`,
+    }),
+  })
+  t.after(() => session.dispose())
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, "https://hosted.example/v1/chat/completions")
+    assert.equal(new Headers(init.headers).get("authorization"), `Bearer parent-token-${tokens}`)
+    assert.equal(init.body.includes("parent-token"), false)
+    return Response.json({ choices: [{ message: { content: '{"type":"final","message":"done"}' } }] })
+  }
+  assert.equal((await session.write("First assignment turn")).exitCode, 0)
+  assert.equal((await session.write("Second assignment turn")).exitCode, 0)
+  assert.equal(tokens, 2)
+})
+
 test("AgentSession reports failure when shell actions exhaust the tool turn limit", async (t) => {
   const originalKey = process.env.OPENCODE_API_KEY
   const originalUrl = process.env.OPENCODE_BASE_URL

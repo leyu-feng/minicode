@@ -4,6 +4,7 @@ import readline from "node:readline"
 import readlinePromises from "node:readline/promises"
 import { AgentSession, callModelOnce } from "./server/agent-session.js"
 import { runAgentPoolWorkerCli } from "./server/agent-pool-worker.js"
+import { runHostedWorkerCli } from "./server/hosted-worker.js"
 import {
   DEFAULT_AZURE_MODEL,
   COPILOT_AUTH_NAME,
@@ -119,6 +120,10 @@ function parseArgs(argv) {
 
 let options
 try {
+  if (process.argv[2] === "hosted-worker") {
+    await runHostedWorkerCli()
+    process.exit(0)
+  }
   options = parseArgs(process.argv.slice(2))
 } catch (error) {
   console.error(`Minicode: ${error.message}`)

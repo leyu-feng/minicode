@@ -16,6 +16,27 @@ not Windows PowerShell 5.1; there is no automatic fallback. The agent's shell
 guidance matches that runtime, so commands do not need a nested PowerShell
 wrapper. On other platforms, command execution continues to use Bash.
 
+## Managed Hosted runtime
+
+The AgentPool provider launches `hosted-worker` only as a child of its credential-owning
+parent process. Its private JSONL stdin/stdout channel supplies pairing, state, Easy Auth,
+trusted repository restoration and transient model/git credentials. It is not a
+standalone interactive worker command and does not persist an auth file.
+Diagnostics go to stderr. The regular `worker` CLI remains unchanged.
+
+Package the contained Node application and production dependencies as the
+provider's tool-store format, from the repository root:
+
+```powershell
+dotnet pack minicode\tool\Minicode.Contained.csproj -c Release -o artifacts
+```
+
+The `Minicode.Contained` .NET 8 tool requires Node 22 or later on PATH in the
+provider image. Publish the resulting package through the provider's tool
+container workflow before enabling Hosted jobs; building it does not publish or
+deploy anything. Hosted workers use 1/2 GiB minimum/target free-space thresholds,
+instead of the regular worker's 24/36 GiB defaults.
+
 ## Run the terminal agent
 
 ```cmd

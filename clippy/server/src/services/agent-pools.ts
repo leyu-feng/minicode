@@ -1,8 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import { agentPools, agentPoolWorkers, type Db } from "@paperclipai/db";
-import { agentPoolNameSchema, hostedAgentRepositoriesSchema, type HostedWorkerRepository, type UpdateAgentPool } from "@paperclipai/shared";
-import { badRequest, conflict, notFound, unauthorized } from "../errors.js";
+import { agentPoolNameSchema, hostedAgentRepositoriesSchema, type HostedWorkerRepository, type UpdateAgentPool,
+  type hostedAgentPoolWorkerSchema } from "@paperclipai/shared";
+import type { z } from "zod";
+import { badRequest, conflict, forbidden, notFound, unauthorized } from "../errors.js";
+import type { HostedWorkerProviderGrant } from "./entra-hosted-workers.js";
 import { defaultHostedWorkerConfig, hostedWorkerClient } from "./hosted-worker-client.js";
 import { agentPoolBroker } from "./agent-pool-broker.js";
 import type { AdapterExecutionContext } from "../adapters/types.js";
@@ -76,7 +79,49 @@ export function agentPoolService(db: Db) {
     };
   }
 
+  async function hostedWorker(input: z.infer<typeof hostedAgentPoolWorkerSchema>, grant: HostedWorkerProviderGrant, revoke: boolean) {
+    return db.transaction(async (tx) => {
+      const [pool] = await tx.select().from(agentPools).where(and(
+        eq(agentPools.companyId, input.companyId), eq(agentPools.name, input.poolName),
+        eq(agentPools.type, "hosted"), eq(agentPools.hostedPoolId, input.poolId),
+      )).for("update");
+      if (!pool) {
+        if (revoke) return { workerId: input.workerId, created: false, revoked: false };
+        throw conflict("Hosted pool is not registered; retry worker bootstrap after provisioning commits");
+      }
+      if (pool.hostedApiUrl?.replace(/\/+$/, "") !== grant.apiUrl.replace(/\/+$/, "")
+        || pool.hostedAudience !== grant.audience) {
+        throw forbidden("The calling provider does not own this Hosted pool");
+      }
+      let created = false;
+      if (!revoke) {
+        if (!input.clientToken) throw badRequest("Hosted worker pairing requires a client credential");
+        const inserted = await tx.insert(agentPoolWorkers).values({
+          id: input.workerId, poolId: pool.id, name: `hosted-${input.workerId}`,
+          clientTokenHash: hashAgentPoolToken(input.clientToken),
+        }).onConflictDoNothing().returning({ id: agentPoolWorkers.id });
+        created = inserted.length !== 0;
+      }
+      const [worker] = await tx.select().from(agentPoolWorkers)
+        .where(eq(agentPoolWorkers.id, input.workerId)).for("update");
+      if (!worker) return { workerId: input.workerId, created: false, revoked: false };
+      if (worker.poolId !== pool.id) throw forbidden("The Hosted worker belongs to another pool");
+      if (revoke) {
+        await tx.update(agentPoolWorkers).set({
+          revokedAt: new Date(), clientTokenHash: null, pairingTokenHash: null, pairingExpiresAt: null,
+        }).where(eq(agentPoolWorkers.id, worker.id));
+      } else if (worker.revokedAt || worker.clientTokenHash !== hashAgentPoolToken(input.clientToken!)) {
+        throw forbidden("The Hosted worker is revoked or already paired to another credential");
+      }
+      return { workerId: worker.id, created, revoked: revoke };
+    });
+  }
+
   return {
+    pairHostedWorker: (input: z.infer<typeof hostedAgentPoolWorkerSchema>, grant: HostedWorkerProviderGrant) =>
+      hostedWorker(input, grant, false),
+    revokeHostedWorker: (input: z.infer<typeof hostedAgentPoolWorkerSchema>, grant: HostedWorkerProviderGrant) =>
+      hostedWorker(input, grant, true),
     list,
     get,
     ensureDefault,
@@ -190,7 +235,7 @@ export function agentPoolService(db: Db) {
         }
       } catch (error) {
         if (signal.aborted && !ctx.signal?.aborted) {
-          throw new Error("No hosted worker connected within two minutes. Provider counts are mock capacity, not connected workers.", { cause: error });
+          throw new Error("No hosted worker connected within two minutes. Provider capacity is not a connected, compatible worker.", { cause: error });
         }
         throw error;
       } finally {
