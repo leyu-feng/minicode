@@ -106,6 +106,35 @@ const execFileAsync = promisify(execFile);
     expect(provider.client.delete).toHaveBeenCalledWith(provider.poolId);
   });
 
+  it("allows provider revocation callbacks while a pool settings update holds the registration lock", async () => {
+    const provider = hostedProvider();
+    const svc = agentPoolService(db);
+    const pool = await svc.create(companyId, "hosted-revocation-callback");
+    await svc.update(companyId, pool.id, { type: "hosted", clearPairings: true, config: provider.config });
+    const grant = { ...provider.config, clientId: randomUUID(), principalId: randomUUID() };
+    const input = { companyId, poolId: provider.poolId, poolName: pool.name, workerId: randomUUID(), clientToken: "c".repeat(64) };
+    await svc.pairHostedWorker(input, grant);
+    let revocation: Promise<unknown> | undefined;
+    provider.client.delete.mockImplementationOnce(async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        revocation = svc.revokeHostedWorker(input, grant);
+        await Promise.race([revocation, new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("Provider revocation callback blocked")), 1000);
+        })]);
+      } finally {
+        clearTimeout(timer);
+      }
+    });
+    try {
+      await expect(svc.update(companyId, pool.id, { type: "freelance", clearPairings: true }))
+        .resolves.toMatchObject({ type: "freelance", hostedPoolId: null });
+      expect(await svc.authenticate(input.workerId, input.clientToken)).toBeNull();
+    } finally {
+      await revocation;
+    }
+  });
+
   it("pairs only the owning Hosted provider and refuses credential takeover or revoked worker resurrection", async () => {
     const provider = hostedProvider();
     const svc = agentPoolService(db);

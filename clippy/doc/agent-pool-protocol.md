@@ -53,6 +53,8 @@ credentials occurs. Company deletion also deletes its provider pools.
 Demand and deletion requests allow up to 90 seconds for provider reconciliation;
 reads and pool registration retain a 10-second limit. Caller cancellation still
 applies to every request.
+Provider revocation callbacks do not lock the pool registration: a settings
+update can already hold that lock while waiting for its provider to stop workers.
 
 The managed-identity-authenticated provider contract is:
 

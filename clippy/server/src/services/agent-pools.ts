@@ -81,10 +81,12 @@ export function agentPoolService(db: Db) {
 
   async function hostedWorker(input: z.infer<typeof hostedAgentPoolWorkerSchema>, grant: HostedWorkerProviderGrant, revoke: boolean) {
     return db.transaction(async (tx) => {
-      const [pool] = await tx.select().from(agentPools).where(and(
+      const registration = tx.select().from(agentPools).where(and(
         eq(agentPools.companyId, input.companyId), eq(agentPools.name, input.poolName),
         eq(agentPools.type, "hosted"), eq(agentPools.hostedPoolId, input.poolId),
-      )).for("update");
+      ));
+      // Revocation may be a provider callback from update(), which already locks this pool.
+      const [pool] = await (revoke ? registration : registration.for("update"));
       if (!pool) {
         if (revoke) return { workerId: input.workerId, created: false, revoked: false };
         throw conflict("Hosted pool is not registered; retry worker bootstrap after provisioning commits");
