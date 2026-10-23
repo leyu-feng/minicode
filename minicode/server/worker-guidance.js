@@ -36,9 +36,17 @@ async function discoverSkills(root, source) {
 }
 
 export async function readWorkerGuidance({ workspace, workerShared, bundle, repositories = [] }) {
-  const [workspaceInstructions, sharedInstructions, workspaceSkills, sharedSkills] = await Promise.all([
-    readInstructions(workspace), readInstructions(workerShared),
-    discoverSkills(workspace, "worktree"), discoverSkills(workerShared, "worker_shared"),
+  const supervisory = repositories.filter(repo => repo.supervisory === true)
+  if (supervisory.length > 1 || supervisory.some(repo => !repo.readOnly || path.resolve(repo.path) !== path.resolve(workerShared))) {
+    throw new Error("The supervisory repository must be the single read-only worker_shared checkout")
+  }
+  const sharedInstructions = await readInstructions(workerShared)
+  if (supervisory.length && sharedInstructions === null) {
+    throw new Error("The supervisory repository must provide AGENTS.md")
+  }
+  const sharedSkills = await discoverSkills(workerShared, "worker_shared")
+  const [workspaceInstructions, workspaceSkills] = await Promise.all([
+    readInstructions(workspace), discoverSkills(workspace, "worktree"),
   ])
   const selected = new Map()
   const repositorySkills = await Promise.all(repositories.filter(repo => !repo.readOnly).map(async repo => ({
