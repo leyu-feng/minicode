@@ -13,6 +13,7 @@ import {
   authFilePath,
   clearAuth,
   getActiveAuthSummary,
+  getManagedIdentityAuthSummary,
   listAuthConfigs,
   loginActiveDeployment,
   resolveModelConfig,
@@ -82,6 +83,8 @@ REPL commands:
 Ctrl+C cancels the current turn; Ctrl+C at an empty prompt exits.
 
 Environment:
+  MINICODE_AUTH_MODE=managed-identity (Azure-hosted interactive tools; no user login)
+  AZURE_CLIENT_ID (optional user-assigned managed identity)
   AZURE_OPENAI_DEPLOYMENT, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_MODEL
   OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL (custom provider override)
   MINICODE_REPO_ROOT`)
@@ -280,6 +283,7 @@ async function ensureAuthConfigured() {
     await getActiveAuthSummary()
     return
   }
+  if (getManagedIdentityAuthSummary()) return
   if (process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY) return
   const deployments = await listAuthConfigs()
   if (deployments.length) return

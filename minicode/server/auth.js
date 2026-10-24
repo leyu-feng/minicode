@@ -4,6 +4,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import timers from "node:timers/promises"
+import { ManagedIdentityCredential } from "@azure/identity"
 import { httpErrorDetails } from "./http-error.js"
 
 const AZURE_OPENAI_RESOURCE = "https://cognitiveservices.azure.com"
@@ -394,6 +395,8 @@ export async function addCopilotAuth({ model, selectModel, onPrompt, activate = 
 }
 
 export async function getActiveAuthSummary() {
+  const managedIdentity = getManagedIdentityAuthSummary()
+  if (managedIdentity) return managedIdentity
   if (!process.env.MINICODE_AUTH_ENTRY && (process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY)) {
     return {
       name: "API key",
@@ -593,7 +596,52 @@ export async function loginActiveDeployment({ onPrompt } = {}) {
   return { ...profile, user: profile.user || "login@az.cli" }
 }
 
+export function getManagedIdentityAuthSummary() {
+  if (process.env.MINICODE_AUTH_ENTRY || !process.env.MINICODE_AUTH_MODE) return null
+  if (process.env.MINICODE_AUTH_MODE !== "managed-identity") {
+    throw new Error("MINICODE_AUTH_MODE must be managed-identity, or unset for normal sign-in.")
+  }
+  const endpoint = process.env.AZURE_OPENAI_ENDPOINT?.trim()
+  const model = (process.env.OPENCODE_MODEL || process.env.AZURE_OPENAI_MODEL)?.trim()
+  if (!endpoint || !model) {
+    throw new Error("Managed identity requires AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_MODEL (or --model).")
+  }
+  const url = new URL(endpoint)
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash
+    || !["", "/", "/openai/v1/responses"].includes(url.pathname.replace(/\/$/, ""))) {
+    throw new Error("Managed identity endpoint must be an HTTPS Azure account origin or Responses URL.")
+  }
+  url.pathname = "/openai/v1/responses"
+  return {
+    name: url.hostname.split(".")[0], endpoint: url.href, model,
+    provider: "managed-identity", user: "managed-identity",
+  }
+}
+
 export async function resolveModelConfig() {
+  const managedIdentity = getManagedIdentityAuthSummary()
+  if (managedIdentity) {
+    const clientId = process.env.AZURE_CLIENT_ID?.trim()
+    const credential = new ManagedIdentityCredential(clientId ? { clientId } : {})
+    let cached
+    const getAccessToken = async () => {
+      if (!cached || cached.expiresOnTimestamp <= Date.now() + TOKEN_EXPIRY_MARGIN_MS) {
+        const token = await credential.getToken(`${AZURE_OPENAI_RESOURCE}/.default`, {
+          abortSignal: AbortSignal.timeout(30_000),
+        })
+        if (!token?.token || !Number.isFinite(token.expiresOnTimestamp) || token.expiresOnTimestamp <= Date.now()) {
+          throw new Error("Managed identity returned no valid model access token.")
+        }
+        cached = token
+      }
+      return cached.token
+    }
+    await getAccessToken()
+    return {
+      api: "responses", deployment: managedIdentity.name, endpoint: managedIdentity.endpoint,
+      model: managedIdentity.model, user: managedIdentity.user, getAccessToken,
+    }
+  }
   const envKey = process.env.MINICODE_AUTH_ENTRY ? undefined : process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY
   if (envKey) {
     const baseUrl =

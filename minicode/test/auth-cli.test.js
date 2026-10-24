@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { once } from "node:events"
+import http from "node:http"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -20,7 +21,7 @@ async function fixture(t) {
   for (const key of [
     "OPENCODE_API_KEY", "OPENAI_API_KEY", "OPENCODE_MODEL", "OPENAI_MODEL",
     "AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_MODEL",
-    "MINICODE_AUTH_ENTRY",
+    "MINICODE_AUTH_ENTRY", "MINICODE_AUTH_MODE",
   ]) delete env[key]
   const children = []
   t.after(async () => {
@@ -78,6 +79,35 @@ test("model auth rejects the removed helper flag and identity flags outside auth
   const wrongLogin = await app.start(CLI, ["auth", "login", "--entra-user", "bob@contoso.com"]).closed
   assert.equal(wrongLogin.code, 1)
   assert.match(wrongLogin.output, /only supported with auth add/)
+})
+
+test("managed-identity REPL starts without first-run sign-in or a saved auth file", { timeout: 30_000 }, async t => {
+  const app = await fixture(t)
+  const requests = []
+  const identity = http.createServer((req, res) => {
+    requests.push(new URL(req.url, "http://localhost"))
+    assert.equal(req.headers["x-identity-header"], "fixture-identity-header")
+    res.setHeader("Content-Type", "application/json")
+    res.end(JSON.stringify({
+      access_token: "fixture-secret", expires_on: String(Math.floor(Date.now() / 1000) + 3600),
+      resource: "https://cognitiveservices.azure.com", token_type: "Bearer",
+    }))
+  })
+  await new Promise(resolve => identity.listen(0, "127.0.0.1", resolve))
+  t.after(() => new Promise(resolve => identity.close(resolve)))
+  Object.assign(app.env, {
+    MINICODE_AUTH_MODE: "managed-identity", AZURE_OPENAI_ENDPOINT: "https://resource.services.ai.azure.com",
+    AZURE_OPENAI_MODEL: "gpt-5.6-sol", AZURE_CLIENT_ID: "11111111-1111-1111-1111-111111111111",
+    IDENTITY_ENDPOINT: `http://127.0.0.1:${identity.address().port}/identity`,
+    IDENTITY_HEADER: "fixture-identity-header",
+  })
+  const output = await app.cli([], "exit\n")
+  assert.match(output, /resource.*gpt-5.6-sol.*managed-identity/)
+  assert.doesNotMatch(output, /First-run auth setup/)
+  assert.ok(requests.length > 0)
+  assert.equal(requests[0].searchParams.get("client_id"), app.env.AZURE_CLIENT_ID)
+  assert.equal(requests[0].searchParams.get("resource"), "https://cognitiveservices.azure.com")
+  await assert.rejects(fs.access(path.join(app.config, "auth.json")), { code: "ENOENT" })
 })
 
 test("Copilot can be added, selected and used from the CLI and web without leaking credentials", { timeout: 20_000 }, async t => {
