@@ -18,6 +18,16 @@ wrapper. On other platforms, command execution continues to use Bash.
 
 ## Managed Hosted runtime
 
+An AgentPool provider's interactive session can also launch `Minicode.Contained`
+as a regular terminal REPL, without `hosted-worker`. Set
+`MINICODE_AUTH_MODE=managed-identity`, `AZURE_OPENAI_ENDPOINT` to the Azure account
+origin or full Responses URL, and `AZURE_OPENAI_MODEL` to the deployment name.
+Set `AZURE_CLIENT_ID` for a user-assigned identity. This explicit mode uses the
+Azure Identity SDK, renews model tokens in memory, and does not prompt for user
+sign-in, invoke Azure CLI, or save credentials. The identity needs model-resource
+access. A saved profile explicitly selected with `--auth` takes precedence.
+With the mode unset, existing Azure CLI, Copilot and API-key sign-in is unchanged.
+
 The AgentPool provider launches `hosted-worker` only as a child of its credential-owning
 parent process. Its private JSONL stdin/stdout channel supplies pairing, state, Easy Auth,
 trusted repository restoration and transient model/git credentials. It is not a
