@@ -13,6 +13,7 @@ import { zipSync } from "fflate"
 import { WebSocketServer } from "ws"
 import { agentPoolServerUrl, loadWorkerCredential, parseWorkerReferences, startAgentPoolWorker } from "../server/agent-pool-worker.js"
 import { AgentSession } from "../server/agent-session.js"
+import { createHostedEngsysTool } from "../server/hosted-engsys.js"
 
 const execFileAsync = promisify(execFile)
 const agent = { id: "agent-a", name: "Agent A" }
@@ -197,7 +198,7 @@ test("Hosted assignments persist busy before repository preparation and retire o
   assert.deepEqual(transitions, ["idle", "busy", "repositories", "idle", "stopped"])
 })
 
-for (const explicitRole of [true, false]) test(`Hosted all-repository assignments use supervisory guidance with explicit metadata=${explicitRole}`, async t => {
+for (const explicitRole of [true, false]) for (const engsysEnabled of [true, false]) test(`Hosted all-repository assignments use supervisory guidance with explicit metadata=${explicitRole}, managed identity=${engsysEnabled}`, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "hosted-catalog-test-"))
   const shared = path.join(root, "supervisory-checkout")
   const writable = path.join(root, "Main")
@@ -217,6 +218,7 @@ for (const explicitRole of [true, false]) test(`Hosted all-repository assignment
   ]
   const bundle = skillBundle()
   let sessions = 0
+  const engsysCalls = []
   class Session extends EventEmitter {
     constructor(options) { super(); this.options = options }
     async write() {
@@ -242,7 +244,15 @@ for (const explicitRole of [true, false]) test(`Hosted all-repository assignment
       assert.ok(this.options.instructions.indexOf("Shared catalog guidance wins.")
         < this.options.instructions.indexOf("Conflicting workspace guidance loses."))
       assert.deepEqual(JSON.parse(this.options.env.WORKER_REFERENCE_REPOS_JSON), [descriptors[2]])
-      assert.equal(this.options.tools.length, 0)
+      assert.deepEqual(this.options.tools.map(tool => tool.name), engsysEnabled ? ["engsys_read"] : [])
+      if (engsysEnabled) {
+        assert.match(this.options.instructions, /Hosted image has no Azure CLI/)
+        assert.match(this.options.instructions, /managed-identity capability takes precedence/)
+        assert.match(this.options.instructions, /Other task authorization and human-only approval requirements still apply/)
+        await this.options.tools[0].execute({ path: "/v1/builds/161465369" })
+      } else {
+        assert.doesNotMatch(this.options.instructions, /Hosted harness capability: engsys_read/)
+      }
       assert.equal(await fs.readFile(path.join(root, ".worker", "skills", "paperclip", "SKILL.md"), "utf8"),
         "# Paperclip skill\nPost progress with the issue comments API and verify task completion.")
       return { exitCode: 0 }
@@ -252,6 +262,10 @@ for (const explicitRole of [true, false]) test(`Hosted all-repository assignment
   }
   const fixture = await harness(t, options => new Session(options), {
     cwd: root, workspaceMode: "worktree", hostedWorkspaceMode: "all_repositories", bundle,
+    hostedEngsysTool: engsysEnabled ? ({ task }) => createHostedEngsysTool({
+      task, baseUrl: "https://engsys.example",
+      request: async (...args) => { engsysCalls.push(args); return { statusCode: 200, body: { buildId: "161465369" } } },
+    }) : undefined,
     prepareHostedRepositories: async selection => {
       assert.equal(selection.mode, "all_repositories")
       return { mode: "all_repositories", cwd: root, workerShared: shared, repositories: descriptors }
@@ -260,13 +274,18 @@ for (const explicitRole of [true, false]) test(`Hosted all-repository assignment
   t.after(() => fs.rm(root, { recursive: true, force: true }))
   const peer = await fixture.welcome(0)
   assert.ok(peer.messages.find(message => message.type === "hello").capabilities.includes("hosted_workspace_v2"))
+  assert.equal(peer.messages.find(message => message.type === "hello").capabilities.includes("engsys_read_v1"), engsysEnabled)
   await executeTask(peer, { runId: "catalog", agent, skills: bundle.skills, authToken: "run-credential",
     repositories: { mode: "all_repositories", repositories: descriptors } })
   assert.equal(sessions, 1)
+  assert.deepEqual(engsysCalls, engsysEnabled
+    ? [["engsys_read", { runId: "catalog", path: "/v1/builds/161465369" }, { signal: undefined }]]
+    : [])
   const startup = peer.messages.filter(message => message.runId === "catalog" && message.type === "log").map(message => message.data)
   const layoutIndex = startup.findIndex(message => message.includes("Workspace layout (from the trusted AgentPool/worker repository handshake)"))
   assert.ok(startup[layoutIndex - 1].includes(`Read-only reference (instruction policy): Reference = ${reference}`))
   assert.ok(startup.some(message => message.includes(`Loaded read-only shared instructions from AGENTS.md: ${path.join(shared, "AGENTS.md")}`)))
+  assert.equal(startup.some(message => message.includes("Harness capability: engsys_read")), engsysEnabled)
   await assert.rejects(fs.stat(path.join(root, ".git")), { code: "ENOENT" })
 })
 
