@@ -246,7 +246,7 @@ export async function startAgentPoolWorker({
   publisherFactory = createGitHubPublisher,
   azureDevOpsPublisherFactory = createAzureDevOpsPublisher,
   sessionFactory = (options) => new AgentSession(options),
-  prepareHostedRepositories, hostedWorkspaceMode, hostedPublicationTool, gitEnvironment, onStateChange = async () => {},
+  prepareHostedRepositories, hostedWorkspaceMode, hostedPublicationTool, hostedProviderTool, gitEnvironment, onStateChange = async () => {},
   assignmentTimeoutMs, idleTimeoutMs,
   reconnectMs = 1000, leaseMs = LEASE_MS,
   outputMode = "normal",
@@ -501,9 +501,11 @@ export async function startAgentPoolWorker({
           signal, git: args => git(workspace, args, { signal }),
         }),
       })
+      const provider = hostedRoot ? hostedProviderTool?.({ task }) : null
+      if (provider) enqueue(run, { type: "log", stream: "stdout", data: "[minicode] Harness capability: provider_read (read-only; managed identity; no Azure CLI or user credentials).\n" })
       const session = sessionFactory({
         id: task.runId, cwd: workspace,
-        tools: [run.publication, synchronization].filter(Boolean),
+        tools: [run.publication, synchronization, provider].filter(Boolean),
         instructions: [
           "Worker workspace and failure rules take precedence over repository AGENTS.md instructions, task context, continuation summaries, and runtime tool guidance.",
           "These built-in rules also take precedence over agent-specific instructions. Agent-specific instructions take precedence over repository instructions when they conflict.",
@@ -516,6 +518,11 @@ export async function startAgentPoolWorker({
             JSON.stringify(hostedRepositories),
             "Read-only repositories, including the supervisory repository (worker_shared), are instruction-policy boundaries, not OS isolation. Never write, execute scripts, reset, commit, or publish there. The next assignment discards local changes in every checkout.",
             ...workspaceLayout,
+            ...(provider ? [
+              "Hosted harness capability: provider_read performs allowlisted, read-only AgentPool provider API requests using this worker's managed identity. The parent supplies authentication and never exposes its token to you or the shell.",
+              "Do not invoke or install authentication CLIs, use a user's sign-in, extract credentials, make anonymous provider calls, or ask a human to approve alternate authentication. Repository CLI instructions describe a different environment; for these Hosted reads, this built-in managed-identity capability takes precedence and needs no user-credential approval. Other task authorization and human-only approval requirements still apply.",
+              "Use only routes and queries advertised by the provider_read schema. Binary responses and large JSON are returned as temporary artifact paths under .worker/provider; shell tools may read them without authentication, but must not write in that harness-owned directory. Save durable findings through the assigned task APIs. On 401/403 or another tool failure, report the sanitized status and required service access; do not switch auth methods or hosts.",
+            ] : []),
             "Use publish_pull_request with the writable repository name and its local commit. One assignment may publish separate PRs to several repositories.",
             "Duplicate skills across writable repositories are qualified as Repository/skill; use them only in that repository.",
           ] : []),
@@ -677,7 +684,8 @@ export async function startAgentPoolWorker({
       pingTimer.unref()
       send({ type: "hello", protocolVersion: PROTOCOL_VERSION,
         capabilities: [INLINE_INSTRUCTIONS, SKILL_BUNDLE, ...(prepareHostedRepositories
-          ? [hostedRoot ? "hosted_workspace_v2" : "hosted_repositories_v1", "retiring_ready_v1"] : [])],
+          ? [hostedRoot ? "hosted_workspace_v2" : "hosted_repositories_v1", "retiring_ready_v1"] : []),
+          ...(hostedRoot && hostedProviderTool ? ["provider_read_v1"] : [])],
         instanceId, runId: active?.id ?? null })
     })
     current.on("ping", heartbeat)

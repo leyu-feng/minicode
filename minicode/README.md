@@ -74,6 +74,27 @@ checkout listing, before guidance loading. A missing required supervisory
 `AGENTS.md` still stops the run before the model starts, with its expected path
 in the error; the layout does not replace missing repository content.
 
+When the trusted parent advertises `providerRead` with `authentication: "managed_identity"`,
+an HTTPS `baseUrl` and a nonempty `routes` array, Hosted all-repository sessions receive `provider_read`
+and advertise `provider_read_v1` in their AgentPool handshake.
+Use this harness tool, not Azure CLI or a user's sign-in, for authenticated
+provider reads. Routes and allowed queries are supplied by the provider, not
+assumed to be a build-service API. The model supplies only a relative GET path. The parent
+checks the active assignment, uses its configured API origin and audience,
+adds its managed-identity token privately, and never follows redirects.
+No token, custom header, method, arbitrary URL or output path can be requested.
+The existing API role checks still apply; 401/403 stops the read without
+switching credentials. Human-only approvals for other actions are unchanged.
+This built-in capability takes precedence over repository instructions for
+interactive CLI authentication. Other task authorization still applies.
+
+The provider must bound response sizes and request durations. Small JSON is included in the
+tool result; binary responses and larger JSON can be read from the returned artifact
+path under `.worker/provider`. The harness owns this directory and removes
+artifacts when recycling the assignment. Persist findings through task APIs,
+not these disposable files. Older parents that do not advertise the capability
+do not receive the tool or its managed-identity instructions.
+
 The provider may package Git bundles on its configured schedule. Workers verify the bundle hash
 and still fetch latest before each assignment. Missing first-run manifests use
 direct clone; malformed or corrupt existing bundles fail rather than silently
@@ -106,6 +127,11 @@ any designated-publisher policy. It returns a receipt matching those descriptors
 the model cannot override repository identity, credentials or publication policy.
 Partner-specific authentication, routes, storage, lifecycle schedules and Git
 hosting adapters belong to the provider, not the AgentPool protocol.
+
+Providers must update the private bootstrap and parent operation to `providerRead`
+and `provider_read`, advertise `provider_read_v1`, and supply supervisory and
+publication metadata before deploying this worker. Deploy parent and worker
+together; existing deployment-specific wire names are not compatibility aliases.
 
 ## Run the terminal agent
 
