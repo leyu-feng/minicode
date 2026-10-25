@@ -1,10 +1,17 @@
 export async function httpErrorDetails(response, secrets = []) {
+  return (await httpErrorInfo(response, secrets)).detail
+}
+
+export async function httpErrorInfo(response, secrets = []) {
   let detail
+  let code
   try {
     const body = await response.text()
     try {
       const data = JSON.parse(body)
       const error = data?.error
+      const errorCode = error?.code ?? data?.code
+      if (typeof errorCode === "string") code = errorCode
       detail = [
         typeof error === "string" ? error : error?.message,
         error?.code ?? data?.code,
@@ -28,7 +35,7 @@ export async function httpErrorDetails(response, secrets = []) {
       const value = response.headers.get(name)
       return value ? `${name}: ${value}` : ""
     }).filter(Boolean)
-  return redactSecrets([detail, ...requestIds].join("\n"), secrets).slice(0, 4000)
+  return { detail: redactSecrets([detail, ...requestIds].join("\n"), secrets).slice(0, 4000), code }
 }
 
 export function redactSecrets(value, secrets = []) {

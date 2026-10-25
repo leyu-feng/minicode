@@ -247,7 +247,7 @@ export async function startAgentPoolWorker({
   azureDevOpsPublisherFactory = createAzureDevOpsPublisher,
   sessionFactory = (options) => new AgentSession(options),
   prepareHostedRepositories, hostedWorkspaceMode, hostedPublicationTool, hostedProviderTool, gitEnvironment, onStateChange = async () => {},
-  onActivity,
+  onActivity, onModelFailure,
   assignmentTimeoutMs, idleTimeoutMs,
   reconnectMs = 1000, leaseMs = LEASE_MS,
   outputMode = "normal",
@@ -649,7 +649,20 @@ export async function startAgentPoolWorker({
         task.runtimeTools?.guidance ?? "",
         JSON.stringify({ agent: task.agent, workspace: { cwd: workspace }, serverContext, continuation: task.continuation }),
       ].join("\n\n")
-      return session.write(prompt)
+      const result = await session.write(prompt)
+      if (result?.modelFailure && onModelFailure && !stopped && !run.cancelled && !run.timedOut) {
+        try {
+          await onModelFailure({
+            runId: run.id,
+            failure: { ...result.modelFailure, ...(agentInstructions?.contentSha256 ? { instructionsHash: agentInstructions.contentSha256 } : {}) },
+          })
+        } catch (error) {
+          const warning = `Academy failure capture failed; the original task remains failed: ${String(error.message).slice(0, 500)}`
+          log(`[minicode] ${warning}`)
+          enqueue(run, { type: "log", stream: "stderr", data: `${warning}\n` })
+        }
+      }
+      return result
     }).then((result) => {
       if (stopped) return
       run.done = true

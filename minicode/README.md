@@ -33,6 +33,18 @@ sign-in, invoke Azure CLI, or save credentials. The identity needs model-resourc
 access. A saved profile explicitly selected with `--auth` takes precedence.
 With the mode unset, existing Azure CLI, Copilot and API-key sign-in is unchanged.
 
+Azure Responses requests starting with a model in the following chain advance on
+HTTP 429 in this order: `gpt-5.6-sol` -> `gpt-6-sol` -> `gpt-5.6-terra` ->
+`gpt-5.6-luna` -> `gpt-6-luna`. Fallback stays on the same endpoint and credentials;
+it does not provision models. Each transition is logged. Once fallback starts,
+a 404 with a missing-model/deployment error code is logged and skipped.
+Other errors, including authentication and authorization failures, stop the request.
+Each candidate is tried at most once per model call; exhaustion fails explicitly.
+Only the pending model request is retried, with the same context, so completed
+tools are not replayed. A successful fallback is retained for the rest of that
+prompt's tool loop; the next submitted prompt starts with the configured model.
+Copilot, Chat Completions and models outside this chain are unchanged.
+
 The AgentPool provider launches `hosted-worker` only as a child of its credential-owning
 parent process. Its private JSONL stdin/stdout channel supplies pairing, state, Easy Auth,
 trusted repository restoration and transient model/git credentials. It is not a
