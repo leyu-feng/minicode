@@ -152,6 +152,167 @@ test("reports the endpoint when a model request cannot connect", async () => {
   )
 })
 
+test("Azure rate limits advance through the requested model chain with unchanged context and credentials", async t => {
+  const requests = [], warnings = []
+  t.mock.method(console, "warn", message => warnings.push(message))
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body)
+    requests.push({ url, body, authorization: init.headers.Authorization })
+    return requests.length < 5
+      ? Response.json({ error: { code: "rate_limit_exceeded", message: "Too many tokens" } }, { status: 429 })
+      : Response.json({ output_text: "fallback succeeded" })
+  }
+  const config = {
+    api: "responses", endpoint: "https://example.test/openai/v1/responses",
+    getAccessToken: async () => "fixture-token", model: "gpt-5.6-sol",
+  }
+  const messages = [{ role: "user", content: "Inspect this task" }]
+  assert.equal(await callModelOnce(config, messages), "fallback succeeded")
+  assert.deepEqual(requests.map(request => request.body.model), [
+    "gpt-5.6-sol", "gpt-6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-luna",
+  ])
+  for (const request of requests) {
+    assert.equal(request.url, config.endpoint)
+    assert.equal(request.authorization, "Bearer fixture-token")
+    assert.deepEqual(request.body.input, messages)
+  }
+  assert.equal(config.model, "gpt-5.6-sol")
+  assert.equal(warnings.length, 4)
+  assert.match(warnings[0], /gpt-5\.6-sol.*429.*gpt-6-sol/)
+  assert.match(warnings[3], /gpt-5\.6-luna.*429.*gpt-6-luna/)
+})
+
+test("fallback skips explicitly missing deployments with a warning", async t => {
+  for (const code of ["DeploymentNotFound", "model_not_found"]) {
+    await t.test(code, async t => {
+      const models = [], warnings = []
+      t.mock.method(console, "warn", message => warnings.push(message))
+      globalThis.fetch = async (_url, init) => {
+        models.push(JSON.parse(init.body).model)
+        if (models.length === 1) return Response.json({ error: { code: "rate_limit_exceeded" } }, { status: 429 })
+        if (models.length === 2) return Response.json({ error: { code, message: "Not deployed" } }, { status: 404 })
+        return Response.json({ output_text: "done" })
+      }
+      assert.equal(await callModelOnce({
+        api: "responses", endpoint: "https://example.test/responses", apiKey: "fixture", model: "gpt-5.6-sol",
+      }, []), "done")
+      assert.deepEqual(models, ["gpt-5.6-sol", "gpt-6-sol", "gpt-5.6-terra"])
+      assert.match(warnings[1], /gpt-6-sol.*unavailable.*404.*gpt-5\.6-terra/)
+    })
+  }
+})
+
+test("exhausting rate-limited and missing models fails with redacted per-model diagnostics", async t => {
+  const models = []
+  t.mock.method(console, "warn", () => {})
+  globalThis.fetch = async (_url, init) => {
+    models.push(JSON.parse(init.body).model)
+    const missing = models.length === 5
+    return Response.json({ error: {
+      code: missing ? "DeploymentNotFound" : "rate_limit_exceeded",
+      message: "Provider diagnostic with fixture-secret",
+    } }, { status: missing ? 404 : 429, headers: { "x-request-id": `request-${models.length}` } })
+  }
+  await assert.rejects(callModelOnce({
+    api: "responses", endpoint: "https://example.test/responses", apiKey: "fixture-secret", model: "gpt-5.6-sol",
+  }, []), error => {
+    assert.match(error.message, /Model fallback exhausted/)
+    assert.match(error.message, /gpt-6-luna[\s\S]*DeploymentNotFound/)
+    assert.match(error.message, /request-1[\s\S]*request-5/)
+    assert.ok(!error.message.includes("fixture-secret"))
+    assert.ok(error.message.includes("[redacted]"))
+    return true
+  })
+  assert.equal(models.length, 5)
+})
+
+test("fallback does not mask unrelated errors or change other providers and APIs", async t => {
+  for (const fixture of [
+    { status: 400 },
+    { status: 401 },
+    { status: 403 },
+    { status: 404, code: "DeploymentNotFound" },
+    { status: 425 },
+    { status: 500 },
+    { status: 429, api: "chat-completions" },
+    { status: 429, provider: "github-copilot" },
+    { status: 429, model: "other-model" },
+    { status: 404, preceding429: true, code: "ResourceNotFound" },
+    { status: 403, preceding429: true },
+  ]) {
+    await t.test(JSON.stringify(fixture), async t => {
+      let requests = 0
+      t.mock.method(console, "warn", () => {})
+      globalThis.fetch = async () => {
+        requests++
+        return fixture.preceding429 && requests === 1
+          ? Response.json({ error: { code: "rate_limit_exceeded" } }, { status: 429 })
+          : Response.json({ error: { code: fixture.code, message: "Stop here" } }, { status: fixture.status })
+      }
+      await assert.rejects(callModelOnce({
+        api: "responses", endpoint: "https://example.test/responses", apiKey: "fixture", model: "gpt-5.6-sol",
+        ...fixture,
+      }, []), new RegExp(`Model request failed \\(${fixture.status}\\)`))
+      assert.equal(requests, fixture.preceding429 ? 2 : 1)
+    })
+  }
+})
+
+test("fallback retains the working model for the prompt without replaying completed tools", async t => {
+  const requests = []
+  let tools = 0
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    if (requests.length === 2) return Response.json({ error: { code: "rate_limit_exceeded" } }, { status: 429 })
+    if (requests.length === 3) return Response.json({ error: { code: "DeploymentNotFound" } }, { status: 404 })
+    const action = requests.length === 1 || requests.length === 4
+      ? { type: "tool", name: "inspect", arguments: {} }
+      : { type: "final", message: "done" }
+    return Response.json({ output_text: JSON.stringify(action) })
+  }
+  const session = new AgentSession({
+    id: "model-fallback", cwd: process.cwd(),
+    tools: [{ name: "inspect", description: "Inspect once", execute: async () => `receipt-${++tools}` }],
+    modelConfigProvider: async () => ({
+      api: "responses", endpoint: "https://example.test/responses", apiKey: "fixture", model: "gpt-5.6-sol",
+    }),
+  })
+  t.after(() => session.dispose())
+  const output = [], activity = []
+  session.on("output", event => output.push(event))
+  session.on("activity", event => activity.push(event))
+  assert.equal((await session.write("Inspect")).exitCode, 0)
+  assert.equal(tools, 2)
+  assert.equal((await session.write("Follow up")).exitCode, 0)
+  assert.deepEqual(requests.map(request => request.model), [
+    "gpt-5.6-sol", "gpt-5.6-sol", "gpt-6-sol", "gpt-5.6-terra", "gpt-5.6-terra", "gpt-5.6-sol",
+  ])
+  assert.deepEqual(requests[1].input, requests[2].input)
+  assert.deepEqual(requests[2].input, requests[3].input)
+  assert.match(requests[3].input.at(-1).content, /receipt-1/)
+  assert.match(requests[4].input.at(-1).content, /receipt-2/)
+  assert.ok(output.some(event => event.stream === "stderr" && /rate limited/.test(event.data)))
+  assert.ok(activity.some(event => /unavailable/.test(event.summary)))
+})
+
+test("interrupting during a fallback warning prevents further model requests", async t => {
+  let requests = 0
+  globalThis.fetch = async () => {
+    requests++
+    return Response.json({ error: { code: "rate_limit_exceeded" } }, { status: 429 })
+  }
+  const session = new AgentSession({ id: "cancel-fallback", cwd: process.cwd() })
+  session.config = { api: "responses", endpoint: "https://example.test/responses", apiKey: "fixture", model: "gpt-5.6-sol" }
+  t.after(() => session.dispose())
+  session.on("output", ({ data }) => {
+    if (data.includes("rate limited")) session.interrupt()
+  })
+  await session.write("Inspect")
+  assert.equal(requests, 1)
+  assert.equal(session.busy, false)
+  assert.deepEqual(session.messages, [])
+})
+
 test("model HTTP errors include safe provider details, model, endpoint and request ID", async () => {
   globalThis.fetch = async () => new Response(JSON.stringify({
     error: { message: "Unsupported parameter; fixture-secret", code: "unsupported_parameter", param: "instructions" },
