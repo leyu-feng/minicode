@@ -64,6 +64,15 @@ const execFileAsync = promisify(execFile);
     return { config, client, poolId };
   }
 
+  it("returns organization names only to the configured Hosted provider", async () => {
+    const provider = hostedProvider();
+    const svc = agentPoolService(db);
+    await svc.ensureDefault(companyId);
+    const grant = { ...provider.config, clientId: randomUUID(), principalId: randomUUID() };
+    expect(await svc.hostedOrganizationNames(grant)).toContainEqual({ companyId, name: "AgentPool test" });
+    await expect(svc.hostedOrganizationNames({ ...grant, audience: "api://other" })).rejects.toThrow();
+  });
+
   it("retains the built-in host's pool ID and validates company-scoped repository choices", async () => {
     const provider = hostedProvider();
     const svc = agentPoolService(db);

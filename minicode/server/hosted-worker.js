@@ -98,6 +98,11 @@ export async function runHostedWorkerCli() {
         const result = await request("state", state)
         return result.accepting
       }),
+      onActivity: activity => {
+        void request("activity", { ...activity, bindingId: binding?.workerId }).then(result => {
+          if (!result.accepted) process.stderr.write("Hosted live activity was not accepted.\n")
+        }).catch(error => process.stderr.write(`Hosted live activity failed: ${error.message}\n`))
+      },
       sessionFactory: options => new AgentSession({
         ...options,
         modelConfigProvider: async () => ({

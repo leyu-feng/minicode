@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
-import { agentPools, agentPoolWorkers, type Db } from "@paperclipai/db";
+import { and, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
+import { agentPools, agentPoolWorkers, companies, type Db } from "@paperclipai/db";
 import { agentPoolNameSchema, hostedAgentRepositoriesSchema, type AgentPool, type HostedWorkerRepository,
   type hostedAgentPoolWorkerSchema, type hostedAgentPoolSlotsSchema } from "@paperclipai/shared";
 import type { z } from "zod";
@@ -178,6 +178,16 @@ export function agentPoolService(db: Db) {
   }
 
   return {
+    async hostedOrganizationNames(grant: HostedWorkerProviderGrant) {
+      const config = defaultHostedWorkerConfig();
+      if (!config || config.apiUrl.replace(/\/+$/, "") !== grant.apiUrl.replace(/\/+$/, "")
+        || config.audience !== grant.audience) {
+        throw forbidden("The calling provider does not own these Hosted pools");
+      }
+      return db.select({ companyId: companies.id, name: companies.name }).from(agentPools)
+        .innerJoin(companies, eq(companies.id, agentPools.companyId))
+        .where(and(eq(agentPools.type, "hosted"), eq(agentPools.name, "default"), isNotNull(agentPools.hostedPoolId)));
+    },
     pairHostedWorker: (input: z.infer<typeof hostedAgentPoolWorkerSchema>, grant: HostedWorkerProviderGrant) =>
       hostedWorker(input, grant, "pair"),
     revokeHostedWorker: (input: z.infer<typeof hostedAgentPoolWorkerSchema>, grant: HostedWorkerProviderGrant) =>

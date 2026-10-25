@@ -247,6 +247,7 @@ export async function startAgentPoolWorker({
   azureDevOpsPublisherFactory = createAzureDevOpsPublisher,
   sessionFactory = (options) => new AgentSession(options),
   prepareHostedRepositories, hostedWorkspaceMode, hostedPublicationTool, hostedProviderTool, gitEnvironment, onStateChange = async () => {},
+  onActivity,
   assignmentTimeoutMs, idleTimeoutMs,
   reconnectMs = 1000, leaseMs = LEASE_MS,
   outputMode = "normal",
@@ -598,6 +599,13 @@ export async function startAgentPoolWorker({
         },
       })
       run.session = session
+      if (onActivity) {
+        let sequence = 0
+        session.on("activity", activity => {
+          if (stopped || run.done) return
+          onActivity({ ...activity, runId: run.id, sequence: ++sequence, agentName: task.agent.name })
+        })
+      }
       session.on("output", ({ stream, data }) => {
         if (stopped || run.overflow) return
         if (outputMode === "normal" && stream === "command") return

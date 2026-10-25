@@ -15,6 +15,11 @@ import { authenticateHostedWorkerProvider } from "../services/entra-hosted-worke
 export function agentPoolPairingRoutes(db: Db) {
   const router = Router();
   const svc = agentPoolService(db);
+  router.get("/api/agent-pool/hosted/organizations", async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const grant = await authenticateHostedWorkerProvider(req.headers.authorization);
+    res.json(await svc.hostedOrganizationNames(grant));
+  });
   router.post("/api/agent-pool/hosted/slots", validate(hostedAgentPoolSlotsSchema), async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     const grant = await authenticateHostedWorkerProvider(req.headers.authorization);

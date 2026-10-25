@@ -18,6 +18,11 @@ wrapper. On other platforms, command execution continues to use Bash.
 
 ## Managed Hosted runtime
 
+Hosted sessions relay bounded, secret-redacted activity to the parent for the
+AgentPool provider's live worker view. Prompts, model actions, tool results and errors carry
+the current run and binding identity; monitoring failures are reported without
+blocking task execution.
+
 An AgentPool provider's interactive session can also launch `Minicode.Contained`
 as a regular terminal REPL, without `hosted-worker`. Set
 `MINICODE_AUTH_MODE=managed-identity`, `AZURE_OPENAI_ENDPOINT` to the Azure account

@@ -12,6 +12,27 @@ afterEach(() => {
   globalThis.fetch = originalFetch
 })
 
+test("live activity labels tools, strips terminal codes and redacts configured secrets", async t => {
+  const actions = [
+    { type: "tool", name: "shell_read", arguments: {} },
+    { type: "final", message: "done" },
+  ]
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] })
+  const session = new AgentSession({
+    id: "live-activity", cwd: process.cwd(), env: { FIXTURE_API_KEY: "sensitive-fixture" },
+    tools: [{ name: "shell_read", description: "Read fixture", execute: async () => "\u001b[31msensitive-fixture\u001b[0m" }],
+  })
+  session.config = { api: "chat-completions", endpoint: "https://example.test", apiKey: "fixture", model: "fixture" }
+  t.after(() => session.dispose())
+  const activity = []
+  session.on("activity", event => activity.push(event))
+  await session.write("Inspect sensitive-fixture")
+  assert.equal(activity[0].kind, "prompt")
+  assert.ok(activity.some(event => event.target === "shell_read"))
+  assert.ok(!JSON.stringify(activity).includes("sensitive-fixture"))
+  assert.ok(!activity.some(event => event.summary.includes("\u001b")))
+})
+
 test("Windows agent commands use PowerShell 7 and serialize file contents as plain strings", { skip: process.platform !== "win32" }, async t => {
   const file = fileURLToPath(new URL("../README.md", import.meta.url)).replaceAll("'", "''")
   const requests = []

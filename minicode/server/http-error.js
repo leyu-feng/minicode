@@ -28,12 +28,15 @@ export async function httpErrorDetails(response, secrets = []) {
       const value = response.headers.get(name)
       return value ? `${name}: ${value}` : ""
     }).filter(Boolean)
-  let result = [detail, ...requestIds].join("\n")
+  return redactSecrets([detail, ...requestIds].join("\n"), secrets).slice(0, 4000)
+}
+
+export function redactSecrets(value, secrets = []) {
+  let result = value
   for (const secret of secrets) {
     if (typeof secret !== "string" || !secret) continue
     result = result.replaceAll(secret, "[redacted]").replaceAll(JSON.stringify(secret).slice(1, -1), "[redacted]")
   }
   return result.replace(/Bearer\s+[^\s",;]+/gi, "Bearer [redacted]")
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "")
-    .slice(0, 4000)
 }

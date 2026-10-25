@@ -3,9 +3,10 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { EventEmitter } from "node:events"
 import { randomUUID } from "node:crypto"
+import { stripVTControlCharacters } from "node:util"
 import { resolveModelConfig } from "./auth.js"
 import { killTree } from "./kill-tree.js"
-import { httpErrorDetails } from "./http-error.js"
+import { httpErrorDetails, redactSecrets } from "./http-error.js"
 
 const MAX_TOOL_TURNS = 1000
 const MAX_OUTPUT_CHARS = 12000
@@ -355,6 +356,23 @@ export class AgentSession extends EventEmitter {
 
   #emitOutput(data, stream = "stdout") {
     this.emit("output", { stream, data })
+    if (this.activeRun && this.#isActive(this.activeRun)) {
+      this.#emitActivity({
+        ...this.activeRun.activity,
+        kind: stream === "stderr" ? "error" : stream === "command" ? "tool_result" : "model_action",
+        summary: data,
+      })
+    }
+  }
+
+  #emitActivity(activity) {
+    if (this.listenerCount("activity") === 0) return
+    const secrets = Object.entries(this.env ?? {})
+      .filter(([key, value]) => /token|secret|password|api_key/i.test(key) && typeof value === "string")
+      .map(([, value]) => value)
+    const summary = redactSecrets(stripVTControlCharacters(activity.summary), secrets)
+    this.emit("activity", { ...activity, summary: summary.length > 12000
+      ? `${summary.slice(0, 11970)}\n[message truncated]` : summary })
   }
 
   #isActive(run) {
@@ -395,12 +413,18 @@ export class AgentSession extends EventEmitter {
       }
       this.#throwIfInactive(run)
       this.messages.push({ role: "user", content: prompt })
+      this.#emitActivity({ kind: "prompt", action: "prompt", summary: prompt })
 
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         this.#throwIfInactive(run)
         const raw = await callModel(this.config, this.messages, this.systemPrompt, signal, turn === 0 ? "user" : "agent")
         this.#throwIfInactive(run)
         const action = parseJsonAction(raw)
+        run.activity = {
+          turn: turn + 1,
+          action: action?.type ?? "output",
+          target: action?.type === "tool" ? action.name ?? "shell" : action?.path,
+        }
 
         if (!action || typeof action !== "object" || action.type === "final") {
           if (!action && looksLikeAction(raw)) {
