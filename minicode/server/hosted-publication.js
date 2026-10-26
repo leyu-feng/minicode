@@ -24,7 +24,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
         commit: { type: "string" }, title: { type: "string" }, body: { type: "string" },
       }, required: ["commit", "title", "body"], additionalProperties: false },
       execute: (input, options) => request("publish", {
-        repositoryId: repository.id, ...input, existingOnly: !!options.publication?.existing,
+        repositoryId: repository.id, ...input, isDraft: options.isDraft === true, existingOnly: !!options.publication?.existing,
       }, options),
     }, {
       apiUrl, authToken: task.authToken, runId: task.runId, agentId: task.agent.id, companyId: task.agent.companyId,
@@ -39,14 +39,16 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
     parameters: { type: "object", properties: {
       repository: { type: "string", enum: [...tools.keys()] },
       commit: { type: "string" }, title: { type: "string" }, body: { type: "string" },
+      isDraft: { type: "boolean", description: "Follow the assigned workflow: true for draft-only, false for a normal PR awaiting human approval. Defaults to false. Never merge or enable auto-complete." },
       issueId: { type: "string", description: "Assigned task UUID, required only for Run Now without task context." },
     }, required: ["repository", "commit", "title", "body"], additionalProperties: false },
     get registrationError() { return [...tools.values()].find(tool => tool.registrationError)?.registrationError ?? null },
     async execute(input, options) {
-      const { repository, ...publication } = input ?? {}
+      const { repository, isDraft, ...publication } = input ?? {}
+      if (isDraft !== undefined && typeof isDraft !== "boolean") throw new Error("isDraft must be a boolean")
       const tool = tools.get(repository)
       if (!tool) throw new Error("Publication requires a writable repository alias from the Hosted catalog")
-      return tool.execute(publication, options)
+      return tool.execute(publication, { ...options, isDraft })
     },
   }
 }

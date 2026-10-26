@@ -94,6 +94,7 @@ export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issue
           || (savedPr && receipt.number !== savedPr.metadata.number)
           || receipt.url !== pullRequestUrl(receipt.number)
           || !["OPEN", "CLOSED", "MERGED"].includes(receipt.state)
+          || (receipt.isDraft !== undefined && typeof receipt.isDraft !== "boolean")
           || receipt.commit !== publicationInput.commit
           || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(receipt.commit ?? "")
           || receipt.branch !== (savedPr?.metadata.branch ?? allocation?.branch ?? branchForCommit(agentId, receipt.commit))) {
@@ -101,13 +102,17 @@ export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issue
         }
         const existing = savedPr ?? products.find(product => product.type === "pull_request"
           && product.provider === provider && product.url?.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase() === receipt.url.toLowerCase())
-        const status = receipt.state === "OPEN"
-          ? (["approved", "changes_requested", "draft"].includes(existing?.status) ? existing.status : "ready_for_review")
-          : receipt.state.toLowerCase()
+        let status = receipt.state.toLowerCase()
+        if (receipt.state === "OPEN") {
+          status = ["approved", "changes_requested", "draft"].includes(existing?.status) ? existing.status : "ready_for_review"
+          if (receipt.isDraft === true) status = "draft"
+          else if (receipt.isDraft === false && status === "draft") status = "ready_for_review"
+        }
         const payload = {
           status, reviewState: receipt.state === "OPEN" ? existing?.reviewState ?? "needs_board_review" : "none",
           metadata: { ...existing?.metadata, repository, number: receipt.number, branch: receipt.branch,
             commit: receipt.commit, state: receipt.state.toLowerCase(), agentId,
+            ...(receipt.isDraft !== undefined ? { isDraft: receipt.isDraft } : {}),
             ...(receipt.target ? { target: receipt.target } : {}),
             ...(receipt.repositoryId ? { repositoryId: receipt.repositoryId } : {}),
             ...(receipt.projectId ? { projectId: receipt.projectId } : {}) },

@@ -62,7 +62,7 @@ function fixture(t, aliases = false, provider = "azure_devops") {
       const number = repository.name === "First" ? 1 : 2
       return {
         provider: descriptor.provider, repository: descriptor.repository, number,
-        url: descriptor.pullRequestUrlTemplate.replace("{number}", String(number)), state: "OPEN",
+        url: descriptor.pullRequestUrlTemplate.replace("{number}", String(number)), state: "OPEN", isDraft: input.isDraft,
         commit: input.commit, branch: descriptor.branchTemplate.replace("{agentId}", agentId).replace("{commit}", input.commit),
       }
     },
@@ -80,6 +80,24 @@ test("Hosted publication selects a writable folder alias while retaining the rem
   await f.tool.execute({ ...f.input, repository: "first" })
   assert.equal(f.publications[0].repositoryId, "44444444-4444-4444-8444-444444444444")
   await assert.rejects(f.tool.execute({ ...f.input, repository: "reference" }), /writable repository/)
+})
+
+for (const isDraft of [undefined, false, true]) {
+  test(`Hosted publication honors draft mode ${isDraft ?? "default"} and registers its actual review status`, async t => {
+    const f = fixture(t)
+    const receipt = await f.tool.execute({ ...f.input, repository: "First", ...(isDraft === undefined ? {} : { isDraft }) })
+    assert.equal(f.publications[0].isDraft, isDraft === true)
+    assert.equal(receipt.isDraft, isDraft === true)
+    assert.equal(f.products[0].status, isDraft ? "draft" : "ready_for_review")
+    assert.equal(f.products[0].metadata.isDraft, isDraft === true)
+  })
+}
+
+test("Hosted publication rejects invalid draft mode before any remote operation", async t => {
+  const f = fixture(t)
+  await assert.rejects(f.tool.execute({ ...f.input, repository: "First", isDraft: "false" }), /isDraft must be a boolean/)
+  assert.equal(f.publications.length, 0)
+  assert.equal(f.products.length, 0)
 })
 
 test("Hosted publication registers separate repository PRs and reconciles only the selected saved receipt", async t => {
