@@ -44,9 +44,12 @@ export function publicationEnvironment() {
   return env
 }
 
+export function publicationSlug(value) {
+  return String(value).normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 64).replace(/-$/, "")
+}
+
 export function publicationBranch(alias, agentName, title) {
-  const slug = value => String(value).normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 64).replace(/-$/, "")
-  const agent = slug(agentName), feature = slug(title)
+  const agent = publicationSlug(agentName), feature = publicationSlug(title)
   if (!agent || !feature) throw new Error("PR branch naming requires an agent name and title containing letters or numbers")
   return `users/${alias}/${agent}/${feature}`
 }

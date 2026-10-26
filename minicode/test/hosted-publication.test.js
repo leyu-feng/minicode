@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { createHostedPublicationTool } from "../server/hosted-publication.js"
+import { publicationSlug } from "../server/pull-request-publisher.js"
 
 function fixture(t, aliases = false, provider = "azure_devops") {
   const agentId = "11111111-1111-4111-8111-111111111111"
@@ -17,12 +18,13 @@ function fixture(t, aliases = false, provider = "azure_devops") {
     repository.publication = {
       provider, repository: identity,
       pullRequestUrlTemplate: provider === "azure_devops" ? `${identity}/pullrequest/{number}` : `https://code.example/${identity}/pull/{number}`,
-      branchTemplate: provider === "azure_devops" ? "u/hosted/{agentId}/{commit}" : "agent/{agentId}/{commit}",
+      branchTemplate: provider === "azure_devops" ? "u/{workerName}/{feature}" : "agent/{agentId}/{commit}",
     }
   }
   if (aliases) for (const repository of repositories) repository.alias = repository.name.toLowerCase()
   const products = [], comments = [], publications = []
   let failRegistration = false
+  let returnedBranch
   t.mock.method(globalThis, "fetch", async (url, options) => {
     const route = new URL(url).pathname
     const body = options.body ? JSON.parse(options.body) : undefined
@@ -63,7 +65,10 @@ function fixture(t, aliases = false, provider = "azure_devops") {
       return {
         provider: descriptor.provider, repository: descriptor.repository, number,
         url: descriptor.pullRequestUrlTemplate.replace("{number}", String(number)), state: "OPEN", isDraft: input.isDraft,
-        commit: input.commit, branch: descriptor.branchTemplate.replace("{agentId}", agentId).replace("{commit}", input.commit),
+        commit: input.commit, branch: returnedBranch ?? products.find(product => product.metadata?.repository === descriptor.repository
+          && product.metadata?.commit === input.commit)?.metadata.branch
+          ?? (descriptor.branchTemplate === "u/{workerName}/{feature}" ? `u/w01/${publicationSlug(input.title)}`
+            : descriptor.branchTemplate.replace("{agentId}", agentId).replace("{commit}", input.commit)),
       }
     },
   })
@@ -71,6 +76,7 @@ function fixture(t, aliases = false, provider = "azure_devops") {
     tool, repositories, products, comments, publications,
     input: { commit: "a".repeat(40), title: "Multi-repository change", body: "Awaiting review." },
     failRegistration(value) { failRegistration = value },
+    branch(value) { returnedBranch = value },
   }
 }
 
@@ -81,6 +87,37 @@ test("Hosted publication selects a writable folder alias while retaining the rem
   assert.equal(f.publications[0].repositoryId, "44444444-4444-4444-8444-444444444444")
   await assert.rejects(f.tool.execute({ ...f.input, repository: "reference" }), /writable repository/)
 })
+
+test("Hosted publication requests readable worker/feature branches and preserves saved branches across title edits", async t => {
+  const f = fixture(t)
+  const receipt = await f.tool.execute({ ...f.input, repository: "First", title: "Add Postgre VNet" })
+  assert.equal(f.publications[0].readableBranchNames, true)
+  assert.equal(receipt.branch, "u/w01/add-postgre-vnet")
+  const retry = await f.tool.execute({ ...f.input, repository: "First", title: "Edited PR title" })
+  assert.equal(retry.branch, receipt.branch)
+  assert.equal(f.products.length, 1)
+})
+
+test("Hosted publication accepts bounded collision suffixes and legacy receipts without duplicate registration", async t => {
+  const f = fixture(t)
+  f.branch("u/w09/multi-repository-change-10")
+  await f.tool.execute({ ...f.input, repository: "First" })
+  f.branch(`u/hosted/11111111-1111-4111-8111-111111111111/${f.input.commit}`)
+  await f.tool.execute({ ...f.input, repository: "Second" })
+  await f.tool.execute({ ...f.input, repository: "Second" })
+  assert.equal(f.products.length, 2)
+  assert.equal(f.publications.at(-1).existingOnly, true)
+})
+
+for (const branch of ["u/alice/multi-repository-change", "u/w00/multi-repository-change",
+  "u/w01/unrelated-feature", "u/w01/multi-repository-change-11", "u/w01/../main"]) {
+  test(`Hosted publication rejects an unexpected readable branch: ${branch}`, async t => {
+    const f = fixture(t)
+    f.branch(branch)
+    await assert.rejects(f.tool.execute({ ...f.input, repository: "First" }), /invalid PR receipt/)
+    assert.equal(f.products.length, 0)
+  })
+}
 
 for (const isDraft of [undefined, false, true]) {
   test(`Hosted publication honors draft mode ${isDraft ?? "default"} and registers its actual review status`, async t => {

@@ -4,7 +4,8 @@ const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i
 
 export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issueId, agentId, companyId, repository,
   provider = "github", pullRequestUrl = number => `https://github.com/${repository}/pull/${number}`,
-  branchForCommit = (agent, commit) => `minicode/${agent}/${commit}` }) {
+  branchForCommit = (agent, commit) => `minicode/${agent}/${commit}`,
+  validateBranch = (branch, { agentId, commit }) => branch === branchForCommit(agentId, commit) }) {
   const failures = new Map()
   return {
     ...tool,
@@ -89,6 +90,7 @@ export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issue
             allocation = metadata
           },
         } })
+        const savedBranch = savedPr?.metadata.branch ?? allocation?.branch
         if (!receipt || receipt.repository !== repository || (receipt.provider ?? "github") !== provider
           || !Number.isSafeInteger(receipt.number) || receipt.number < 1
           || (savedPr && receipt.number !== savedPr.metadata.number)
@@ -97,7 +99,7 @@ export function paperclipPublicationTool(tool, { apiUrl, authToken, runId, issue
           || (receipt.isDraft !== undefined && typeof receipt.isDraft !== "boolean")
           || receipt.commit !== publicationInput.commit
           || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(receipt.commit ?? "")
-          || receipt.branch !== (savedPr?.metadata.branch ?? allocation?.branch ?? branchForCommit(agentId, receipt.commit))) {
+          || (savedBranch ? receipt.branch !== savedBranch : !validateBranch(receipt.branch, { agentId, ...publicationInput }))) {
           throw new Error("Harness returned an invalid PR receipt")
         }
         const existing = savedPr ?? products.find(product => product.type === "pull_request"

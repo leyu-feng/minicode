@@ -1,16 +1,18 @@
 import { paperclipPublicationTool } from "./paperclip-publication.js"
+import { publicationSlug } from "./pull-request-publisher.js"
 
 export function createHostedPublicationTool({ repositories, task, apiUrl, request }) {
   const tools = new Map()
   for (const repository of repositories.filter(repo => !repo.readOnly)) {
     const alias = repository.alias ?? repository.name
     const publication = repository.publication
+    const readableBranches = publication?.branchTemplate === "u/{workerName}/{feature}"
     if (!publication || typeof publication.provider !== "string" || !publication.provider.trim()
       || typeof publication.repository !== "string" || !publication.repository.trim()
       || typeof publication.pullRequestUrlTemplate !== "string" || !publication.pullRequestUrlTemplate.includes("{number}")
       || /[{}]/.test(publication.pullRequestUrlTemplate.replace("{number}", "1"))
-      || typeof publication.branchTemplate !== "string" || !publication.branchTemplate.includes("{commit}")
-      || /[{}]/.test(publication.branchTemplate.replaceAll("{agentId}", "").replace("{commit}", ""))) {
+      || (!readableBranches && (typeof publication.branchTemplate !== "string" || !publication.branchTemplate.includes("{commit}")
+        || /[{}]/.test(publication.branchTemplate.replaceAll("{agentId}", "").replace("{commit}", ""))))) {
       throw new Error(`Writable repository ${repository.name} requires a provider publication descriptor`)
     }
     const url = new URL(publication.pullRequestUrlTemplate.replace("{number}", "1"))
@@ -25,17 +27,25 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
       }, required: ["commit", "title", "body"], additionalProperties: false },
       execute: (input, options) => request("publish", {
         repositoryId: repository.id, ...input, isDraft: options.isDraft === true, existingOnly: !!options.publication?.existing,
+        readableBranchNames: readableBranches,
       }, options),
     }, {
       apiUrl, authToken: task.authToken, runId: task.runId, agentId: task.agent.id, companyId: task.agent.companyId,
       issueId: task.context.taskId ?? task.context.issueId, repository: publication.repository, provider: publication.provider,
       pullRequestUrl: number => publication.pullRequestUrlTemplate.replace("{number}", String(number)),
       branchForCommit: (agent, commit) => publication.branchTemplate.replaceAll("{agentId}", agent).replace("{commit}", commit),
+      ...(readableBranches ? { validateBranch: (branch, { agentId, commit, title }) => {
+        if (branch === `u/hosted/${agentId}/${commit}`) return true
+        const match = /^u\/w(?:0[1-9]|[1-9][0-9])\/(.+)$/.exec(branch ?? "")
+        const feature = publicationSlug(title)
+        return !!feature && !!match && (match[1] === feature
+          || Array.from({ length: 10 }, (_, index) => `${feature}-${index + 1}`).includes(match[1]))
+      } } : {}),
     }))
   }
   return {
     name: "publish_pull_request",
-    description: "Publish a local commit as a pull request through the AgentPool provider in a writable catalog repository. Use a separate invocation for each repository. The harness registers each PR with the assigned Paperclip task; retry the same repository and commit on failure.",
+    description: "Publish a local commit as a pull request through the AgentPool provider in a writable catalog repository. Use a concise, readable feature title without execution IDs or commit hashes. Hosted branches use u/wNN/<feature-title>, with numeric collision suffixes. Use a separate invocation for each repository. The harness registers each PR with the assigned Paperclip task; retry the same repository and commit on failure.",
     parameters: { type: "object", properties: {
       repository: { type: "string", enum: [...tools.keys()] },
       commit: { type: "string" }, title: { type: "string" }, body: { type: "string" },
