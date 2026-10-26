@@ -103,6 +103,9 @@ export async function runHostedWorkerCli() {
           if (!result.accepted) process.stderr.write("Hosted live activity was not accepted.\n")
         }).catch(error => process.stderr.write(`Hosted live activity failed: ${error.message}\n`))
       },
+      onModelFailure: configuration.academyEnabled === true
+        ? evidence => request("learning_failure", { ...evidence, bindingId: binding?.workerId })
+        : undefined,
       sessionFactory: options => new AgentSession({
         ...options,
         modelConfigProvider: async () => ({

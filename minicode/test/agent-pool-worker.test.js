@@ -124,6 +124,53 @@ async function harness(t, factory, workerOptions = {}) {
   }
 }
 
+test("Academy failure capture completes before reporting the original failed result and includes only structured evidence", async t => {
+  const evidence = []
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  class Session extends EventEmitter {
+    async write() { return { exitCode: 1, error: "Model request failed", modelFailure: { code: "invalid_prompt", model: "fixture", httpStatus: 400 } } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, () => new Session(), {
+    onModelFailure: async value => { evidence.push(value); await gate },
+  })
+  t.after(() => release())
+  const peer = await fixture.welcome(0)
+  const instructions = inlineInstructions("Private agent instructions")
+  await waitUntil(() => peer.messages.some(message => message.type === "ready"))
+  peer.send({ type: "task", runId: "academy-failure", agent, context: { task: "Private task body" }, instructions })
+  await waitUntil(() => evidence.length === 1)
+  assert.ok(!peer.messages.some(message => message.type === "result"))
+  assert.deepEqual(evidence, [{ runId: "academy-failure", failure: {
+    code: "invalid_prompt", model: "fixture", httpStatus: 400, instructionsHash: instructions.contentSha256,
+  } }])
+  assert.doesNotMatch(JSON.stringify(evidence), /Private/)
+  release()
+  await waitUntil(() => peer.messages.some(message => message.type === "result"))
+  assert.equal(peer.messages.find(message => message.type === "result").exitCode, 1)
+})
+
+test("Academy reporting failure is visible and does not change or replay the failed task", async t => {
+  let executions = 0
+  const logs = []
+  class Session extends EventEmitter {
+    async write() { executions++; return { exitCode: 1, error: "Original policy rejection", modelFailure: { code: "invalid_prompt", model: "fixture" } } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, () => new Session(), {
+    onModelFailure: async () => { throw new Error("Capture unavailable") }, log: message => logs.push(message),
+  })
+  const peer = await fixture.welcome(0)
+  const result = await executeTask(peer, { runId: "academy-reporting-error", agent }, 1)
+  assert.equal(result.error, "Original policy rejection")
+  assert.equal(executions, 1)
+  assert.ok(logs.some(message => message.includes("Academy failure capture failed")))
+  assert.ok(peer.messages.some(message => message.type === "log" && message.data.includes("Capture unavailable")))
+})
+
 test("worker stays connected when the peer answers pings but does not initiate them", async t => {
   const timeout = globalThis.setTimeout
   const interval = globalThis.setInterval

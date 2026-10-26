@@ -12,6 +12,51 @@ afterEach(() => {
   globalThis.fetch = originalFetch
 })
 
+test("policy rejection returns safe structured failure metadata without retrying the rejected task", async t => {
+  const requests = []
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return Response.json({ error: { code: "invalid_prompt", type: "invalid_request_error", message: "A private provider explanation" } },
+      { status: 400, headers: { "x-request-id": "safe-request-id" } })
+  }
+  const session = new AgentSession({ id: "policy-evidence", cwd: process.cwd(), instructions: "Private system instructions" })
+  t.after(() => session.dispose())
+  session.config = { api: "responses", endpoint: "https://fixture.test", apiKey: "private-key", model: "gpt-5.6-sol" }
+  const result = await session.write("Private original task")
+  assert.equal(result.exitCode, 1)
+  assert.equal(requests.length, 1)
+  assert.equal(result.modelFailure.code, "invalid_prompt")
+  assert.equal(result.modelFailure.httpStatus, 400)
+  assert.equal(result.modelFailure.requestId, "safe-request-id")
+  assert.equal(result.modelFailure.model, "gpt-5.6-sol")
+  assert.ok(result.modelFailure.contextCharacters > "Private original task".length)
+  assert.ok(!Number.isNaN(Date.parse(result.modelFailure.occurredAt)))
+  assert.doesNotMatch(JSON.stringify(result.modelFailure), /Private|private-key|explanation/)
+})
+
+test("structured failure identifiers cannot retain a reflected model credential", async t => {
+  globalThis.fetch = async () => Response.json({ error: { code: "reflected-private-key" } },
+    { status: 400, headers: { "x-request-id": "reflected-private-key" } })
+  const session = new AgentSession({ id: "credential-evidence", cwd: process.cwd() })
+  t.after(() => session.dispose())
+  session.config = { api: "responses", endpoint: "https://fixture.test", apiKey: "private-key", model: "gpt-6-luna" }
+  const result = await session.write("Investigate")
+  assert.equal(result.modelFailure.code, "model_request_failed")
+  assert.equal(result.modelFailure.requestId, undefined)
+  assert.doesNotMatch(JSON.stringify(result.modelFailure), /private-key/)
+})
+
+test("exhausted headers timeouts retain the terminal structured transport code", async t => {
+  globalThis.fetch = async () => { throw new TypeError("fetch failed", { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } }) }
+  const session = new AgentSession({ id: "timeout-evidence", cwd: process.cwd() })
+  t.after(() => session.dispose())
+  session.config = { api: "responses", endpoint: "https://fixture.test", apiKey: "private-key", model: "gpt-6-luna" }
+  const result = await session.write("Investigate")
+  assert.equal(result.modelFailure.code, "UND_ERR_HEADERS_TIMEOUT")
+  assert.equal(result.modelFailure.model, "gpt-6-luna")
+  assert.equal(result.modelFailure.httpStatus, undefined)
+})
+
 test("live activity labels tools, strips terminal codes and redacts configured secrets", async t => {
   const actions = [
     { type: "tool", name: "shell_read", arguments: {} },
@@ -150,6 +195,154 @@ test("reports the endpoint when a model request cannot connect", async () => {
     ),
     /Model request could not reach https:\/\/example\.test\/openai\/v1\/responses: fetch failed \(ENETUNREACH\)/,
   )
+})
+
+test("Azure headers timeout retries once with refreshed credentials and unchanged context", async t => {
+  const requests = [], warnings = []
+  let tokens = 0
+  t.mock.method(console, "warn", message => warnings.push(message))
+  globalThis.fetch = async (_url, init) => {
+    requests.push({ body: JSON.parse(init.body), authorization: init.headers.Authorization })
+    if (requests.length === 1) {
+      throw new TypeError("fetch failed", { cause: Object.assign(new Error("headers timed out"), { code: "UND_ERR_HEADERS_TIMEOUT" }) })
+    }
+    return Response.json({ output_text: "retry succeeded" })
+  }
+  const config = {
+    api: "responses", endpoint: "https://example.test/responses", model: "gpt-5.6-sol",
+    getAccessToken: async () => `fixture-token-${++tokens}`,
+  }
+  const messages = [{ role: "user", content: "Inspect this task" }]
+  assert.equal(await callModelOnce(config, messages), "retry succeeded")
+  assert.deepEqual(requests.map(request => request.body.model), ["gpt-5.6-sol", "gpt-5.6-sol"])
+  assert.deepEqual(requests[0].body.input, messages)
+  assert.deepEqual(requests[0].body, requests[1].body)
+  assert.notEqual(requests[0].authorization, requests[1].authorization)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /gpt-5\.6-sol.*UND_ERR_HEADERS_TIMEOUT.*retrying once/)
+})
+
+test("Azure headers timeout exhausts the chain after exactly one retry per model with redacted diagnostics", async t => {
+  const models = [], warnings = []
+  t.mock.method(console, "warn", message => warnings.push(message))
+  globalThis.fetch = async (_url, init) => {
+    models.push(JSON.parse(init.body).model)
+    throw Object.assign(new Error("headers timed out fixture-secret"), { code: "UND_ERR_HEADERS_TIMEOUT" })
+  }
+  await assert.rejects(callModelOnce({
+    api: "responses", endpoint: "https://example.test/responses", apiKey: "fixture-secret", model: "gpt-5.6-sol",
+  }, []), error => {
+    assert.match(error.message, /Model fallback exhausted/)
+    for (const model of new Set(models)) assert.ok(error.message.includes(`Model ${model} failed after one retry`))
+    assert.match(error.message, /UND_ERR_HEADERS_TIMEOUT/)
+    assert.ok(!error.message.includes("fixture-secret"))
+    assert.ok(error.message.includes("[redacted]"))
+    return true
+  })
+  assert.deepEqual(models, [
+    "gpt-5.6-sol", "gpt-5.6-sol", "gpt-6-sol", "gpt-6-sol",
+    "gpt-5.6-terra", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-luna",
+    "gpt-6-luna", "gpt-6-luna",
+  ])
+  assert.equal(warnings.length, 9)
+  assert.match(warnings[1], /gpt-5\.6-sol.*after one retry.*gpt-6-sol/)
+})
+
+test("headers timeout fallback retains the working model and does not replay completed tools", async t => {
+  const requests = []
+  let tools = 0
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    if (requests.length === 2 || requests.length === 3) {
+      throw new TypeError("fetch failed", { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } })
+    }
+    const action = requests.length === 1 || requests.length === 4
+      ? { type: "tool", name: "inspect", arguments: {} }
+      : { type: "final", message: "done" }
+    return Response.json({ output_text: JSON.stringify(action) })
+  }
+  const session = new AgentSession({
+    id: "timeout-fallback", cwd: process.cwd(),
+    tools: [{ name: "inspect", description: "Inspect once", execute: async () => `receipt-${++tools}` }],
+    modelConfigProvider: async () => ({
+      api: "responses", endpoint: "https://example.test/responses", apiKey: "fixture", model: "gpt-5.6-sol",
+    }),
+  })
+  t.after(() => session.dispose())
+  const activity = []
+  session.on("activity", event => activity.push(event))
+  assert.equal((await session.write("Inspect")).exitCode, 0)
+  assert.equal(tools, 2)
+  assert.deepEqual(requests.map(request => request.model), [
+    "gpt-5.6-sol", "gpt-5.6-sol", "gpt-5.6-sol", "gpt-6-sol", "gpt-6-sol",
+  ])
+  assert.deepEqual(requests[1].input, requests[2].input)
+  assert.deepEqual(requests[2].input, requests[3].input)
+  assert.match(requests[3].input.at(-1).content, /receipt-1/)
+  assert.match(requests[4].input.at(-1).content, /receipt-2/)
+  assert.ok(activity.some(event => /retrying once/.test(event.summary)))
+  assert.ok(activity.some(event => /trying gpt-6-sol/.test(event.summary)))
+})
+
+test("headers timeout recovery skips missing alternatives and preserves rate-limit fallback", async t => {
+  const models = []
+  t.mock.method(console, "warn", () => {})
+  globalThis.fetch = async (_url, init) => {
+    models.push(JSON.parse(init.body).model)
+    if (models.length <= 2) throw new TypeError("fetch failed", { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } })
+    if (models.length === 3) return Response.json({ error: { code: "DeploymentNotFound" } }, { status: 404 })
+    if (models.length === 4) return Response.json({ error: { code: "rate_limit_exceeded" } }, { status: 429 })
+    return Response.json({ output_text: "done" })
+  }
+  assert.equal(await callModelOnce({
+    api: "responses", endpoint: "https://example.test/responses", apiKey: "fixture", model: "gpt-5.6-sol",
+  }, []), "done")
+  assert.deepEqual(models, ["gpt-5.6-sol", "gpt-5.6-sol", "gpt-6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+})
+
+test("headers timeout handling leaves other errors, APIs, and providers unchanged", async t => {
+  for (const fixture of [
+    { code: "UND_ERR_BODY_TIMEOUT" },
+    { code: "ENETUNREACH" },
+    { code: "UND_ERR_HEADERS_TIMEOUT", api: "chat-completions" },
+    { code: "UND_ERR_HEADERS_TIMEOUT", provider: "github-copilot" },
+    { code: "UND_ERR_HEADERS_TIMEOUT", model: "other-model" },
+  ]) {
+    await t.test(JSON.stringify(fixture), async () => {
+      let requests = 0
+      globalThis.fetch = async () => {
+        requests++
+        throw new TypeError("fetch failed", { cause: { code: fixture.code } })
+      }
+      await assert.rejects(callModelOnce({
+        api: "responses", endpoint: "https://example.test/responses", apiKey: "fixture", model: "gpt-5.6-sol",
+        ...fixture,
+      }, []), new RegExp(`fetch failed \\(${fixture.code}\\)`))
+      assert.equal(requests, 1)
+    })
+  }
+})
+
+test("interrupting headers timeout recovery prevents retries and alternative requests", async t => {
+  for (const stopAt of ["retrying once", "trying gpt-6-sol"]) {
+    await t.test(stopAt, async t => {
+      let requests = 0
+      globalThis.fetch = async () => {
+        requests++
+        throw new TypeError("fetch failed", { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } })
+      }
+      const session = new AgentSession({ id: "cancel-timeout", cwd: process.cwd() })
+      session.config = { api: "responses", endpoint: "https://example.test/responses", apiKey: "fixture", model: "gpt-5.6-sol" }
+      t.after(() => session.dispose())
+      session.on("output", ({ data }) => {
+        if (data.includes(stopAt)) session.interrupt()
+      })
+      await session.write("Inspect")
+      assert.equal(requests, stopAt === "retrying once" ? 1 : 2)
+      assert.equal(session.busy, false)
+      assert.deepEqual(session.messages, [])
+    })
+  }
 })
 
 test("Azure rate limits advance through the requested model chain with unchanged context and credentials", async t => {

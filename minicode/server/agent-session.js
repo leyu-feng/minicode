@@ -252,50 +252,85 @@ function runShellCommand(command, { cwd, onData, signal, env }) {
   })
 }
 
+function modelFailureError(message, { model, code, status, requestId, cause, secret }) {
+  const error = new Error(message, cause ? { cause } : undefined)
+  model = redactSecrets(model ?? "", [secret])
+  code = redactSecrets(code ?? "", [secret])
+  requestId = redactSecrets(requestId ?? "", [secret])
+  error.modelFailure = {
+    model: /^[a-zA-Z0-9_.-]{1,100}$/.test(model ?? "") ? model : "unknown",
+    code: /^[a-zA-Z0-9_.-]{1,100}$/.test(code ?? "") ? code : "model_request_failed",
+    ...(status ? { httpStatus: status } : {}),
+    ...(/^[a-zA-Z0-9_.-]{1,200}$/.test(requestId ?? "") ? { requestId } : {}),
+  }
+  return error
+}
+
 async function callModel(config, messages, systemPrompt, signal, initiator = "user", onWarning = message => console.warn(message)) {
   const isResponses = config.api === "responses"
   const start = AZURE_MODEL_FALLBACK_CHAIN.indexOf(config.model)
-  const models = isResponses && config.provider !== "github-copilot" && start !== -1
-    ? AZURE_MODEL_FALLBACK_CHAIN.slice(start) : [config.model]
+  const supportsFallback = isResponses && config.provider !== "github-copilot" && start !== -1
+  const models = supportsFallback ? AZURE_MODEL_FALLBACK_CHAIN.slice(start) : [config.model]
   const failures = []
   for (const [index, model] of models.entries()) {
-    signal?.throwIfAborted()
-    const apiKey = config.getAccessToken ? await config.getAccessToken() : config.apiKey
+    let apiKey
     let response
-    try {
-      response = await fetch(config.endpoint, {
-        method: "POST",
-        signal,
-        headers: {
-          ...config.headers,
-          ...(config.provider === "github-copilot" ? { "x-initiator": initiator, "X-Request-Id": randomUUID() } : {}),
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(
-          isResponses
-            ? {
-                model,
-                instructions: systemPrompt,
-                input: messages,
-              }
-            : {
-                model,
-                ...(config.provider === "github-copilot" ? {} : { temperature: 0.2 }),
-                messages: systemPrompt ? [{ role: "system", content: systemPrompt }, ...messages] : messages,
-              },
-        ),
-      })
-    } catch (error) {
-      if (signal?.aborted) throw error
-      const detail = error?.cause?.code ? `${error.message} (${error.cause.code})` : error?.message || String(error)
-      throw new Error(`Model request could not reach ${config.endpoint}: ${detail}`, { cause: error })
+    let timeoutFailure
+    for (let attempt = 0; attempt < 2; attempt++) {
+      signal?.throwIfAborted()
+      apiKey = config.getAccessToken ? await config.getAccessToken() : config.apiKey
+      try {
+        response = await fetch(config.endpoint, {
+          method: "POST",
+          signal,
+          headers: {
+            ...config.headers,
+            ...(config.provider === "github-copilot" ? { "x-initiator": initiator, "X-Request-Id": randomUUID() } : {}),
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(
+            isResponses
+              ? {
+                  model,
+                  instructions: systemPrompt,
+                  input: messages,
+                }
+              : {
+                  model,
+                  ...(config.provider === "github-copilot" ? {} : { temperature: 0.2 }),
+                  messages: systemPrompt ? [{ role: "system", content: systemPrompt }, ...messages] : messages,
+                },
+          ),
+        })
+        break
+      } catch (error) {
+        if (signal?.aborted) throw error
+        const code = error?.cause?.code ?? error?.code
+        const detail = redactSecrets(code ? `${error.message} (${code})` : error?.message || String(error), [apiKey])
+        const failure = modelFailureError(`Model request could not reach ${config.endpoint}: ${detail}`, { model, code, cause: error, secret: apiKey })
+        if (!supportsFallback || code !== "UND_ERR_HEADERS_TIMEOUT") throw failure
+        if (attempt === 0) {
+          onWarning(`[minicode] Model ${model} headers timed out (UND_ERR_HEADERS_TIMEOUT); retrying once.`)
+          continue
+        }
+        timeoutFailure = `Model ${model} failed after one retry: ${failure.message}`
+      }
+    }
+    if (timeoutFailure) {
+      failures.push(timeoutFailure)
+      signal?.throwIfAborted()
+      if (index + 1 < models.length) {
+        onWarning(`[minicode] Model ${model} headers timed out (UND_ERR_HEADERS_TIMEOUT) after one retry; trying ${models[index + 1]}.`)
+        continue
+      }
+      throw modelFailureError(`Model fallback exhausted (${models.join(" -> ")}):\n${failures.join("\n")}`, { model, code: "UND_ERR_HEADERS_TIMEOUT", secret: apiKey })
     }
 
     if (!response.ok) {
       const { detail, code } = await httpErrorInfo(response, [apiKey])
       const failure = `Model request failed (${response.status}) at ${config.endpoint} [model: ${model}]:\n${detail}`
-      // Only skip missing deployments after rate limiting has started fallback.
+      // Only skip missing deployments after an earlier model has triggered fallback.
       const missing = index > 0 && response.status === 404 && MISSING_DEPLOYMENT_CODES.has(code?.toLowerCase())
       if (models.length > 1 && (response.status === 429 || missing)) {
         failures.push(failure)
@@ -305,9 +340,12 @@ async function callModel(config, messages, systemPrompt, signal, initiator = "us
           onWarning(`[minicode] Model ${model} ${reason}; trying ${models[index + 1]}.`)
           continue
         }
-        throw new Error(`Model fallback exhausted (${models.join(" -> ")}):\n${failures.join("\n")}`)
+        throw modelFailureError(`Model fallback exhausted (${models.join(" -> ")}):\n${failures.join("\n")}`, { model, code: code ?? "rate_limit_exceeded", status: response.status, secret: apiKey })
       }
-      throw new Error(failure)
+      throw modelFailureError(failure, {
+        model, code: code ?? `http_${response.status}`, status: response.status, secret: apiKey,
+        requestId: response.headers?.get?.("x-request-id") ?? response.headers?.get?.("apim-request-id"),
+      })
     }
 
     const data = await response.json()
@@ -610,6 +648,9 @@ export class AgentSession extends EventEmitter {
     } catch (error) {
       result.exitCode = signal.aborted ? 130 : 1
       result.error = signal.aborted ? "cancelled" : error.message
+      if (!signal.aborted && error.modelFailure) {
+        result.modelFailure = { ...error.modelFailure, occurredAt: new Date().toISOString(), contextCharacters: this.systemPrompt.length + JSON.stringify(this.messages).length }
+      }
       // Ctrl+C already restored the prompt. Suppress delayed cancellation
       // output from the abandoned run so it cannot corrupt the next turn.
       if (this.#isActive(run)) {
