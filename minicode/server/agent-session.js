@@ -10,6 +10,7 @@ import { httpErrorInfo, redactSecrets } from "./http-error.js"
 
 const MAX_TOOL_TURNS = 1000
 const MAX_OUTPUT_CHARS = 12000
+const MAX_ACTIVITY_CHARS = 24000
 const AZURE_MODEL_FALLBACK_CHAIN = [
   "gpt-5.6-sol",
   "gpt-6-sol",
@@ -252,7 +253,7 @@ function runShellCommand(command, { cwd, onData, signal, env }) {
   })
 }
 
-function modelFailureError(message, { model, code, status, requestId, cause, secret }) {
+function modelFailureError(message, { model, code, status, requestId, cause, secret, promptEvidence }) {
   const error = new Error(message, cause ? { cause } : undefined)
   model = redactSecrets(model ?? "", [secret])
   code = redactSecrets(code ?? "", [secret])
@@ -263,10 +264,11 @@ function modelFailureError(message, { model, code, status, requestId, cause, sec
     ...(status ? { httpStatus: status } : {}),
     ...(/^[a-zA-Z0-9_.-]{1,200}$/.test(requestId ?? "") ? { requestId } : {}),
   }
+  error.promptEvidence = promptEvidence
   return error
 }
 
-async function callModel(config, messages, systemPrompt, signal, initiator = "user", onWarning = message => console.warn(message)) {
+async function callModel(config, messages, systemPrompt, signal, initiator = "user", onWarning = message => console.warn(message), capturePrompt) {
   const isResponses = config.api === "responses"
   const start = AZURE_MODEL_FALLBACK_CHAIN.indexOf(config.model)
   const supportsFallback = isResponses && config.provider !== "github-copilot" && start !== -1
@@ -276,9 +278,20 @@ async function callModel(config, messages, systemPrompt, signal, initiator = "us
     let apiKey
     let response
     let timeoutFailure
+    let promptEvidence
     for (let attempt = 0; attempt < 2; attempt++) {
       signal?.throwIfAborted()
       apiKey = config.getAccessToken ? await config.getAccessToken() : config.apiKey
+      const body = JSON.stringify(
+        isResponses
+          ? { model, instructions: systemPrompt, input: messages }
+          : {
+              model,
+              ...(config.provider === "github-copilot" ? {} : { temperature: 0.2 }),
+              messages: systemPrompt ? [{ role: "system", content: systemPrompt }, ...messages] : messages,
+            },
+      )
+      promptEvidence = capturePrompt?.(body, apiKey)
       try {
         response = await fetch(config.endpoint, {
           method: "POST",
@@ -289,26 +302,14 @@ async function callModel(config, messages, systemPrompt, signal, initiator = "us
             "Content-Type": "application/json",
             Authorization: `Bearer ${apiKey}`,
           },
-          body: JSON.stringify(
-            isResponses
-              ? {
-                  model,
-                  instructions: systemPrompt,
-                  input: messages,
-                }
-              : {
-                  model,
-                  ...(config.provider === "github-copilot" ? {} : { temperature: 0.2 }),
-                  messages: systemPrompt ? [{ role: "system", content: systemPrompt }, ...messages] : messages,
-                },
-          ),
+          body,
         })
         break
       } catch (error) {
         if (signal?.aborted) throw error
         const code = error?.cause?.code ?? error?.code
         const detail = redactSecrets(code ? `${error.message} (${code})` : error?.message || String(error), [apiKey])
-        const failure = modelFailureError(`Model request could not reach ${config.endpoint}: ${detail}`, { model, code, cause: error, secret: apiKey })
+        const failure = modelFailureError(`Model request could not reach ${config.endpoint}: ${detail}`, { model, code, cause: error, secret: apiKey, promptEvidence })
         if (!supportsFallback || code !== "UND_ERR_HEADERS_TIMEOUT") throw failure
         if (attempt === 0) {
           onWarning(`[minicode] Model ${model} headers timed out (UND_ERR_HEADERS_TIMEOUT); retrying once.`)
@@ -324,7 +325,7 @@ async function callModel(config, messages, systemPrompt, signal, initiator = "us
         onWarning(`[minicode] Model ${model} headers timed out (UND_ERR_HEADERS_TIMEOUT) after one retry; trying ${models[index + 1]}.`)
         continue
       }
-      throw modelFailureError(`Model fallback exhausted (${models.join(" -> ")}):\n${failures.join("\n")}`, { model, code: "UND_ERR_HEADERS_TIMEOUT", secret: apiKey })
+      throw modelFailureError(`Model fallback exhausted (${models.join(" -> ")}):\n${failures.join("\n")}`, { model, code: "UND_ERR_HEADERS_TIMEOUT", secret: apiKey, promptEvidence })
     }
 
     if (!response.ok) {
@@ -340,10 +341,11 @@ async function callModel(config, messages, systemPrompt, signal, initiator = "us
           onWarning(`[minicode] Model ${model} ${reason}; trying ${models[index + 1]}.`)
           continue
         }
-        throw modelFailureError(`Model fallback exhausted (${models.join(" -> ")}):\n${failures.join("\n")}`, { model, code: code ?? "rate_limit_exceeded", status: response.status, secret: apiKey })
+        throw modelFailureError(`Model fallback exhausted (${models.join(" -> ")}):\n${failures.join("\n")}`, { model, code: code ?? "rate_limit_exceeded", status: response.status, secret: apiKey, promptEvidence })
       }
       throw modelFailureError(failure, {
         model, code: code ?? `http_${response.status}`, status: response.status, secret: apiKey,
+        promptEvidence,
         requestId: response.headers?.get?.("x-request-id") ?? response.headers?.get?.("apim-request-id"),
       })
     }
@@ -366,12 +368,13 @@ export function callModelOnce(config, messages) {
  * for the lifetime of the session.
  */
 export class AgentSession extends EventEmitter {
-  constructor({ id, cwd, env, instructions = "", tools = [], modelConfigProvider = resolveModelConfig }) {
+  constructor({ id, cwd, env, instructions = "", tools = [], modelConfigProvider = resolveModelConfig, captureFailedPrompt = false }) {
     super()
     this.id = id
     this.kind = "agent"
     this.cwd = cwd
     this.env = env
+    this.captureFailedPrompt = captureFailedPrompt
     this.modelConfigProvider = modelConfigProvider
     this.tools = new Map()
     for (const tool of tools) {
@@ -438,8 +441,9 @@ export class AgentSession extends EventEmitter {
       .filter(([key, value]) => /token|secret|password|api_key/i.test(key) && typeof value === "string")
       .map(([, value]) => value)
     const summary = redactSecrets(stripVTControlCharacters(activity.summary), secrets)
-    this.emit("activity", { ...activity, summary: summary.length > 12000
-      ? `${summary.slice(0, 11970)}\n[message truncated]` : summary })
+    const suffix = "\n[message truncated]"
+    this.emit("activity", { ...activity, summary: summary.length > MAX_ACTIVITY_CHARS
+      ? `${summary.slice(0, MAX_ACTIVITY_CHARS - suffix.length)}${suffix}` : summary })
   }
 
   #isActive(run) {
@@ -486,7 +490,15 @@ export class AgentSession extends EventEmitter {
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         this.#throwIfInactive(run)
         const raw = await callModel(modelConfig, this.messages, this.systemPrompt, signal, turn === 0 ? "user" : "agent",
-          message => this.#emitOutput(`\u001b[33m${message}\u001b[0m\r\n`, "stderr"))
+          message => this.#emitOutput(`\u001b[33m${message}\u001b[0m\r\n`, "stderr"),
+          this.captureFailedPrompt ? (body, apiKey) => {
+            const secrets = Object.entries(this.env ?? {})
+              .filter(([key, value]) => /token|secret|password|api_key/i.test(key) && typeof value === "string")
+              .map(([, value]) => value)
+            const requestBody = redactSecrets(body, [apiKey, ...secrets])
+            if (Buffer.byteLength(requestBody, "utf8") > 1024 * 1024) return { status: "too_large" }
+            return { capturedAt: new Date().toISOString(), requestBody }
+          } : undefined)
         this.#throwIfInactive(run)
         const action = parseJsonAction(raw)
         run.activity = {
@@ -650,6 +662,9 @@ export class AgentSession extends EventEmitter {
       result.error = signal.aborted ? "cancelled" : error.message
       if (!signal.aborted && error.modelFailure) {
         result.modelFailure = { ...error.modelFailure, occurredAt: new Date().toISOString(), contextCharacters: this.systemPrompt.length + JSON.stringify(this.messages).length }
+        if (error.promptEvidence) {
+          Object.defineProperty(result, "promptEvidence", { value: error.promptEvidence, configurable: true })
+        }
       }
       // Ctrl+C already restored the prompt. Suppress delayed cancellation
       // output from the abandoned run so it cannot corrupt the next turn.

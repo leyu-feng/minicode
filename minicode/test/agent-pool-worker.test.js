@@ -171,6 +171,26 @@ test("Academy reporting failure is visible and does not change or replay the fai
   assert.ok(peer.messages.some(message => message.type === "log" && message.data.includes("Capture unavailable")))
 })
 
+test("failed prompt evidence travels only on the private Academy callback, not Paperclip result messages", async t => {
+  const evidence = []
+  class Session extends EventEmitter {
+    async write() {
+      return {
+        exitCode: 1, error: "Policy rejection",
+        modelFailure: { code: "invalid_prompt", model: "fixture" },
+        promptEvidence: { capturedAt: new Date().toISOString(), requestBody: '{"input":"restricted prompt snapshot"}' },
+      }
+    }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, () => new Session(), { onModelFailure: async value => { evidence.push(value) } })
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, { runId: "private-prompt-capture", agent }, 1)
+  assert.match(evidence[0].promptEvidence.requestBody, /restricted prompt snapshot/)
+  assert.doesNotMatch(JSON.stringify(peer.messages), /restricted prompt snapshot|requestBody/)
+})
+
 test("worker stays connected when the peer answers pings but does not initiate them", async t => {
   const timeout = globalThis.setTimeout
   const interval = globalThis.setInterval

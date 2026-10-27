@@ -506,6 +506,7 @@ export async function startAgentPoolWorker({
       if (provider) enqueue(run, { type: "log", stream: "stdout", data: "[minicode] Harness capability: provider_read (read-only; managed identity; no Azure CLI or user credentials).\n" })
       const session = sessionFactory({
         id: task.runId, cwd: workspace,
+        captureFailedPrompt: Boolean(onModelFailure),
         tools: [run.publication, synchronization, provider].filter(Boolean),
         instructions: [
           "Worker workspace and failure rules take precedence over repository AGENTS.md instructions, task context, continuation summaries, and runtime tool guidance.",
@@ -652,14 +653,22 @@ export async function startAgentPoolWorker({
       const result = await session.write(prompt)
       if (result?.modelFailure && onModelFailure && !stopped && !run.cancelled && !run.timedOut) {
         try {
-          await onModelFailure({
+          const capture = await onModelFailure({
             runId: run.id,
             failure: { ...result.modelFailure, ...(agentInstructions?.contentSha256 ? { instructionsHash: agentInstructions.contentSha256 } : {}) },
+            ...(result.promptEvidence?.requestBody ? { promptEvidence: result.promptEvidence } : {}),
           })
+          if (result.promptEvidence?.status === "too_large") {
+            log("[minicode] Failed prompt exceeds the 1 MiB evidence limit; Academy received metadata only.")
+            enqueue(run, { type: "log", stream: "stderr", data: "Failed prompt exceeds the 1 MiB evidence limit; Academy received metadata only.\n" })
+          }
+          if (capture?.promptCaptureStatus === "unavailable") throw new Error("Prompt evidence cache unavailable; Academy received metadata only")
         } catch (error) {
           const warning = `Academy failure capture failed; the original task remains failed: ${String(error.message).slice(0, 500)}`
           log(`[minicode] ${warning}`)
           enqueue(run, { type: "log", stream: "stderr", data: `${warning}\n` })
+        } finally {
+          delete result.promptEvidence
         }
       }
       return result

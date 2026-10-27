@@ -46,6 +46,80 @@ test("structured failure identifiers cannot retain a reflected model credential"
   assert.doesNotMatch(JSON.stringify(result.modelFailure), /private-key/)
 })
 
+test("failed prompt capture retains only the terminal request body, redacts credentials, and stays out of normal result serialization", async t => {
+  const requests = []
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    if (requests.length === 1) return Response.json({ output_text: '{"type":"tool","name":"read_fixture","arguments":{}}' })
+    return Response.json({ error: { code: "invalid_prompt" } }, { status: 400 })
+  }
+  const session = new AgentSession({
+    id: "failed-request", cwd: process.cwd(), captureFailedPrompt: true,
+    env: { PAPERCLIP_API_KEY: "private-runtime-key" },
+    tools: [{ name: "read_fixture", description: "Read a fixture", execute: async () => "Final tool evidence" }],
+  })
+  t.after(() => session.dispose())
+  session.config = { api: "responses", endpoint: "https://fixture.test", apiKey: "private-model-key", model: "fixture" }
+  const result = await session.write("Original task private-runtime-key private-model-key")
+  assert.equal(requests.length, 2)
+  const snapshot = JSON.parse(result.promptEvidence.requestBody)
+  assert.equal(snapshot.model, "fixture")
+  assert.equal(snapshot.input.length, requests[1].input.length)
+  assert.match(result.promptEvidence.requestBody, /Final tool evidence/)
+  assert.doesNotMatch(result.promptEvidence.requestBody, /private-runtime-key|private-model-key|Authorization/)
+  assert.doesNotMatch(JSON.stringify(result), /Original task|Final tool evidence|requestBody/)
+})
+
+test("successful requests never expose a prompt snapshot and oversized failures are explicit rather than truncated", async t => {
+  const session = new AgentSession({ id: "capture-limit", cwd: process.cwd(), captureFailedPrompt: true })
+  t.after(() => session.dispose())
+  session.config = { api: "responses", endpoint: "https://fixture.test", apiKey: "fixture", model: "fixture" }
+  globalThis.fetch = async () => Response.json({ output_text: '{"type":"final","message":"done"}' })
+  assert.equal((await session.write("Successful request")).promptEvidence, undefined)
+  globalThis.fetch = async () => Response.json({ error: { code: "invalid_prompt" } }, { status: 400 })
+  const result = await session.write("x".repeat(1024 * 1024))
+  assert.deepEqual(result.promptEvidence, { status: "too_large" })
+})
+
+test("failed request capture accepts bodies above 512 KiB without truncating them", async t => {
+  let requestBody
+  globalThis.fetch = async (_url, init) => {
+    requestBody = init.body
+    return Response.json({ error: { code: "invalid_prompt" } }, { status: 400 })
+  }
+  const session = new AgentSession({ id: "larger-capture", cwd: process.cwd(), captureFailedPrompt: true })
+  t.after(() => session.dispose())
+  session.config = { api: "responses", endpoint: "https://fixture.test", apiKey: "fixture-key", model: "fixture" }
+  const result = await session.write("x".repeat(768 * 1024))
+  assert.ok(Buffer.byteLength(requestBody, "utf8") > 512 * 1024)
+  assert.equal(result.promptEvidence.requestBody, requestBody)
+})
+
+test("failed request capture bounds UTF-8 bytes rather than character count", async t => {
+  globalThis.fetch = async () => Response.json({ error: { code: "invalid_prompt" } }, { status: 400 })
+  const session = new AgentSession({ id: "multibyte-capture-limit", cwd: process.cwd(), captureFailedPrompt: true })
+  t.after(() => session.dispose())
+  session.config = { api: "responses", endpoint: "https://fixture.test", apiKey: "fixture-key", model: "fixture" }
+  const result = await session.write("\u00e9".repeat(600 * 1024))
+  assert.deepEqual(result.promptEvidence, { status: "too_large" })
+})
+
+test("fallback capture identifies the final failed model rather than retaining an earlier request", async t => {
+  const requests = []
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return Response.json({ error: { code: requests.length === 1 ? "rate_limit_exceeded" : "invalid_prompt" } },
+      { status: requests.length === 1 ? 429 : 400 })
+  }
+  const session = new AgentSession({ id: "terminal-fallback-request", cwd: process.cwd(), captureFailedPrompt: true })
+  t.after(() => session.dispose())
+  session.config = { api: "responses", endpoint: "https://fixture.test", apiKey: "fixture-key", model: "gpt-5.6-sol" }
+  const result = await session.write("Investigate fixture")
+  assert.equal(requests.length, 2)
+  assert.equal(result.modelFailure.model, "gpt-6-sol")
+  assert.equal(JSON.parse(result.promptEvidence.requestBody).model, "gpt-6-sol")
+})
+
 test("exhausted headers timeouts retain the terminal structured transport code", async t => {
   globalThis.fetch = async () => { throw new TypeError("fetch failed", { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } }) }
   const session = new AgentSession({ id: "timeout-evidence", cwd: process.cwd() })
@@ -76,6 +150,23 @@ test("live activity labels tools, strips terminal codes and redacts configured s
   assert.ok(activity.some(event => event.target === "shell_read"))
   assert.ok(!JSON.stringify(activity).includes("sensitive-fixture"))
   assert.ok(!activity.some(event => event.summary.includes("\u001b")))
+})
+
+test("live activity preserves 24000 characters and marks messages exceeding that limit", async t => {
+  globalThis.fetch = async () => Response.json({ output_text: '{"type":"final","message":"done"}' })
+  const session = new AgentSession({ id: "larger-live-activity", cwd: process.cwd() })
+  t.after(() => session.dispose())
+  session.config = { api: "responses", endpoint: "https://fixture.test", apiKey: "fixture-key", model: "fixture" }
+  const activity = []
+  session.on("activity", event => activity.push(event))
+  const prompt = "x".repeat(24000)
+  await session.write(prompt)
+  assert.equal(activity.find(event => event.kind === "prompt").summary, prompt)
+  activity.length = 0
+  await session.write(`${prompt}y`)
+  const summary = activity.find(event => event.kind === "prompt").summary
+  assert.equal(summary.length, 24000)
+  assert.ok(summary.endsWith("\n[message truncated]"))
 })
 
 test("Windows agent commands use PowerShell 7 and serialize file contents as plain strings", { skip: process.platform !== "win32" }, async t => {
