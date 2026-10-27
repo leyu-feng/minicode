@@ -26,8 +26,21 @@ uses human/client auth.
 Policy: Company access plus action-specific grants; instance administration requires a
 board administrator.
 
+With opt-in `azure_easy_auth`, human sessions require a platform-injected Entra
+principal from the configured tenant with an allowed assigned user role.
+External object IDs link only through persisted identities or explicit operator
+mappings, never by email. Password authentication endpoints are disabled; the
+gateway owns browser sign-in/sign-out. Entra roles do not grant company or admin
+rights. Agent and board bearer credentials keep their existing independent checks.
+
 Evidence: `source-only` — [implementation](../../server/src/routes/access.ts#L3018) at
 the reviewed commit above.
+
+Scoped evidence: [Easy Auth resolver](../../server/src/auth/azure-easy-auth.ts)
+and [focused tests](../../server/src/__tests__/azure-easy-auth.test.ts) cover
+assigned roles, identity persistence, explicit mapping, HTTP and WebSocket
+company authorization locally. They do not prove live gateway header isolation,
+enterprise assignments or an agent login journey.
 
 Verification: `not-run` — assert the documented agent denial with an owned test fixture;
 verify any listed agent request/result path separately. A delegated operation needs its

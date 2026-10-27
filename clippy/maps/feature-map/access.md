@@ -23,6 +23,10 @@ Agent access: [companion](../agent-access-map/access.md).
 ### `login`
 
 Open `/auth`; first-owner bootstrap uses `/board-claim/:token` when configured.
+Opt-in [Azure Easy Auth](../../doc/DEPLOYMENT-MODES.md#azure-easy-auth--microsoft-entra-sign-in)
+uses the existing Entra gateway session instead of a second password. Signed-out
+users see a Microsoft sign-in link; missing assigned roles never reveal a local
+credential form. Sign-out clears the gateway session.
 
 ### `invite-members`
 
@@ -42,8 +46,16 @@ Preconditions: follow the [baseline](./README.md#before-driving-a-journey). For 
 ### `login`
 
 Automated: [auth UI](../../ui/src/pages/Auth.test.tsx) and [session routes](../../server/src/__tests__/auth-session-route.test.ts) cover their respective layers.
+The [Easy Auth suite](../../server/src/__tests__/azure-easy-auth.test.ts) covers
+tenant/assigned-role checks, persisted explicit account mapping, concurrent
+provisioning without email auto-linking, disabled password endpoints, gateway
+logout and WebSocket company authorization.
 
 Manual: Sign in, reload a company deep link, sign out, and revisit it. Confirm the browser requests authentication rather than showing cached company data. Test an invalid claim separately on disposable state.
+For Easy Auth, also verify the deployed gateway strips spoofed principal headers,
+rejects an unassigned user, and retains the mapped user's company permissions.
+Local fixtures do not prove the gateway trust boundary; live acceptance remains
+required before enabling the mode.
 
 ### `invite-members`
 

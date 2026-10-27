@@ -87,6 +87,7 @@ describe("useSignOut", () => {
       companies: [{ id: "company-a", name: "Account A Co" }],
       unauthorized: false,
     });
+
     queryClient.setQueryData(queryKeys.access.currentBoardAccess, {
       isInstanceAdmin: false,
       companyIds: ["company-a"],
@@ -124,6 +125,18 @@ describe("useSignOut", () => {
     });
     expect(queryClient.getQueryState(queryKeys.health)?.isInvalidated).toBe(true);
 
+    flushSync(() => root.unmount());
+  });
+
+  it("clears the Easy Auth gateway session with a top-level logout navigation", async () => {
+    mockAuthApi.signOut.mockResolvedValue({ success: true, redirectTo: "/.auth/logout" });
+    queryClient.setQueryData(queryKeys.health, { status: "ok", authProvider: "azure_easy_auth" });
+    const onSignedOut = vi.fn();
+    const root = renderHarness(onSignedOut);
+    flushSync(() => captured?.mutate());
+    await vi.waitFor(() => expect(mockNavigateTopLevel).toHaveBeenCalledWith("/.auth/logout"));
+    expect(mockAuthApi.signOut).toHaveBeenCalledOnce();
+    expect(onSignedOut).toHaveBeenCalledOnce();
     flushSync(() => root.unmount());
   });
 

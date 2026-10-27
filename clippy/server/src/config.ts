@@ -1,4 +1,5 @@
 import { readConfigFile, resolveDeploymentMode } from "./config-file.js";
+import { loadAzureEasyAuthConfig, type AzureEasyAuthConfig } from "./auth/azure-easy-auth.js";
 import { parseChatWebhookPublicBaseUrl } from "./chat-webhook-public-url.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
@@ -70,6 +71,7 @@ export interface Config {
   authPublicBaseUrl: string | undefined;
   chatWebhookPublicBaseUrl: string | undefined;
   authDisableSignUp: boolean;
+  azureEasyAuth?: AzureEasyAuthConfig;
   databaseMode: DatabaseMode;
   databaseUrl: string | undefined;
   databaseMigrationUrl: string | undefined;
@@ -347,6 +349,7 @@ export function loadConfig(): Config {
       process.env.PAPERCLIP_CHAT_WEBHOOK_PUBLIC_URL,
     ),
     authDisableSignUp,
+    azureEasyAuth: loadAzureEasyAuthConfig(process.env, deploymentMode, authPublicBaseUrl),
     databaseMode: fileDatabaseMode,
     databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
     databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,

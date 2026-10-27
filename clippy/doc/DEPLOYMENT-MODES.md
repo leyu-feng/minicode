@@ -103,6 +103,54 @@ routes, and child-runtime configuration, even when provider variables are
 temporarily stale. Self-hosted deployments continue to use their configured
 `PAPERCLIP_PUBLIC_URL` and do not participate in this protocol.
 
+### Azure Easy Auth / Microsoft Entra sign-in
+
+Self-hosted `authenticated` deployments behind Azure Container Apps or App Service
+Easy Auth can opt out of local passwords:
+
+```powershell
+$env:PAPERCLIP_AUTH_PROVIDER = "azure_easy_auth"
+$env:PAPERCLIP_ENTRA_TENANT_ID = "<tenant UUID>"
+$env:PAPERCLIP_ENTRA_ALLOWED_ROLES = "Developer"
+$env:PAPERCLIP_PUBLIC_URL = "https://paperclip.example.com"
+$env:PAPERCLIP_ENTRA_USER_MAPPINGS = '{"<Entra object UUID>":"<existing Paperclip user ID>"}'
+```
+
+`PAPERCLIP_AUTH_PROVIDER` defaults to `local`. Enabling `azure_easy_auth` is an
+explicit trust declaration: every human HTTP request and WebSocket upgrade must
+pass through Easy Auth, which authenticates Entra tokens and strips external
+`X-MS-CLIENT-PRINCIPAL` headers before injecting its own. Never expose the app
+port directly or exempt board/API/WebSocket paths from platform authentication.
+The existing machine-only `/api/agent-pool/pair` and `/api/agent-pool/worker`
+paths may remain excluded; they retain their own credential checks and cannot
+establish a human session.
+
+Configure Easy Auth with a tenant-specific issuer and this app's audience.
+Allowed roles are case-sensitive, comma-separated **user-only app-role values**
+assigned to users/groups on that enterprise application. Paperclip requires
+both the configured tenant and at least one of these roles on every resolved
+identity, even if the shared enterprise app does not globally require assignment.
+Do not allow application-only roles in this list. Entra roles admit a user;
+they never grant Paperclip instance-admin or company access.
+
+The optional JSON mapping explicitly links immutable Entra object IDs in that
+tenant to existing Paperclip users at startup, retaining all existing company
+memberships and admin privileges. Missing target users, conflicting mappings,
+or an already-linked identity with a different target stop startup. The link
+is persisted in the existing account table; removing the environment mapping
+does not unlink it. Email matching is never used to link accounts. New
+identities create separate unprivileged users and need normal company access.
+No database migration is required.
+
+Existing Easy Auth browser sessions immediately resolve to Paperclip sessions
+for HTTP and WebSockets; no second password is requested. If signed out, `/auth`
+offers the gateway sign-in link without automatic retry loops. Sign-out navigates
+through `/.auth/logout` so the gateway cookie is cleared. All local credential,
+password reset, and account-link endpoints are disabled in this mode, and old
+Better Auth session cookies are ignored. Agent and board bearer keys remain
+independently authenticated; existing company authorization and browser CSRF
+checks still apply.
+
 ## 4. Onboarding UX Contract
 
 Default onboarding remains interactive and flagless:
