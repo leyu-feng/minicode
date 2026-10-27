@@ -9,7 +9,7 @@ import type { BetterAuthSessionResult } from "./better-auth.js";
 
 const uuid = z.uuid();
 const principalSchema = z.object({
-  auth_typ: z.literal("aad"),
+  auth_typ: z.enum(["aad", "Bearer", "AuthenticationTypes.Federation"]),
   claims: z.array(z.object({ typ: z.string(), val: z.string() })).max(512),
 });
 const OBJECT_ID = "http://schemas.microsoft.com/identity/claims/objectidentifier";
@@ -72,6 +72,8 @@ export function parseAzureEasyAuthIdentity(headers: Headers, config: AzureEasyAu
   }
   const parsed = principalSchema.safeParse(decoded);
   if (!parsed.success) throw unauthorized("Expected an Entra Easy Auth principal");
+  const provider = headers.get("x-ms-client-principal-idp") ?? parsed.data.auth_typ;
+  if (provider !== "aad") throw unauthorized("Expected an Entra Easy Auth principal");
   const claims = parsed.data.claims;
   function claim(...types: string[]) {
     const values = new Set(claims.filter(({ typ }) => types.includes(typ)).map(({ val }) => val));

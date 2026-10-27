@@ -73,6 +73,24 @@ describe("Azure Easy Auth configuration and identity validation", () => {
     ]);
     expect(parseAzureEasyAuthIdentity(mapped, config)?.objectId).toBe(OBJECT);
   });
+  it.each(["Bearer", "AuthenticationTypes.Federation"])(
+    "accepts the platform authentication scheme %s only with the Entra provider header",
+    (scheme) => {
+      const platformHeaders = new Headers({ "x-ms-client-principal": principal(baseClaims, scheme) });
+      expect(() => parseAzureEasyAuthIdentity(platformHeaders, config)).toThrow();
+      platformHeaders.set("x-ms-client-principal-idp", "github");
+      expect(() => parseAzureEasyAuthIdentity(platformHeaders, config)).toThrow();
+      platformHeaders.set("x-ms-client-principal-idp", "aad");
+      expect(parseAzureEasyAuthIdentity(platformHeaders, config)?.objectId).toBe(OBJECT);
+      platformHeaders.set("x-ms-client-principal", principal(baseClaims.filter(({ typ }) => typ !== "roles"), scheme));
+      expect(() => parseAzureEasyAuthIdentity(platformHeaders, config)).toThrow("assigned Entra user role");
+    },
+  );
+  it("rejects a conflicting provider even when the principal names Entra", () => {
+    const conflicting = headers();
+    conflicting.set("x-ms-client-principal-idp", "github");
+    expect(() => parseAzureEasyAuthIdentity(conflicting, config)).toThrow();
+  });
   it("does not accept an old local session cookie or name/ID hint headers as identity", () => {
     expect(parseAzureEasyAuthIdentity(new Headers({
       cookie: "better-auth.session_token=old",

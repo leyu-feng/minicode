@@ -121,6 +121,9 @@ explicit trust declaration: every human HTTP request and WebSocket upgrade must
 pass through Easy Auth, which authenticates Entra tokens and strips external
 `X-MS-CLIENT-PRINCIPAL` headers before injecting its own. Never expose the app
 port directly or exempt board/API/WebSocket paths from platform authentication.
+Platform principals labeled `Bearer` or `AuthenticationTypes.Federation`
+also require the injected `X-MS-CLIENT-PRINCIPAL-IDP: aad` header. Sessions
+without tenant, object-ID, or assigned-role claims cannot sign in to Paperclip.
 The existing machine-only `/api/agent-pool/pair` and `/api/agent-pool/worker`
 paths may remain excluded; they retain their own credential checks and cannot
 establish a human session.
