@@ -52,11 +52,16 @@ export function useSignOut({ onSignedOut }: UseSignOutOptions = {}) {
         return "cloud" as const;
       }
 
-      await authApi.signOut();
+      const result = await authApi.signOut();
+      if (result?.redirectTo === "/.auth/logout") {
+        onSignedOut?.();
+        navigateTopLevel(result.redirectTo);
+        return "easy-auth" as const;
+      }
       return "self-hosted" as const;
     },
     onSuccess: async (target) => {
-      if (target === "cloud") return;
+      if (target !== "self-hosted") return;
 
       onSignedOut?.();
 

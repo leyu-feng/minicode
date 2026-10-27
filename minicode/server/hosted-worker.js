@@ -4,7 +4,7 @@ import { AgentSession } from "./agent-session.js"
 import { startAgentPoolWorker } from "./agent-pool-worker.js"
 import { hostedBindingToken, startHostedFleet } from "./hosted-fleet.js"
 import { createHostedPublicationTool } from "./hosted-publication.js"
-import { createHostedProviderTool } from "./hosted-provider.js"
+import { createHostedProviderTool, createHostedProviderPostTool } from "./hosted-provider.js"
 
 // The parent owns managed identity and repository restoration. Credentials cross this private
 // stdio channel only, never argv, model context, inherited shell environment or a saved auth file.
@@ -87,6 +87,12 @@ export async function runHostedWorkerCli() {
       hostedProviderTool: configuration.providerRead?.authentication === "managed_identity"
         ? options => createHostedProviderTool({
           ...options, baseUrl: configuration.providerRead.baseUrl, routes: configuration.providerRead.routes, request,
+        })
+        : undefined,
+      hostedProviderPostTool: configuration.providerPost?.authentication === "managed_identity"
+        ? options => createHostedProviderPostTool({
+          ...options, baseUrl: configuration.providerPost.baseUrl, routes: configuration.providerPost.routes,
+          bodySchema: configuration.providerPost.bodySchema, request,
         })
         : undefined,
       minFreeGiB: configuration.minFreeGiB, targetFreeGiB: configuration.targetFreeGiB,

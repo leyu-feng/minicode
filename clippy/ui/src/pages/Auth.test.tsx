@@ -144,6 +144,27 @@ describe("AuthPage", () => {
     await act(() => root.unmount());
   });
 
+  it("uses the Entra gateway without a password form or an automatic redirect loop", async () => {
+    healthMock.mockResolvedValue({ status: "ok", authProvider: "azure_easy_auth" });
+    const { root } = await mount("/auth?next=%2FTEST%2Fissues%2FTEST-1%3Ftab%3Dactivity%23comment");
+    await vi.waitFor(() => expect(container.textContent).toContain("Sign in with Microsoft Entra"));
+    expect(container.querySelector("form")).toBeNull();
+    expect(container.querySelector('input[type="password"]')).toBeNull();
+    const link = container.querySelector("a");
+    expect(link?.getAttribute("href")).toBe("/.auth/login/aad?post_login_redirect_uri=%2FTEST%2Fissues%2FTEST-1%3Ftab%3Dactivity%23comment");
+    expect(signInEmailMock).not.toHaveBeenCalled();
+    expect(beginCloudSignInMock).not.toHaveBeenCalled();
+    await act(() => root.unmount());
+  });
+
+  it("does not send an external return URL to the Entra gateway", async () => {
+    healthMock.mockResolvedValue({ status: "ok", authProvider: "azure_easy_auth" });
+    const { root } = await mount("/auth?next=https%3A%2F%2Funtrusted.example");
+    await vi.waitFor(() => expect(container.querySelector("a")).not.toBeNull());
+    expect(container.querySelector("a")?.getAttribute("href")).toBe("/.auth/login/aad?post_login_redirect_uri=%2F");
+    await act(() => root.unmount());
+  });
+
   it("fails closed when deployment metadata cannot be loaded", async () => {
     healthMock.mockRejectedValue(new Error("offline"));
     const { root } = await mount();

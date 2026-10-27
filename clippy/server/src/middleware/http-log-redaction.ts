@@ -3,6 +3,10 @@ export const HTTP_LOG_REDACT_PATHS = [
   "res.headers.location",
   'req.headers["proxy-authorization"]',
   "req.headers.cookie",
+  'req.headers["x-zumo-auth"]',
+  'req.headers["x-ms-client-principal"]',
+  'req.headers["x-ms-client-principal-name"]',
+  'req.headers["x-ms-client-principal-id"]',
   // "set-cookie" is normally a response header; keep the request-side
   // path as defensive coverage in case a proxy forwards it inbound.
   'req.headers["set-cookie"]',

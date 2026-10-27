@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agentApiKeys,
@@ -13,6 +13,7 @@ import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { assertCompanyAccess } from "../routes/authz.js";
+import { unauthorized } from "../errors.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -94,13 +95,15 @@ function createDbState(input: {
   return { db, activity };
 }
 
-function createApp(db: any, deploymentMode: "authenticated" | "local_trusted" = "authenticated") {
+function createApp(db: any, deploymentMode: "authenticated" | "local_trusted" = "authenticated",
+  options: Pick<Parameters<typeof actorMiddleware>[1], "resolveSession" | "resolveBearerSession"> = {}) {
   const app = express();
   app.use(express.json());
   app.use(
     actorMiddleware(db, {
       deploymentMode,
       resolveSession: async () => null,
+      ...options,
     }),
   );
   app.get("/actor", (req, res) => {
@@ -180,6 +183,77 @@ describe("agent auth middleware", () => {
     else process.env.PAPERCLIP_AGENT_JWT_TTL_SECONDS = originalTtl;
     if (originalInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
     else process.env.PAPERCLIP_INSTANCE_ID = originalInstanceId;
+  });
+
+  it("resolves an independently authenticated human bearer as a board actor", async () => {
+    const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
+    const resolveBearerSession = vi.fn(async () => ({
+      session: { id: "verified-session", userId: "mapped-user" },
+      user: { id: "mapped-user", name: "Mapped User", email: "user@example.com" },
+    }));
+    const resolveSession = vi.fn(async () => null);
+    const response = await request(createApp(db, "authenticated", { resolveSession, resolveBearerSession }))
+      .get("/actor").set("Authorization", "Bearer delegated-user-token");
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ type: "board", userId: "mapped-user", source: "session" });
+    expect(resolveBearerSession).toHaveBeenCalledOnce();
+    expect(resolveSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["key", "jwt"])("never promotes a valid agent %s to an ambient board identity", async (kind) => {
+    const companyId = randomUUID(), agentId = randomUUID(), runId = randomUUID();
+    const token = kind === "key" ? "pcp_test_agent_key" : createLocalAgentJwt(agentId, companyId, "codex_local", runId, "user");
+    const { db } = createDbState({
+      agent: { id: agentId, companyId },
+      run: { id: runId, companyId, agentId, responsibleUserId: "user" },
+      ...(kind === "key" ? { agentKey: { id: randomUUID(), agentId, companyId, keyHash: hashToken(token!), responsibleUserId: "user" } } : {}),
+    });
+    const boardSession = { session: { id: "admin-session", userId: "admin" }, user: { id: "admin" } };
+    const resolveSession = vi.fn(async () => boardSession);
+    const resolveBearerSession = vi.fn(async () => boardSession);
+    const response = await request(createApp(db, "authenticated", { resolveSession, resolveBearerSession }))
+      .get("/actor").set("Authorization", `Bearer ${token}`).set("x-zumo-auth", "ambient-platform-session");
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ type: "agent", agentId });
+    expect(resolveSession).not.toHaveBeenCalled();
+    expect(resolveBearerSession).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to an ambient administrator when explicit bearer verification fails", async () => {
+    const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
+    const resolveSession = vi.fn(async () => ({
+      session: { id: "admin-session", userId: "admin" }, user: { id: "admin" },
+    }));
+    const resolveBearerSession = vi.fn(async () => { throw unauthorized("Invalid Entra user access token"); });
+    const response = await request(createApp(db, "authenticated", { resolveSession, resolveBearerSession }))
+      .get("/actor").set("Authorization", "Bearer invalid-agent-token").set("x-zumo-auth", "ambient-platform-session");
+    expect(response.status).toBe(401);
+    expect(resolveSession).not.toHaveBeenCalled();
+  });
+
+  it("preserves explicit session authentication errors instead of turning them into board permission failures", async () => {
+    const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
+    const response = await request(createApp(db, "authenticated", {
+      resolveSession: async () => { throw unauthorized("Session lacks Entra identity claims"); },
+    })).get("/actor");
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe("Session lacks Entra identity claims");
+  });
+
+  it.each([
+    "/api/routine-triggers/public/1234567890abcdef12345678/fire",
+    "/mcp/gateways/gw_1234567890abcdef1234567890abcdef",
+  ])("leaves independently authenticated ingress untouched at %s", async (path) => {
+    const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
+    const boardSession = { session: { id: "admin-session", userId: "admin" }, user: { id: "admin" } };
+    const resolveSession = vi.fn(async () => boardSession);
+    const resolveBearerSession = vi.fn(async () => boardSession);
+    const response = await request(createApp(db, "authenticated", { resolveSession, resolveBearerSession }))
+      .post(path).set("Authorization", "Bearer independently-validated-token");
+    expect(response.status).toBe(200);
+    expect(response.body.actorType).toBe("none");
+    expect(resolveSession).not.toHaveBeenCalled();
+    expect(resolveBearerSession).not.toHaveBeenCalled();
   });
 
   it.each([

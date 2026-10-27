@@ -59,6 +59,7 @@ The worker notices the new session within a few seconds and carries on.
 node cli.js login  --server <origin> [--user <upn>] [--silent] [--client-id <id>] [--scope <scope>]
 node cli.js status --server <origin> [--user <upn>]
 node cli.js logout --server <origin> [--user <upn>]
+node cli.js board-token --server <origin> [--user <upn>] [--silent]
 node cli.js ado-login --organization https://dev.azure.com/<org> --user <upn>
 node cli.js ado-token --organization https://dev.azure.com/<org> --user <upn> --silent
 ```
@@ -70,6 +71,11 @@ node cli.js ado-token --organization https://dev.azure.com/<org> --user <upn> --
   Device-code sign-in is not offered: Conditional Access blocks it in the Microsoft tenant.
 - `status` shows the saved session and whether Easy Auth still accepts it.
 - `logout` deletes the saved session.
+- `board-token` signs in as a human and returns private token JSON for board API
+  automation, after verifying that Clippy accepts it. Capture the output in memory
+  and send `accessToken` as `Authorization: Bearer ...` when creating pools or
+  issuing pairing tokens. Do not print it, save it in worker configuration, or
+  give it to agents. Renew by invoking the command again when it expires.
 - `ado-login` explicitly signs in to Azure DevOps through MSAL/WAM. It prints only
   identity and expiration, never the access token. It does not create an Easy Auth
   session or save token JSON.
@@ -141,6 +147,19 @@ present.
 | Then carried as | session cookie | `X-ZUMO-AUTH` session token |
 
 The audience is what controls who reaches Clippy, whichever client asked for the token.
+
+Client-directed `X-ZUMO-AUTH` sessions carry platform session claims, not the
+original Entra tenant, object ID, or assigned roles. They authorize ingress,
+not board administration, even when signed in as an instance admin. Use browser
+sign-in to issue a worker pairing token, or use `board-token` for human management
+API calls. `/api/agent-pool/pair` itself uses the one-time pairing credentials.
+Clippy independently verifies human bearer signatures, tenant, audience,
+delegated scope, and assigned role; agent bearer credentials never inherit the
+worker's ambient platform session.
+
+The server's `PAPERCLIP_ENTRA_AUDIENCES` must list the Easy Auth registration's
+client ID and allowed audiences. Existing browser sign-in remains available
+when this optional bearer configuration is absent.
 
 ### Observed authentication behavior
 

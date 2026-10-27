@@ -531,7 +531,11 @@ export async function createApp(
     pluginWorkerManager?: PluginWorkerManager;
     decisionServiceOptions: DecisionServiceOptions;
     betterAuthHandler?: express.RequestHandler;
+    authProvider?: "azure_easy_auth";
     resolveSession?: (
+      req: ExpressRequest,
+    ) => Promise<BetterAuthSessionResult | null>;
+    resolveBearerSession?: (
       req: ExpressRequest,
     ) => Promise<BetterAuthSessionResult | null>;
     /**
@@ -554,6 +558,7 @@ export async function createApp(
     deploymentMode: opts.deploymentMode,
     deploymentExposure: opts.deploymentExposure,
     authReady: opts.authReady,
+    authProvider: opts.authProvider,
     companyDeletionEnabled: opts.companyDeletionEnabled,
     databaseBackupHealth: opts.databaseBackupHealth,
     isWarmStandby,
@@ -655,6 +660,7 @@ export async function createApp(
     actorMiddleware(db, {
       deploymentMode: opts.deploymentMode,
       resolveSession: opts.resolveSession,
+      resolveBearerSession: opts.resolveBearerSession,
     }),
   );
   // After the actor middleware on purpose: a valid Cloud control assertion

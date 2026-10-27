@@ -112,6 +112,69 @@ test("parses commands and rejects incomplete ones", () => {
   assert.throws(() => parseArgs(["status", "--server", "ftp://x"]), /HTTP\(S\)/)
 })
 
+test("board-token verifies the human bearer and returns private JSON without saving a worker session", async () => {
+  const accessToken = jwt({ exp: 1_800_000_000 })
+  const lines = []
+  const errors = []
+  const seen = []
+  const exit = await main(["board-token", "--server", SERVER, "--user", "alice@contoso.com", "--silent"],
+    line => lines.push(line), line => errors.push(line), {
+      acquireToken: async options => {
+        assert.equal(options.user, "alice@contoso.com")
+        assert.equal(options.silentOnly, true)
+        assert.deepEqual(options.scopes, ["app-id/user_impersonation"])
+        return { accessToken, account: { username: "alice@contoso.com" } }
+      },
+      fetchImpl: async (url, init) => {
+        seen.push(String(url))
+        if (url.pathname === "/api/health") return response(401, { headers: { "www-authenticate": CHALLENGE } })
+        assert.equal(init.redirect, "error")
+        assert.equal(init.headers.authorization, `Bearer ${accessToken}`)
+        assert.equal(init.headers["x-zumo-auth"], undefined)
+        return response(200, { json: { user: { id: "mapped-user" }, session: { id: "board-session" } } })
+      },
+    })
+  assert.equal(exit, 0)
+  assert.deepEqual(errors, [])
+  assert.equal(lines.length, 1)
+  assert.deepEqual(JSON.parse(lines[0]), {
+    accessToken, expiresAt: new Date(1_800_000_000 * 1000).toISOString(), user: "alice@contoso.com", server: SERVER,
+  })
+  assert.deepEqual(seen, [`${SERVER}/api/health`, `${SERVER}/api/auth/get-session`])
+  assert.equal(await readSession(SERVER), null)
+})
+
+test("board-token never releases a token when Clippy rejects it or returns no board identity", async () => {
+  for (const result of [response(401), response(403), response(200, { json: {} })]) {
+    const lines = [], errors = []
+    const exit = await main(["board-token", "--server", SERVER], line => lines.push(line), line => errors.push(line), {
+      acquireToken: async () => ({ accessToken: "private-token-canary", account: { username: "alice@contoso.com" } }),
+      fetchImpl: async url => url.pathname === "/api/health"
+        ? response(401, { headers: { "www-authenticate": CHALLENGE } }) : result,
+    })
+    assert.equal(exit, EXIT_ERROR)
+    assert.deepEqual(lines, [])
+    assert.equal(errors.length, 1)
+    assert.ok(!errors[0].includes("private-token-canary"))
+    assert.equal(await readSession(SERVER), null)
+  }
+})
+
+test("board-token refuses a different account before making a board request", async () => {
+  const lines = [], errors = []
+  const exit = await main(["board-token", "--server", SERVER, "--user", "alice@contoso.com"],
+    line => lines.push(line), line => errors.push(line), {
+      acquireToken: async () => ({ accessToken: "private-token-canary", account: { username: "bob@contoso.com" } }),
+      fetchImpl: async url => {
+        assert.equal(url.pathname, "/api/health")
+        return response(401, { headers: { "www-authenticate": CHALLENGE } })
+      },
+    })
+  assert.equal(exit, EXIT_ERROR)
+  assert.deepEqual(lines, [])
+  assert.match(errors[0], /Signed in as bob@contoso.com, not alice@contoso.com/)
+})
+
 test("status without a saved session says how to sign in", async () => {
   const lines = []
   assert.equal(await main(["status", "--server", SERVER], (line) => lines.push(line)), EXIT_ERROR)

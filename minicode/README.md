@@ -115,6 +115,24 @@ switching credentials. Human-only approvals for other actions are unchanged.
 This built-in capability takes precedence over repository instructions for
 interactive CLI authentication. Other task authorization still applies.
 
+When the parent also advertises `providerPost` with managed-identity
+authentication, an HTTPS origin, explicit `routes` and an object `bodySchema`,
+Hosted sessions receive `provider_post` and advertise `provider_post_v1`.
+The tool accepts only `{path, body}`, binds the admitted run privately, and
+forwards a JSON object of at most 8 KiB. Routes and body schema remain
+provider-owned; the trusted parent validates and authorizes the operation.
+Engsys advertises only failed-stage retries, requiring the stage UUID and
+observed `expectedAttempt` from 1 to 5 inclusive; observed attempts greater than
+5 cannot be retried. Those retries may rerun deployment jobs and are
+authorized without per-retry human approval; no other deployment or provider
+write is implied. Other providers must supply their own task authorization.
+The tool never automatically replays a POST or switches authentication.
+Timeouts, cancellations and connection failures can leave a mutation outcome
+unknown: inspect live state with `provider_read` before considering another
+request, and report a blocker when the outcome cannot be established.
+Tracked stage reads can lag ADO; never repeat an uncertain stage retry at the
+same observed attempt. Only a confirmed newer failed attempt permits another retry.
+
 The provider must bound response sizes and request durations. Small JSON is included in the
 tool result; binary responses and larger JSON can be read from the returned artifact
 path under `.worker/provider`. The harness owns this directory and removes
@@ -159,6 +177,8 @@ Providers must update the private bootstrap and parent operation to `providerRea
 and `provider_read`, advertise `provider_read_v1`, and supply supervisory and
 publication metadata before deploying this worker. Deploy parent and worker
 together; existing deployment-specific wire names are not compatibility aliases.
+POST support is additive: advertise `providerPost` / `provider_post` and
+`provider_post_v1` only when the parent implements its advertised write contract.
 
 ## Run the terminal agent
 

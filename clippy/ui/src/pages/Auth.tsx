@@ -99,6 +99,23 @@ export function AuthPage() {
     return <CloudSignIn cloud={healthQuery.data.cloud} returnTo={nextPath} />;
   }
 
+  if (healthQuery.data?.authProvider === "azure_easy_auth") {
+    return (
+      <div className="fixed inset-0 flex flex-col items-center justify-center gap-4 bg-background p-6">
+        <PaperclipLockup className="h-5 w-auto" />
+        <h1 className="text-xl font-semibold">Sign in with Microsoft Entra</h1>
+        <p className="text-sm text-muted-foreground">
+          Access requires an assigned Entra user role. If sign-in fails, contact your administrator.
+        </p>
+        <Button asChild>
+          <a href={`/.auth/login/aad?post_login_redirect_uri=${encodeURIComponent(nextPath)}`}>
+            Continue with Microsoft
+          </a>
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="fixed inset-0 flex bg-background">
       <div className="absolute top-4 right-4 z-10">

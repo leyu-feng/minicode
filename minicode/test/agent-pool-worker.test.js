@@ -13,7 +13,7 @@ import { zipSync } from "fflate"
 import { WebSocketServer } from "ws"
 import { agentPoolServerUrl, loadWorkerCredential, parseWorkerReferences, startAgentPoolWorker } from "../server/agent-pool-worker.js"
 import { AgentSession } from "../server/agent-session.js"
-import { createHostedProviderTool } from "../server/hosted-provider.js"
+import { createHostedProviderTool, createHostedProviderPostTool } from "../server/hosted-provider.js"
 
 const execFileAsync = promisify(execFile)
 const agent = { id: "agent-a", name: "Agent A" }
@@ -265,7 +265,7 @@ test("Hosted assignments persist busy before repository preparation and retire o
   assert.deepEqual(transitions, ["idle", "busy", "repositories", "idle", "stopped"])
 })
 
-for (const explicitRole of [true, false]) for (const providerEnabled of [true, false]) test(`Hosted all-repository assignments use supervisory guidance with explicit metadata=${explicitRole}, managed identity=${providerEnabled}`, async t => {
+for (const explicitRole of [true, false]) for (const [providerEnabled, postEnabled] of [[true, true], [true, false], [false, true], [false, false]]) test(`Hosted all-repository assignments use supervisory guidance with explicit metadata=${explicitRole}, managed identity read=${providerEnabled}, post=${postEnabled}`, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "hosted-catalog-test-"))
   const shared = path.join(root, "supervisory-checkout")
   const writable = path.join(root, "Main")
@@ -311,7 +311,9 @@ for (const explicitRole of [true, false]) for (const providerEnabled of [true, f
       assert.ok(this.options.instructions.indexOf("Shared catalog guidance wins.")
         < this.options.instructions.indexOf("Conflicting workspace guidance loses."))
       assert.deepEqual(JSON.parse(this.options.env.WORKER_REFERENCE_REPOS_JSON), [descriptors[2]])
-      assert.deepEqual(this.options.tools.map(tool => tool.name), providerEnabled ? ["provider_read"] : [])
+      assert.deepEqual(this.options.tools.map(tool => tool.name), [
+        ...(providerEnabled ? ["provider_read"] : []), ...(postEnabled ? ["provider_post"] : []),
+      ])
       if (providerEnabled) {
         assert.match(this.options.instructions, /Do not invoke or install authentication CLIs/)
         assert.match(this.options.instructions, /managed-identity capability takes precedence/)
@@ -319,6 +321,16 @@ for (const explicitRole of [true, false]) for (const providerEnabled of [true, f
         await this.options.tools[0].execute({ path: "/v1/builds/123" })
       } else {
         assert.doesNotMatch(this.options.instructions, /Hosted harness capability: provider_read/)
+      }
+      if (postEnabled) {
+        assert.match(this.options.instructions, /explicitly authorized without per-retry human approval/)
+        assert.match(this.options.instructions, /Never retry a stage whose observed attempt is greater than 5/)
+        assert.match(this.options.instructions, /Never blindly replay the request/)
+        await this.options.tools.find(tool => tool.name === "provider_post").execute({
+          path: "/v1/builds/123/stages/c952ca9e-c683-5349-c7b6-e858fdfdd2c1/retry", body: { expectedAttempt: 2 },
+        })
+      } else {
+        assert.doesNotMatch(this.options.instructions, /Hosted harness capability: provider_post/)
       }
       assert.equal(await fs.readFile(path.join(root, ".worker", "skills", "paperclip", "SKILL.md"), "utf8"),
         "# Paperclip skill\nPost progress with the issue comments API and verify task completion.")
@@ -333,6 +345,11 @@ for (const explicitRole of [true, false]) for (const providerEnabled of [true, f
       task, baseUrl: "https://provider.example", routes: ["/v1/builds/{id}"],
       request: async (...args) => { providerCalls.push(args); return { statusCode: 200, body: { buildId: "123" } } },
     }) : undefined,
+    hostedProviderPostTool: postEnabled ? ({ task }) => createHostedProviderPostTool({
+      task, baseUrl: "https://provider.example", routes: ["/v1/builds/{id}/stages/{guid}/retry"],
+      bodySchema: { type: "object", properties: { expectedAttempt: { type: "integer", minimum: 1, maximum: 5 } } },
+      request: async (...args) => { providerCalls.push(args); return { statusCode: 202 } },
+    }) : undefined,
     prepareHostedRepositories: async selection => {
       assert.equal(selection.mode, "all_repositories")
       return { mode: "all_repositories", cwd: root, workerShared: shared, repositories: descriptors }
@@ -342,17 +359,22 @@ for (const explicitRole of [true, false]) for (const providerEnabled of [true, f
   const peer = await fixture.welcome(0)
   assert.ok(peer.messages.find(message => message.type === "hello").capabilities.includes("hosted_workspace_v2"))
   assert.equal(peer.messages.find(message => message.type === "hello").capabilities.includes("provider_read_v1"), providerEnabled)
+  assert.equal(peer.messages.find(message => message.type === "hello").capabilities.includes("provider_post_v1"), postEnabled)
   await executeTask(peer, { runId: "catalog", agent, skills: bundle.skills, authToken: "run-credential",
     repositories: { mode: "all_repositories", repositories: descriptors } })
   assert.equal(sessions, 1)
-  assert.deepEqual(providerCalls, providerEnabled
-    ? [["provider_read", { runId: "catalog", path: "/v1/builds/123" }, { signal: undefined }]]
-    : [])
+  assert.deepEqual(providerCalls, [
+    ...(providerEnabled ? [["provider_read", { runId: "catalog", path: "/v1/builds/123" }, { signal: undefined }]] : []),
+    ...(postEnabled ? [["provider_post", {
+      runId: "catalog", path: "/v1/builds/123/stages/c952ca9e-c683-5349-c7b6-e858fdfdd2c1/retry", body: { expectedAttempt: 2 },
+    }, { signal: undefined }]] : []),
+  ])
   const startup = peer.messages.filter(message => message.runId === "catalog" && message.type === "log").map(message => message.data)
   const layoutIndex = startup.findIndex(message => message.includes("Workspace layout (from the trusted AgentPool/worker repository handshake)"))
   assert.ok(startup[layoutIndex - 1].includes(`Read-only reference (instruction policy): Reference = ${reference}`))
   assert.ok(startup.some(message => message.includes(`Loaded read-only shared instructions from AGENTS.md: ${path.join(shared, "AGENTS.md")}`)))
   assert.equal(startup.some(message => message.includes("Harness capability: provider_read")), providerEnabled)
+  assert.equal(startup.some(message => message.includes("Harness capability: provider_post")), postEnabled)
   await assert.rejects(fs.stat(path.join(root, ".git")), { code: "ENOENT" })
 })
 

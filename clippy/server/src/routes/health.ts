@@ -123,6 +123,7 @@ export function healthRoutes(
     deploymentMode: DeploymentMode;
     deploymentExposure: DeploymentExposure;
     authReady: boolean;
+    authProvider?: "azure_easy_auth";
     companyDeletionEnabled: boolean;
     serverInfo?: ServerInfoSnapshot;
     databaseBackupHealth?: InspectDatabaseBackupHealthOptions;
@@ -231,6 +232,7 @@ export function healthRoutes(
   });
 
   router.get("/", async (req, res) => {
+    if (opts.authProvider) res.setHeader("Cache-Control", "no-store");
     const actorType = "actor" in req ? req.actor?.type : null;
     const exposeFullDetails = shouldExposeFullHealthDetails(
       actorType,
@@ -281,6 +283,7 @@ export function healthRoutes(
               serverVersion: serverVersion,
               commit,
               serverInfo,
+              ...(opts.authProvider ? { authProvider: opts.authProvider } : {}),
               ...(cloud ? { cloud } : {}),
               ...(hiddenSettings.length ? { hiddenSettings } : {}),
               ...(classificationLabel ? { classificationLabel } : {}),
@@ -288,6 +291,7 @@ export function healthRoutes(
           : {
               status: healthStatus,
               deploymentMode: opts.deploymentMode,
+              ...(opts.authProvider ? { authProvider: opts.authProvider } : {}),
               commit,
               ...(cloud ? { cloud } : {}),
               ...(hiddenSettings.length ? { hiddenSettings } : {}),
@@ -308,6 +312,7 @@ export function healthRoutes(
         deploymentExposure: opts.deploymentExposure,
         commit,
         warmStandby: true,
+        ...(opts.authProvider ? { authProvider: opts.authProvider } : {}),
         ...(cloud ? { cloud } : {}),
         ...(hiddenSettings.length ? { hiddenSettings } : {}),
         ...(classificationLabel ? { classificationLabel } : {}),
@@ -419,6 +424,7 @@ export function healthRoutes(
         commit,
         bootstrapStatus,
         bootstrapInviteActive,
+        ...(opts.authProvider ? { authProvider: opts.authProvider } : {}),
         ...(redactedDatabaseBackup ? { databaseBackup: redactedDatabaseBackup } : {}),
         ...(redactedWarnings ? { warnings: redactedWarnings } : {}),
         ...(devServer ? { devServer } : {}),
@@ -442,6 +448,7 @@ export function healthRoutes(
       deploymentExposure: opts.deploymentExposure,
         localAiLoginSupported: supportsLocalAiLogin(opts),
       authReady: opts.authReady,
+      ...(opts.authProvider ? { authProvider: opts.authProvider } : {}),
       bootstrapStatus,
       bootstrapInviteActive,
       features: {
