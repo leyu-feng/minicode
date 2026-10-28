@@ -63,7 +63,7 @@ function pruneCloudTenantWriteDebounce(
 }
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
-import { forbidden, unauthorized, unprocessable } from "../errors.js";
+import { forbidden, HttpError, unauthorized, unprocessable } from "../errors.js";
 
 export { isCloudManagedInstance } from "../services/cloud-instance.js";
 import { cloudTenantPrimaryCompanyId } from "../services/cloud-instance.js";
@@ -219,6 +219,7 @@ async function auditAgentKeyMissingResponsibleUser(
 interface ActorMiddlewareOptions {
   deploymentMode: DeploymentMode;
   resolveSession?: (req: Request) => Promise<BetterAuthSessionResult | null>;
+  resolveBearerSession?: (req: Request) => Promise<BetterAuthSessionResult | null>;
 }
 
 const publicRoutineWebhookPath = /^\/api\/routine-triggers\/public\/[a-f0-9]{24}\/fire\/?$/i;
@@ -227,6 +228,31 @@ const publicMcpGatewayProtocolPath = /^\/mcp\/gateways\/gw_[a-f0-9]{32}\/?$/i;
 
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
+  async function applyBoardSession(req: Request, session: BetterAuthSessionResult | null) {
+    if (!session?.user?.id || !session.session?.id) return false;
+    const userId = session.user.id;
+    const [roleRow, memberships] = await Promise.all([
+      db
+        .select({ id: instanceUserRoles.id })
+        .from(instanceUserRoles)
+        .where(and(eq(instanceUserRoles.userId, userId), eq(instanceUserRoles.role, "instance_admin")))
+        .then((rows) => rows[0] ?? null),
+      loadActiveUserCompanyMemberships(db, userId),
+    ]);
+    req.actor = {
+      type: "board",
+      userId,
+      sessionId: session.session.id,
+      userName: session.user.name ?? null,
+      userEmail: session.user.email ?? null,
+      companyIds: memberships.map((row) => row.companyId),
+      memberships,
+      isInstanceAdmin: Boolean(roleRow),
+      runId: req.header("x-paperclip-run-id") ?? undefined,
+      source: "session",
+    };
+    return true;
+  }
   const authenticate: RequestHandler = async (req, _res, next) => {
     req.actor =
       opts.deploymentMode === "local_trusted"
@@ -281,33 +307,16 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         try {
           session = await opts.resolveSession(req);
         } catch (err) {
+          if (err instanceof HttpError) {
+            next(err);
+            return;
+          }
           logger.warn(
             { err, method: req.method, url: req.originalUrl },
             "Failed to resolve auth session from request headers",
           );
         }
-        if (session?.user?.id && session.session?.id) {
-          const userId = session.user.id;
-          const [roleRow, memberships] = await Promise.all([
-            db
-              .select({ id: instanceUserRoles.id })
-              .from(instanceUserRoles)
-              .where(and(eq(instanceUserRoles.userId, userId), eq(instanceUserRoles.role, "instance_admin")))
-              .then((rows) => rows[0] ?? null),
-            loadActiveUserCompanyMemberships(db, userId),
-          ]);
-          req.actor = {
-            type: "board",
-            userId,
-            sessionId: session.session.id,
-            userName: session.user.name ?? null,
-            userEmail: session.user.email ?? null,
-            companyIds: memberships.map((row) => row.companyId),
-            memberships,
-            isInstanceAdmin: Boolean(roleRow),
-            runId: runIdHeader ?? undefined,
-            source: "session",
-          };
+        if (await applyBoardSession(req, session)) {
           next();
           return;
         }
@@ -355,6 +364,13 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     if (!key) {
       const claims = verifyLocalAgentJwt(token);
       if (!claims) {
+        // A platform session may accompany an agent credential. Only authenticate
+        // the bearer itself here; never fall back to that ambient human session.
+        if (opts.deploymentMode === "authenticated" && opts.resolveBearerSession
+          && await applyBoardSession(req, await opts.resolveBearerSession(req))) {
+          next();
+          return;
+        }
         next(unauthorized(invalidAgentTokenMessage(token)));
         return;
       }

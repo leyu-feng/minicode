@@ -706,6 +706,9 @@ async function startServerWithDatabaseTeardown(
   let resolveSessionFromHeaders:
     | ((headers: Headers) => Promise<BetterAuthSessionResult | null>)
     | undefined;
+  let resolveBearerSession:
+    | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
+    | undefined;
   if (config.deploymentMode === "local_trusted") {
     await ensureLocalTrustedBoardPrincipal(db as any);
   }
@@ -734,7 +737,11 @@ async function startServerWithDatabaseTeardown(
       for (const [name, value] of Object.entries(req.headers)) {
         if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(",") : value);
       }
-      return auth.resolveSessionFromHeaders(headers);
+      return auth.resolveSessionFromHeaders(headers, { rejectInvalidIdentity: true });
+    };
+    resolveBearerSession = (req) => {
+      if (/^\/api\/agent-pool\/(?:pair|worker)(?:\/|$)/.test(req.path)) return Promise.resolve(null);
+      return auth.resolveBearerSession(req.get("authorization"));
     };
     authReady = true;
   } else if (config.deploymentMode === "authenticated") {
@@ -960,6 +967,7 @@ async function startServerWithDatabaseTeardown(
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
     resolveSession,
+    resolveBearerSession,
     pluginWorkerManager,
     decisionServiceOptions,
     managedPluginAutoInstall,

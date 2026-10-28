@@ -2,16 +2,19 @@ import { createServer } from "node:http";
 import express from "express";
 import request from "supertest";
 import { WebSocket } from "ws";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { exportJWK, generateKeyPair, SignJWT, UnsecuredJWT, type JWK, type JWTPayload } from "jose";
 import { eq } from "drizzle-orm";
 import { authAccounts, authUsers, createDb, instanceUserRoles } from "@paperclipai/db";
 import {
   createAzureEasyAuth,
   loadAzureEasyAuthConfig,
   parseAzureEasyAuthIdentity,
+  parseAzureEasyAuthBearerIdentity,
   type AzureEasyAuthConfig,
 } from "../auth/azure-easy-auth.js";
 import { actorMiddleware } from "../middleware/auth.js";
+import { errorHandler } from "../middleware/error-handler.js";
 import { authRoutes } from "../routes/auth.js";
 import { healthRoutes } from "../routes/health.js";
 import { setupLiveEventsWebSocketServer } from "../realtime/live-events-ws.js";
@@ -21,8 +24,28 @@ const TENANT = "11111111-1111-4111-8111-111111111111";
 const OBJECT = "22222222-2222-4222-8222-222222222222";
 const OTHER = "33333333-3333-4333-8333-333333333333";
 const ORIGIN = "https://paperclip.example.com";
+const AUDIENCE = `api://${TENANT}/paperclip`;
+const { jwks } = vi.hoisted(() => ({ jwks: { keys: [] as JWK[] } }));
+vi.mock("jose", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("jose")>();
+  return { ...actual, createRemoteJWKSet: vi.fn(() => actual.createLocalJWKSet(jwks)) };
+});
+let keys: Awaited<ReturnType<typeof generateKeyPair>>;
+beforeAll(async () => {
+  keys = await generateKeyPair("RS256");
+  jwks.keys.push({ ...await exportJWK(keys.publicKey), alg: "RS256", kid: "user-key" });
+});
+async function userToken(overrides: JWTPayload = {}, signingKey = keys.privateKey) {
+  return new SignJWT({
+    iss: `https://sts.windows.net/${TENANT}/`, aud: AUDIENCE,
+    tid: TENANT, oid: OBJECT, roles: ["Developer"], scp: "user_impersonation",
+    name: "Entra User", preferred_username: "user@example.com", idtyp: "user",
+    iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 300,
+    ...overrides,
+  }).setProtectedHeader({ alg: "RS256", kid: "user-key" }).sign(signingKey);
+}
 const config: AzureEasyAuthConfig = {
-  tenantId: TENANT, allowedRoles: ["Developer"], userMappings: {}, publicOrigin: ORIGIN,
+  tenantId: TENANT, allowedRoles: ["Developer"], userMappings: {}, publicOrigin: ORIGIN, audiences: [AUDIENCE],
 };
 const baseClaims = [
   { typ: "tid", val: TENANT },
@@ -43,11 +66,12 @@ describe("Azure Easy Auth configuration and identity validation", () => {
     PAPERCLIP_AUTH_PROVIDER: "azure_easy_auth",
     PAPERCLIP_ENTRA_TENANT_ID: TENANT,
     PAPERCLIP_ENTRA_ALLOWED_ROLES: " Developer, Support ",
+    PAPERCLIP_ENTRA_AUDIENCES: ` ${AUDIENCE}, ${OBJECT} `,
   };
   it("keeps local auth as the default and fails closed on invalid external configuration", () => {
     expect(loadAzureEasyAuthConfig({}, "authenticated", undefined)).toBeUndefined();
     expect(loadAzureEasyAuthConfig(env, "authenticated", ORIGIN)).toMatchObject({
-      tenantId: TENANT, allowedRoles: ["Developer", "Support"],
+      tenantId: TENANT, allowedRoles: ["Developer", "Support"], audiences: [AUDIENCE, OBJECT],
     });
     expect(() => loadAzureEasyAuthConfig({ ...env, PAPERCLIP_AUTH_PROVIDER: "unknown" }, "authenticated", ORIGIN)).toThrow();
     expect(() => loadAzureEasyAuthConfig(env, "local_trusted", ORIGIN)).toThrow();
@@ -98,6 +122,16 @@ describe("Azure Easy Auth configuration and identity validation", () => {
       "x-ms-client-principal-name": "user@example.com",
     }), config)).toBeNull();
   });
+  it("explains why a platform-only client-directed session cannot authorize board access", () => {
+    const platformHeaders = new Headers({
+      "x-ms-client-principal-idp": "aad",
+      "x-ms-client-principal": principal([
+        { typ: "stable_sid", val: "sid:platform-session" },
+        { typ: "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier", val: "platform-subject" },
+      ], "AuthenticationTypes.Federation"),
+    });
+    expect(() => parseAzureEasyAuthIdentity(platformHeaders, config)).toThrow("use browser sign-in or an Entra user bearer token");
+  });
   it.each([
     baseClaims.filter(({ typ }) => typ !== "tid"),
     baseClaims.filter(({ typ }) => typ !== "oid"),
@@ -129,6 +163,37 @@ describe("Azure Easy Auth configuration and identity validation", () => {
   });
 });
 
+describe("Azure Easy Auth human bearer verification", () => {
+  it.each([
+    `https://sts.windows.net/${TENANT}/`,
+    `https://login.microsoftonline.com/${TENANT}/v2.0`,
+  ])("accepts a signed delegated user token from %s", async (iss) => {
+    expect(await parseAzureEasyAuthBearerIdentity(`Bearer ${await userToken({ iss })}`, config)).toEqual({
+      objectId: OBJECT, name: "Entra User", email: "user@example.com",
+    });
+  });
+  it.each([
+    { iss: "https://untrusted.example" }, { aud: "api://another-service" },
+    { tid: OTHER }, { oid: undefined }, { oid: "not-an-object-id" },
+    { roles: ["NotDeveloper"] }, { roles: "Developer" }, { roles: undefined },
+    { scp: undefined }, { scp: "some_other_scope" }, { idtyp: "app" },
+    { exp: 1 }, { exp: undefined }, { iat: undefined },
+    { "http://schemas.microsoft.com/identity/claims/objectidentifier": OTHER },
+  ])("rejects invalid or unauthorized user claims %#", async (claims) => {
+    await expect(parseAzureEasyAuthBearerIdentity(`Bearer ${await userToken(claims)}`, config))
+      .rejects.toMatchObject({ status: 401 });
+  });
+  it("rejects forged signatures, unsigned tokens and absent audience configuration", async () => {
+    const otherKeys = await generateKeyPair("RS256");
+    const forged = await userToken({}, otherKeys.privateKey);
+    await expect(parseAzureEasyAuthBearerIdentity(`Bearer ${forged}`, config)).rejects.toMatchObject({ status: 401 });
+    const unsigned = new UnsecuredJWT({ tid: TENANT, oid: OBJECT, roles: ["Developer"] }).encode();
+    await expect(parseAzureEasyAuthBearerIdentity(`Bearer ${unsigned}`, config)).rejects.toMatchObject({ status: 401 });
+    await expect(parseAzureEasyAuthBearerIdentity(`Bearer ${await userToken()}`, { ...config, audiences: [] }))
+      .rejects.toThrow("PAPERCLIP_ENTRA_AUDIENCES");
+  });
+});
+
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
 
@@ -153,10 +218,13 @@ describeDatabase("Azure Easy Auth persisted identities", () => {
       deploymentMode: "authenticated",
       resolveSession: (req) => auth.resolveSessionFromHeaders(new Headers({
         ...(req.get("x-ms-client-principal") ? { "x-ms-client-principal": req.get("x-ms-client-principal")! } : {}),
-      })),
+        ...(req.get("x-ms-client-principal-idp") ? { "x-ms-client-principal-idp": req.get("x-ms-client-principal-idp")! } : {}),
+      }), { rejectInvalidIdentity: true }),
+      resolveBearerSession: (req) => auth.resolveBearerSession(req.get("authorization")),
     }));
     app.use("/api/auth", authRoutes(db));
     app.all("/api/auth/{*authPath}", auth.handler);
+    app.use(errorHandler);
   });
 
   afterAll(async () => { await database?.cleanup(); });
@@ -170,6 +238,22 @@ describeDatabase("Azure Easy Auth persisted identities", () => {
     expect(roles[0]?.userId).toBe("existing-user");
     const again = await createAzureEasyAuth(db, config);
     expect((await again.resolveSessionFromHeaders(headers()))?.user?.id).toBe("existing-user");
+  });
+  it("resolves a verified human bearer to the same mapped administrator, even beside a platform-only session", async () => {
+    const response = await request(app).get("/api/auth/get-session")
+      .set("Authorization", `Bearer ${await userToken()}`)
+      .set("x-ms-client-principal-idp", "aad")
+      .set("x-ms-client-principal", principal([{ typ: "stable_sid", val: "sid:platform" }], "AuthenticationTypes.Federation"));
+    expect(response.status).toBe(200);
+    expect(response.body.user.id).toBe("existing-user");
+    expect(await db.select().from(instanceUserRoles).where(eq(instanceUserRoles.userId, "existing-user"))).toHaveLength(1);
+  });
+  it("returns an explicit authentication failure instead of masking missing session claims as board permissions", async () => {
+    const response = await request(app).get("/api/auth/get-session")
+      .set("x-ms-client-principal-idp", "aad")
+      .set("x-ms-client-principal", principal([{ typ: "stable_sid", val: "sid:platform" }], "AuthenticationTypes.Federation"));
+    expect(response.status).toBe(401);
+    expect(response.body.error).toContain("use browser sign-in or an Entra user bearer token");
   });
 
   it("never links by matching email and handles concurrent first requests without granting admin", async () => {

@@ -12,6 +12,20 @@ import { testAdapterEnvironmentSchema } from "@paperclipai/shared";
 import { createHttpLogger } from "../middleware/logger.js";
 
 describe("HTTP logger redaction", () => {
+  it.each([200, 401, 500])("keeps Easy Auth session credentials and principals out of %i logs", async (status) => {
+    const chunks: string[] = [];
+    const stream = new Writable({ write(chunk, _encoding, callback) { chunks.push(chunk.toString()); callback(); } });
+    const app = express();
+    app.use(createHttpLogger(pino({ redact: [...HTTP_LOG_REDACT_PATHS] }, stream)));
+    app.get("/api/auth/get-session", (_req, res) => res.status(status).json({}));
+    await request(app).get("/api/auth/get-session")
+      .set("Authorization", "Bearer access-token-canary")
+      .set("x-zumo-auth", "session-token-canary")
+      .set("x-ms-client-principal", "principal-canary")
+      .set("x-ms-client-principal-id", "object-id-canary")
+      .set("x-ms-client-principal-name", "user-name-canary");
+    expect(chunks.join("")).not.toMatch(/access-token-canary|session-token-canary|principal-canary|object-id-canary|user-name-canary/);
+  });
   it.each([400, 500])("keeps both AgentPool pairing credentials out of %i diagnostics", async (status) => {
     const chunks: string[] = [];
     const stream = new Writable({ write(chunk, _encoding, callback) { chunks.push(chunk.toString()); callback(); } });

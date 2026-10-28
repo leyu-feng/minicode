@@ -535,6 +535,9 @@ export async function createApp(
     resolveSession?: (
       req: ExpressRequest,
     ) => Promise<BetterAuthSessionResult | null>;
+    resolveBearerSession?: (
+      req: ExpressRequest,
+    ) => Promise<BetterAuthSessionResult | null>;
     /**
      * `plugins.autoInstall` from the managed config (PAPERCLIP_MANAGED_CONFIG).
      * `null`/absent ⇒ self-hosted: only the built-in kubernetes bundle is
@@ -657,6 +660,7 @@ export async function createApp(
     actorMiddleware(db, {
       deploymentMode: opts.deploymentMode,
       resolveSession: opts.resolveSession,
+      resolveBearerSession: opts.resolveBearerSession,
     }),
   );
   // After the actor middleware on purpose: a valid Cloud control assertion
