@@ -239,7 +239,7 @@ export async function startAgentPoolWorker({
   server, workerId, cwd, clientToken, entraSession = null,
   instanceId = randomUUID(),
   workspaceRoot, workspaceMode = "worktree", workerName,
-  workerShared, referenceRepos = [], sourceBranch,
+  workerShared, referenceRepos = [], sourceBranch, toolAzureConfigDir,
   minFreeGiB, targetFreeGiB, diskFreeBytes, diskMonitorMs = 60_000,
   githubRepo, githubUser,
   azureDevOpsOrg, azureDevOpsProject, azureDevOpsRepo, azureDevOpsUser, azureDevOpsAlias, clippyAuth,
@@ -257,6 +257,12 @@ export async function startAgentPoolWorker({
     .some(value => value !== undefined)
   if (azurePublication && (githubRepo || githubUser)) throw new Error("Select either GitHub or Azure DevOps publication, not both")
   if (!["normal", "verbose"].includes(outputMode)) throw new Error("Worker --output-mode must be normal or verbose")
+  if (toolAzureConfigDir !== undefined && (typeof toolAzureConfigDir !== "string" || !path.isAbsolute(toolAzureConfigDir))) {
+    throw new Error("--tool-azure-config-dir must be an absolute directory path")
+  }
+  if (toolAzureConfigDir !== undefined && !(await fs.stat(toolAzureConfigDir)).isDirectory()) {
+    throw new Error("--tool-azure-config-dir must be an existing directory")
+  }
   if (!["worktree", "clone"].includes(workspaceMode)) throw new Error("--workspace-mode must be worktree or clone")
   if (workspaceMode === "clone" && workerName !== undefined) throw new Error("--worker-name requires --workspace-mode worktree")
   if (workspaceMode === "clone" && (minFreeGiB !== undefined || targetFreeGiB !== undefined)) {
@@ -507,7 +513,7 @@ export async function startAgentPoolWorker({
       if (provider) enqueue(run, { type: "log", stream: "stdout", data: "[minicode] Harness capability: provider_read (read-only; managed identity; no Azure CLI or user credentials).\n" })
       if (providerPost) enqueue(run, { type: "log", stream: "stdout", data: "[minicode] Harness capability: provider_post (allowlisted mutations; managed identity; no automatic transport replay).\n" })
       const session = sessionFactory({
-        id: task.runId, cwd: workspace,
+        id: task.runId, cwd: workspace, toolAzureConfigDir,
         captureFailedPrompt: Boolean(onModelFailure),
         tools: [run.publication, synchronization, provider, providerPost].filter(Boolean),
         instructions: [
@@ -808,7 +814,7 @@ export async function startAgentPoolWorker({
   return { stop, finished }
 }
 
-const WORKER_USAGE = "Usage: minicode worker --server <origin> --worker-id <id> [--repo-root [<branch>@]<directory>] [--workspace-mode worktree|clone] [--worker-name <short-name>] [--worker-shared <directory>] [--reference-repo [<branch>@]<name>=<directory>]... [--min-free-gib <GiB>] [--target-free-gib <GiB>] [--github-repo <owner/repo> --github-user <account> | --azure-devops-org <url> --azure-devops-project <name-or-id> --azure-devops-repo <name-or-id> --azure-devops-user <upn> [--azure-devops-alias <alias>]] [--output-mode normal|verbose] [--entra-user <upn> [--clippy-auth <cli.js>]]"
+const WORKER_USAGE = "Usage: minicode worker --server <origin> --worker-id <id> [--repo-root [<branch>@]<directory>] [--workspace-mode worktree|clone] [--worker-name <short-name>] [--worker-shared <directory>] [--reference-repo [<branch>@]<name>=<directory>]... [--min-free-gib <GiB>] [--target-free-gib <GiB>] [--github-repo <owner/repo> --github-user <account> | --azure-devops-org <url> --azure-devops-project <name-or-id> --azure-devops-repo <name-or-id> --azure-devops-user <upn> [--azure-devops-alias <alias>]] [--output-mode normal|verbose] [--tool-azure-config-dir <absolute-directory>] [--entra-user <upn> [--clippy-auth <cli.js>]]"
 
 // A server behind Entra sign-in answers an unauthenticated probe with Easy Auth's challenge.
 async function requiresEntra(server) {
@@ -824,7 +830,7 @@ export async function runAgentPoolWorkerCli(argv, repoRoot) {
   const options = {}
   const referenceRepos = []
   for (let i = 0; i < argv.length; i++) {
-    if (!["--server", "--worker-id", "--entra-user", "--clippy-auth", "--output-mode", "--worker-shared", "--reference-repo", "--workspace-mode", "--worker-name", "--min-free-gib", "--target-free-gib", "--github-repo", "--github-user", "--azure-devops-org", "--azure-devops-project", "--azure-devops-repo", "--azure-devops-user", "--azure-devops-alias"].includes(argv[i])
+    if (!["--server", "--worker-id", "--entra-user", "--clippy-auth", "--output-mode", "--tool-azure-config-dir", "--worker-shared", "--reference-repo", "--workspace-mode", "--worker-name", "--min-free-gib", "--target-free-gib", "--github-repo", "--github-user", "--azure-devops-org", "--azure-devops-project", "--azure-devops-repo", "--azure-devops-user", "--azure-devops-alias"].includes(argv[i])
       || !argv[i + 1] || argv[i + 1].startsWith("--")) throw new Error(WORKER_USAGE)
     if (argv[i] === "--reference-repo") {
       referenceRepos.push(argv[++i])
@@ -833,6 +839,11 @@ export async function runAgentPoolWorkerCli(argv, repoRoot) {
     options[argv[i].slice(2)] = argv[++i]
   }
   parseWorkerReferences(referenceRepos)
+  const toolAzureConfigDir = options["tool-azure-config-dir"]
+  if (toolAzureConfigDir !== undefined) {
+    if (!path.isAbsolute(toolAzureConfigDir)) throw new Error("--tool-azure-config-dir must be an absolute directory path")
+    if (!(await fs.stat(toolAzureConfigDir)).isDirectory()) throw new Error("--tool-azure-config-dir must be an existing directory")
+  }
   const outputMode = options["output-mode"] ?? "normal"
   if (!["normal", "verbose"].includes(outputMode)) throw new Error("Worker --output-mode must be normal or verbose")
   const workerId = options["worker-id"]
@@ -879,7 +890,7 @@ export async function runAgentPoolWorkerCli(argv, repoRoot) {
   const worker = await startAgentPoolWorker({
     server, workerId, cwd, clientToken: state.clientToken, entraSession, outputMode,
     workerShared: options["worker-shared"], referenceRepos, sourceBranch,
-    workspaceMode: options["workspace-mode"], workerName: options["worker-name"],
+    workspaceMode: options["workspace-mode"], workerName: options["worker-name"], toolAzureConfigDir,
     minFreeGiB: options["min-free-gib"] === undefined ? undefined : Number(options["min-free-gib"]),
     targetFreeGiB: options["target-free-gib"] === undefined ? undefined : Number(options["target-free-gib"]),
     githubRepo: options["github-repo"], githubUser: options["github-user"],

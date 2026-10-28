@@ -368,12 +368,13 @@ export function callModelOnce(config, messages) {
  * for the lifetime of the session.
  */
 export class AgentSession extends EventEmitter {
-  constructor({ id, cwd, env, instructions = "", tools = [], modelConfigProvider = resolveModelConfig, captureFailedPrompt = false }) {
+  constructor({ id, cwd, env, toolAzureConfigDir, instructions = "", tools = [], modelConfigProvider = resolveModelConfig, captureFailedPrompt = false }) {
     super()
     this.id = id
     this.kind = "agent"
     this.cwd = cwd
     this.env = env
+    this.toolAzureConfigDir = toolAzureConfigDir
     this.captureFailedPrompt = captureFailedPrompt
     this.modelConfigProvider = modelConfigProvider
     this.tools = new Map()
@@ -623,8 +624,8 @@ export class AgentSession extends EventEmitter {
         this.#emitOutput(`\u001b[33m$ ${command}\u001b[0m\r\n`)
         const shellResult = await runShellCommand(command, {
           cwd: this.cwd,
-          env: this.config.azureConfigDir
-            ? { ...(this.env ?? process.env), AZURE_CONFIG_DIR: this.config.azureConfigDir }
+          env: this.toolAzureConfigDir ?? this.config.azureConfigDir
+            ? { ...(this.env ?? process.env), AZURE_CONFIG_DIR: this.toolAzureConfigDir ?? this.config.azureConfigDir }
             : this.env,
           signal,
           // A killed process can flush buffered output after Ctrl+C. Do not

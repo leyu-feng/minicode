@@ -347,6 +347,12 @@ opened.
 
 ## Connect as an AgentPool worker
 
+### Separate Azure CLI identity for shell tools
+
+A Devbox worker can use a different Azure CLI context for agent shell commands than its model profile and Paperclip service session. Prepare an existing, signed-in Azure CLI configuration directory, verify its account, tenant and subscription, then add `--tool-azure-config-dir <absolute-directory>` to the worker command. For the standard Windows Azure CLI directory, an example is `--tool-azure-config-dir "$env:USERPROFILE\.azure"`. This option affects `AZURE_CONFIG_DIR` in assignment shell tools only; it does not change model authentication, Paperclip's `--entra-user` session, Git or Azure DevOps publication. Without the option, existing behavior is unchanged: a model profile with an isolated Azure CLI directory also supplies that directory to shell commands.
+
+Do not pass a token or credential file as the directory. The selected account must already be signed in and have only the access appropriate for the worker's authorized tasks. Verify `az account show` in the selected directory before starting and again in a small authorized worker task; the option validates the directory exists but does not verify account or subscription. A shell can change its own environment or account, and a local worker is not a security sandbox; this option is context selection, not credential isolation or authorization to modify Azure resources. Session renewal and model access can still require their own sign-in.
+
 Clippy keeps every existing adapter and adds **AgentPool** (`agent_pool`). For
 a Devbox pool, select its company pool name:
 

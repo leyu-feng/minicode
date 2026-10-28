@@ -8,6 +8,49 @@ import { ShellSession } from "../server/shell-session.js"
 
 const originalFetch = globalThis.fetch
 
+test("worker shell uses its selected Azure context instead of the model context", async t => {
+  const actions = [{ type: "tool", command: "echo fixture" }, { type: "final", message: "done" }]
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] })
+  let shellEnv
+  t.mock.method(childProcess, "spawn", (_file, _args, options) => {
+    shellEnv = options.env
+    const proc = new EventEmitter()
+    proc.stdout = new EventEmitter()
+    proc.stderr = new EventEmitter()
+    queueMicrotask(() => proc.emit("close", 0))
+    return proc
+  })
+  const session = new AgentSession({ id: "azure-context", cwd: process.cwd(),
+    env: { AZURE_CONFIG_DIR: "inherited", OTHER_SETTING: "kept" }, toolAzureConfigDir: "resource-context" })
+  t.after(() => session.dispose())
+  session.config = { api: "chat-completions", endpoint: "https://example.test", apiKey: "fixture",
+    model: "fixture", azureConfigDir: "model-context" }
+  assert.equal((await session.write("Check context")).exitCode, 0)
+  assert.equal(shellEnv.AZURE_CONFIG_DIR, "resource-context")
+  assert.equal(shellEnv.OTHER_SETTING, "kept")
+  assert.equal(session.config.azureConfigDir, "model-context")
+})
+
+test("without a tool override the model Azure context remains the shell default", async t => {
+  const actions = [{ type: "tool", command: "echo fixture" }, { type: "final", message: "done" }]
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] })
+  let shellEnv
+  t.mock.method(childProcess, "spawn", (_file, _args, options) => {
+    shellEnv = options.env
+    const proc = new EventEmitter()
+    proc.stdout = new EventEmitter()
+    proc.stderr = new EventEmitter()
+    queueMicrotask(() => proc.emit("close", 0))
+    return proc
+  })
+  const session = new AgentSession({ id: "azure-default", cwd: process.cwd(), env: { AZURE_CONFIG_DIR: "inherited" } })
+  t.after(() => session.dispose())
+  session.config = { api: "chat-completions", endpoint: "https://example.test", apiKey: "fixture",
+    model: "fixture", azureConfigDir: "model-context" }
+  assert.equal((await session.write("Check context")).exitCode, 0)
+  assert.equal(shellEnv.AZURE_CONFIG_DIR, "model-context")
+})
+
 afterEach(() => {
   globalThis.fetch = originalFetch
 })
