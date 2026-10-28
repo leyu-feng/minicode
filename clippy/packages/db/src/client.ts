@@ -255,15 +255,19 @@ export function postgresJsOptions(options: DatabaseClientOptions): Record<string
   return driverOptions;
 }
 
-// A long advisory-lock transaction must not borrow the normal pool that its
+// A lock-holding transaction must not borrow the normal pool that its
 // work needs for progress writes. Keep connection configuration private to the
 // originating Db lifetime; callers receive neither URLs nor credentials.
-const dedicatedDbFactories = new WeakMap<object, () => Db>();
+const dedicatedDbFactories = new WeakMap<object, (applicationName?: string) => Db>();
 
-export async function withDedicatedDbConnection<T>(db: Db, action: (dedicated: Db) => Promise<T>): Promise<T> {
+export async function withDedicatedDbConnection<T>(
+  db: Db,
+  action: (dedicated: Db) => Promise<T>,
+  options?: Pick<DatabaseClientOptions, "applicationName">,
+): Promise<T> {
   const factory = dedicatedDbFactories.get(db);
   if (!factory) throw new Error("dedicated_connection_requires_create_db");
-  const dedicated = factory();
+  const dedicated = factory(options?.applicationName);
   try { return await action(dedicated); }
   finally { await dedicated.$client.end({ timeout: 1 }); }
 }
@@ -282,8 +286,8 @@ function createDbClient(url: string, resolved: DatabaseClientOptions, owner?: ob
   // message cannot establish that replay is safe. Leave retries to callers
   // that know the complete operation is idempotent.
   const db = installDatabaseWorkSignals(drizzlePg(sql, { schema }), owner);
-  dedicatedDbFactories.set(db, () => createDbClient(url, {
-    ...resolved, maxConnections: 1, applicationName: "paperclip-workspace-finalization-lock",
+  dedicatedDbFactories.set(db, (applicationName) => createDbClient(url, {
+    ...resolved, maxConnections: 1, applicationName: applicationName ?? "paperclip-workspace-finalization-lock",
   }, db));
   return db;
 }
