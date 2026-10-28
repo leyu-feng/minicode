@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -36,6 +36,7 @@ import * as providerRegistry from "../secrets/provider-registry.ts";
 import * as entraWebhook from "../services/entra-routine-webhook.js";
 import { routineService } from "../services/routines.ts";
 import { secretService } from "../services/secrets.ts";
+import * as dbConnections from "@paperclipai/db";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -97,6 +98,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
   });
 
   async function seedFixture(opts?: {
+    database?: ReturnType<typeof createDb>;
     runtimeEnv?: Record<string, string | undefined>;
     wakeup?: (
       agentId: string,
@@ -111,6 +113,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       },
     ) => Promise<unknown>;
   }) {
+    const fixtureDb = opts?.database ?? db;
     const companyId = randomUUID();
     const agentId = randomUUID();
     const projectId = randomUUID();
@@ -129,7 +132,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       };
     }> = [];
 
-    await db.insert(companies).values({
+    await fixtureDb.insert(companies).values({
       id: companyId,
       name: "Paperclip",
       issuePrefix,
@@ -137,7 +140,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       requireBoardApprovalForNewAgents: false,
     });
 
-    await db.insert(agents).values({
+    await fixtureDb.insert(agents).values({
       id: agentId,
       companyId,
       name: "CodexCoder",
@@ -149,14 +152,14 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       permissions: {},
     });
 
-    await db.insert(projects).values({
+    await fixtureDb.insert(projects).values({
       id: projectId,
       companyId,
       name: "Routines",
       status: "in_progress",
     });
 
-    const svc = routineService(db, {
+    const svc = routineService(fixtureDb, {
       runtimeEnv: opts?.runtimeEnv,
       heartbeat: {
         wakeup: async (wakeupAgentId, wakeupOpts) => {
@@ -167,13 +170,13 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
             (typeof wakeupOpts.contextSnapshot?.issueId === "string" && wakeupOpts.contextSnapshot.issueId) ||
             null;
           if (!issueId) return null;
-          const issue = await db
+          const issue = await fixtureDb
             .select({ responsibleUserId: issues.responsibleUserId })
             .from(issues)
             .where(eq(issues.id, issueId))
             .then((rows) => rows[0] ?? null);
           const queuedRunId = randomUUID();
-          await db.insert(heartbeatRuns).values({
+          await fixtureDb.insert(heartbeatRuns).values({
             id: queuedRunId,
             companyId,
             agentId: wakeupAgentId,
@@ -183,7 +186,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
             responsibleUserId: issue?.responsibleUserId ?? defaultResponsibleUserId,
             contextSnapshot: { ...(wakeupOpts.contextSnapshot ?? {}), issueId },
           });
-          await db
+          await fixtureDb
             .update(issues)
             .set({
               executionRunId: queuedRunId,
@@ -194,7 +197,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         },
       },
     });
-    const issueSvc = issueService(db);
+    const issueSvc = issueService(fixtureDb);
     const routine = await svc.create(
       companyId,
       {
@@ -2141,6 +2144,171 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       .where(eq(issues.originId, routine.id));
 
     expect(routineIssues).toHaveLength(1);
+  });
+
+  it.each(["manual", "webhook"] as const)(
+    "keeps the database pool responsive during a burst of %s routine runs",
+    async (source) => {
+      const url = new URL(tempDb!.connectionString);
+      url.searchParams.set("options", "-c statement_timeout=3000");
+      const burstDb = createDb(url.toString(), { maxConnections: 4 });
+      try {
+        const { routine, svc, wakeups } = await seedFixture({ database: burstDb });
+        const { trigger } = await svc.createTrigger(
+          routine.id,
+          { kind: "webhook", signingMode: "none" },
+          {},
+        );
+        const runs = await Promise.all(Array.from({ length: 12 }, (_, index) =>
+          source === "manual"
+            ? svc.runRoutine(routine.id, { source })
+            : svc.firePublicTrigger(trigger.publicId!, { idempotencyKey: `burst-${index}` }),
+        ));
+
+        expect(runs.filter((run) => run.status === "issue_created")).toHaveLength(1);
+        expect(runs.filter((run) => run.status === "coalesced")).toHaveLength(11);
+        expect(new Set(runs.map((run) => run.linkedIssueId)).size).toBe(1);
+        expect(runs[0]?.linkedIssueId).toBeTruthy();
+        expect(wakeups).toHaveLength(1);
+        expect(await burstDb.execute(sql`select 1 as healthy`)).toMatchObject([{ healthy: 1 }]);
+      } finally {
+        await burstDb.$client.end({ timeout: 1 });
+      }
+    },
+  );
+
+  it.each([1, 4])(
+    "dispatches distinct routines without starving a %s-connection shared pool",
+    async (maxConnections) => {
+      const url = new URL(tempDb!.connectionString);
+      url.searchParams.set("options", "-c statement_timeout=3000");
+      const burstDb = createDb(url.toString(), { maxConnections });
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const fixtures = [];
+        for (let index = 0; index < 12; index += 1) {
+          const fixture = await seedFixture({ database: burstDb });
+          const { trigger } = await fixture.svc.createTrigger(
+            fixture.routine.id,
+            { kind: "webhook", signingMode: "none" },
+            {},
+          );
+          fixtures.push({ ...fixture, trigger });
+        }
+        const runs = await Promise.race([
+          Promise.all(fixtures.map(({ routine, svc, trigger }, index) =>
+            index % 2 === 0
+              ? svc.runRoutine(routine.id, { source: "manual" })
+              : svc.firePublicTrigger(trigger.publicId!, { idempotencyKey: `distinct-${index}` }),
+          )),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error("Routine burst starved the shared database pool")), 5_000);
+          }),
+        ]);
+
+        expect(runs.map((run) => run.status)).toEqual(fixtures.map(() => "issue_created"));
+        expect(new Set(runs.map((run) => run.linkedIssueId)).size).toBe(fixtures.length);
+        for (const fixture of fixtures) {
+          expect(fixture.wakeups).toHaveLength(1);
+        }
+        expect(await burstDb.execute(sql`select 1 as healthy`)).toMatchObject([{ healthy: 1 }]);
+      } finally {
+        clearTimeout(timeout);
+        await burstDb.$client.end({ timeout: 1 });
+      }
+    },
+  );
+
+  it("bounds routine lock connections across service instances while keeping the shared pool available", async () => {
+    const boundedDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let ready!: () => void;
+    const started = new Promise<void>((resolve) => { ready = resolve; });
+    let wakeups = 0;
+    let completion: Promise<unknown> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const fixtures = [];
+      for (let index = 0; index < 6; index += 1) {
+        fixtures.push(await seedFixture({
+          database: boundedDb,
+          wakeup: async () => {
+            wakeups += 1;
+            if (wakeups === 2) ready();
+            await gate;
+            return null;
+          },
+        }));
+      }
+      const pending = Promise.all(fixtures.map(({ routine, svc }) =>
+        svc.runRoutine(routine.id, { source: "manual" }),
+      ));
+      completion = pending;
+      const deadline = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("Routine admission or shared pool became unresponsive")), 5_000);
+      });
+      await Promise.race([started, pending, deadline]);
+      const connections = await Promise.race([
+        boundedDb.execute(sql`
+          select count(*)::int as count from pg_stat_activity
+          where application_name = 'paperclip-routine-lock'
+        `),
+        deadline,
+      ]);
+      expect(connections).toMatchObject([{ count: 2 }]);
+      expect(wakeups).toBe(2);
+      release();
+      const runs = await Promise.race([pending, deadline]);
+      expect(runs.map((run) => run.status)).toEqual(fixtures.map(() => "issue_created"));
+      expect(await boundedDb.execute(sql`
+        select count(*)::int as count from pg_stat_activity
+        where application_name = 'paperclip-routine-lock'
+      `)).toMatchObject([{ count: 0 }]);
+    } finally {
+      release();
+      clearTimeout(timeout);
+      await boundedDb.$client.end({ timeout: 1 });
+      if (completion) await Promise.allSettled([completion]);
+    }
+  });
+
+  it("does not replay dispatch after acquiring the lock, even if the commit response reports contention", async () => {
+    const { routine, svc, wakeups } = await seedFixture();
+    const failure = new Error("Commit response lost", { cause: { code: "55P03" } });
+    const withDedicated = dbConnections.withDedicatedDbConnection;
+    const spy = vi.spyOn(dbConnections, "withDedicatedDbConnection").mockImplementationOnce(async (...args) => {
+      await withDedicated(...args);
+      throw failure;
+    });
+    try {
+      await expect(svc.runRoutine(routine.id, { source: "manual" })).rejects.toBe(failure);
+      expect(wakeups).toHaveLength(1);
+      expect(await svc.listRuns(routine.id)).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("returns an explicit conflict when routine lock contention exceeds the wait budget", async () => {
+    const { routine, svc, wakeups } = await seedFixture();
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const spy = vi.spyOn(dbConnections, "withDedicatedDbConnection").mockImplementationOnce(async () => {
+      now += 30_001;
+      throw new Error("Failed lock", { cause: { code: "55P03" } });
+    });
+    try {
+      await expect(svc.runRoutine(routine.id, { source: "manual" })).rejects.toMatchObject({
+        status: 409,
+        message: "Routine is busy; retry the request",
+      });
+      expect(wakeups).toHaveLength(0);
+      expect(await svc.listRuns(routine.id)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+      clock.mockRestore();
+    }
   });
 
   it("fails the run and cleans up the execution issue when wakeup queueing fails", async () => {

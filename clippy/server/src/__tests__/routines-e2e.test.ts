@@ -101,7 +101,6 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-routines-e2e-");
-    db = createDb(tempDb.connectionString);
   }, 20_000);
 
   afterEach(async () => {
@@ -132,13 +131,14 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
     await db.delete(agents);
     await db.delete(companies);
     await db.delete(instanceSettings);
+    await db.$client.end({ timeout: 1 });
   });
 
   afterAll(async () => {
     await tempDb?.cleanup();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
     vi.doUnmock("@paperclipai/shared/telemetry");
     vi.doUnmock("../telemetry.js");
@@ -159,6 +159,8 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
     registerRoutineServiceMock();
     vi.doMock("../routes/authz.js", async () => vi.importActual("../routes/authz.js"));
     vi.clearAllMocks();
+    const database = await import("@paperclipai/db");
+    db = database.createDb(tempDb!.connectionString);
   });
 
   async function createApp(actor: Record<string, unknown>) {

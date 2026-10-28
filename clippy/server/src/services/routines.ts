@@ -28,6 +28,7 @@ import {
   routines,
   routineTriggers,
   routineWebhookTestReceipts,
+  withDedicatedDbConnection,
 } from "@paperclipai/db";
 import type {
   CreateRoutine,
@@ -61,6 +62,7 @@ import {
 } from "@paperclipai/shared";
 import { trackRoutineRun } from "@paperclipai/shared/telemetry";
 import { conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
+import { isLockNotAvailable } from "../db-errors.js";
 import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
@@ -88,6 +90,12 @@ const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
 const MAX_CATCH_UP_RUNS = 25;
 const MAX_ROUTINE_REVISIONS = 100;
+const ROUTINE_LOCK_WAIT_MS = 30_000;
+const ROUTINE_LOCK_RETRY_MS = 50;
+const MAX_ROUTINE_LOCK_CONNECTIONS = 2;
+// Share the bound across service instances using the same pool. PostgreSQL row
+// locks remain authoritative across processes; this only limits local resources.
+const routineLockConnections = new WeakMap<Db, { active: number }>();
 const EXECUTION_ISSUE_TRANSIENT_FAILURE_CODE = "execution_issue_status";
 const EXECUTION_ISSUE_TRANSIENT_FAILURE_STATUSES = ["blocked", "cancelled"] as const;
 const ACTIVITY_GATE_IGNORED_ACTIONS = [
@@ -689,6 +697,45 @@ export function routineService(
   const heartbeat = deps.heartbeat ?? heartbeatService(db, {
     pluginWorkerManager: deps.pluginWorkerManager,
   });
+  const lockConnections = routineLockConnections.get(db) ?? { active: 0 };
+  routineLockConnections.set(db, lockConnections);
+
+  async function withRoutineTransaction<T>(
+    routineId: string,
+    companyId: string,
+    work: (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => Promise<T>,
+  ): Promise<T> {
+    const deadline = Date.now() + ROUTINE_LOCK_WAIT_MS;
+    for (;;) {
+      if (lockConnections.active < MAX_ROUTINE_LOCK_CONNECTIONS) {
+        lockConnections.active += 1;
+        let lockAcquired = false;
+        try {
+          // Lock holders must not pin the shared pool needed by issue creation
+          // and heartbeat enqueueing, even when different routines run together.
+          return await withDedicatedDbConnection(db, (lockDb) => lockDb.transaction(async (tx) => {
+            await tx.execute(sql`
+              select id from ${routines}
+              where ${routines.id} = ${routineId} and ${routines.companyId} = ${companyId}
+              for update nowait
+            `);
+            lockAcquired = true;
+            return work(tx);
+          }), { applicationName: "paperclip-routine-lock" });
+        } catch (error) {
+          // Never replay work or an ambiguous commit; only a failed initial lock.
+          if (lockAcquired || !isLockNotAvailable(error)) throw error;
+        } finally {
+          lockConnections.active -= 1;
+        }
+      }
+      if (Date.now() >= deadline) {
+        logger.warn({ routineId, companyId }, "routine lock wait timed out");
+        throw conflict("Routine is busy; retry the request");
+      }
+      await new Promise((resolve) => setTimeout(resolve, ROUTINE_LOCK_RETRY_MS));
+    }
+  }
 
   async function getRoutineById(id: string) {
     if (!isRoutineUuidInput(id)) return null;
@@ -1418,11 +1465,8 @@ export function routineService(
     rejectIdempotencyReplay?: boolean;
   }) {
     const triggeredAt = new Date();
-    const run = await db.transaction(async (tx) => {
+    const run = await withRoutineTransaction(input.routine.id, input.routine.companyId, async (tx) => {
       const txDb = tx as unknown as Db;
-      await tx.execute(
-        sql`select id from ${routines} where ${routines.id} = ${input.routine.id} and ${routines.companyId} = ${input.routine.companyId} for update`,
-      );
 
       if (input.trigger && (input.source === "webhook" || input.source === "schedule")) {
         const currentTrigger = await txDb.select().from(routineTriggers).where(eq(routineTriggers.id, input.trigger.id)).then((rows) => rows[0]);
@@ -1797,11 +1841,8 @@ export function routineService(
       description,
     });
     let reusedExistingRun = false;
-    const run = await db.transaction(async (tx) => {
+    const run = await withRoutineTransaction(input.routine.id, input.routine.companyId, async (tx) => {
       const txDb = tx as unknown as Db;
-      await tx.execute(
-        sql`select id from ${routines} where ${routines.id} = ${input.routine.id} and ${routines.companyId} = ${input.routine.companyId} for update`,
-      );
 
       if (input.trigger && (input.source === "webhook" || input.source === "schedule")) {
         const currentTrigger = await txDb.select().from(routineTriggers).where(eq(routineTriggers.id, input.trigger.id)).then((rows) => rows[0]);
@@ -2333,9 +2374,8 @@ export function routineService(
       if (!responsibleUserId) {
         throw unprocessable("Routine requires a responsible user");
       }
-      const updatedRoutine = await db.transaction(async (tx) => {
+      const updatedRoutine = await withRoutineTransaction(id, existing.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
-        await tx.execute(sql`select id from ${routines} where ${routines.id} = ${id} for update`);
         const locked = await txDb
           .select()
           .from(routines)
@@ -2487,9 +2527,8 @@ export function routineService(
         };
       }
 
-      const { trigger, revision } = await db.transaction(async (tx) => {
+      const { trigger, revision } = await withRoutineTransaction(routine.id, routine.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
-        await tx.execute(sql`select id from ${routines} where ${routines.id} = ${routine.id} for update`);
         const [createdTrigger] = await txDb
           .insert(routineTriggers)
           .values({
@@ -2561,9 +2600,8 @@ export function routineService(
         }
       }
 
-      const result = await db.transaction(async (tx) => {
+      const result = await withRoutineTransaction(existing.routineId, existing.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
-        await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existing.routineId} for update`);
         const [updated] = await txDb
           .update(routineTriggers)
           .set({
@@ -2600,9 +2638,8 @@ export function routineService(
     deleteTrigger: async (id: string, actor: Actor = {}): Promise<{ deleted: boolean; revision: RoutineRevision | null }> => {
       const existing = await getTriggerById(id);
       if (!existing) return { deleted: false, revision: null };
-      const result = await db.transaction(async (tx) => {
+      const result = await withRoutineTransaction(existing.routineId, existing.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
-        await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existing.routineId} for update`);
         await txDb.delete(routineTriggers).where(eq(routineTriggers.id, id));
         const routine = await txDb
           .select()
@@ -2640,9 +2677,8 @@ export function routineService(
 
       const secretValue = crypto.randomBytes(24).toString("hex");
       await secretsSvc.rotate(existing.secretId, { value: secretValue }, actor);
-      const { trigger, revision } = await db.transaction(async (tx) => {
+      const { trigger, revision } = await withRoutineTransaction(existing.routineId, existing.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
-        await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existing.routineId} for update`);
         const [updated] = await txDb
           .update(routineTriggers)
           .set({
@@ -2718,9 +2754,8 @@ export function routineService(
       const routineSnapshot = snapshot.routine;
       await assertRestorableAssignee(existingRoutine.companyId, routineSnapshot.assigneeAgentId, actor);
 
-      const result = await db.transaction(async (tx) => {
+      const result = await withRoutineTransaction(existingRoutine.id, existingRoutine.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
-        await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existingRoutine.id} for update`);
         const locked = await txDb
           .select()
           .from(routines)
@@ -2927,13 +2962,12 @@ export function routineService(
     }) => {
       // Serialize setup completion with authentication and receipt persistence. A
       // delivery is classified exactly once, before any dispatch can occur.
-      const accepted = await db.transaction(async (tx) => {
+      const found = await db.select().from(routineTriggers)
+        .where(and(eq(routineTriggers.publicId, publicId), eq(routineTriggers.kind, "webhook")))
+        .then((rows) => rows[0] ?? null);
+      if (!found) throw notFound("Routine trigger not found");
+      const accepted = await withRoutineTransaction(found.routineId, found.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
-        const found = await txDb.select().from(routineTriggers)
-          .where(and(eq(routineTriggers.publicId, publicId), eq(routineTriggers.kind, "webhook")))
-          .then((rows) => rows[0] ?? null);
-        if (!found) throw notFound("Routine trigger not found");
-        await tx.execute(sql`select id from ${routines} where ${routines.id} = ${found.routineId} for update`);
         const trigger = await txDb.select().from(routineTriggers).where(eq(routineTriggers.id, found.id)).then((rows) => rows[0]);
         if (!trigger || trigger.archived) throw notFound("Routine trigger not found");
         const routine = await txDb.select().from(routines).where(eq(routines.id, trigger.routineId)).then((rows) => rows[0]);

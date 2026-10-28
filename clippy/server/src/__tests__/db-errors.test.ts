@@ -1,7 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { isUniqueViolation } from "../db-errors.js";
+import { isLockNotAvailable, isUniqueViolation } from "../db-errors.js";
 
 const CONSTRAINT = "issues_open_routine_execution_uq";
+
+describe("isLockNotAvailable", () => {
+  it("recognizes direct and Drizzle-wrapped lock contention", () => {
+    expect(isLockNotAvailable({ code: "55P03" })).toBe(true);
+    expect(isLockNotAvailable(new Error("Failed query", { cause: { code: "55P03" } }))).toBe(true);
+  });
+
+  it("does not mistake other database failures for retryable contention", () => {
+    expect(isLockNotAvailable({ cause: { code: "57014" } })).toBe(false);
+    expect(isLockNotAvailable({ cause: { code: "23505" } })).toBe(false);
+    expect(isLockNotAvailable(null)).toBe(false);
+    const looped: { cause?: unknown } = {};
+    looped.cause = looped;
+    expect(isLockNotAvailable(looped)).toBe(false);
+  });
+});
 
 describe("isUniqueViolation", () => {
   it("matches a bare postgres.js unique violation", () => {

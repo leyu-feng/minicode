@@ -231,6 +231,16 @@ DATABASE_MAX_LIFETIME_SECONDS=1800   # recycle a pooled connection after this lo
 DATABASE_APPLICATION_NAME=paperclip  # application_name in pg_stat_activity; default: paperclip
 ```
 
+Routine row-lock transactions use separate, short-lived connections so they do
+not occupy the shared pool needed for issue creation and heartbeat enqueueing.
+Each shared database handle admits at most two of these connections at once,
+across its routine service instances; replicas each have their own bound.
+They inherit the database authentication and client settings and appear as
+`paperclip-routine-lock` in `pg_stat_activity`. Connections close after each
+attempt. Admission and contended row locks wait outside transactions for up to
+30 seconds, then return HTTP 409. Only the initial lock acquisition is retried,
+never dispatch work or an uncertain commit.
+
 ### Push the schema
 
 ```sh
