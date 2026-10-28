@@ -11,7 +11,7 @@ import test from "node:test"
 import { createServer } from "node:http"
 import { zipSync } from "fflate"
 import { WebSocketServer } from "ws"
-import { agentPoolServerUrl, loadWorkerCredential, parseWorkerReferences, startAgentPoolWorker } from "../server/agent-pool-worker.js"
+import { agentPoolServerUrl, loadWorkerCredential, parseWorkerCliOptions, parseWorkerReferences, startAgentPoolWorker } from "../server/agent-pool-worker.js"
 import { AgentSession } from "../server/agent-session.js"
 import { createHostedProviderTool, createHostedProviderPostTool } from "../server/hosted-provider.js"
 
@@ -123,6 +123,45 @@ async function harness(t, factory, workerOptions = {}) {
     },
   }
 }
+
+test("paired worker CLI defaults the secret store on and accepts an explicit opt-out", () => {
+  assert.equal(parseWorkerCliOptions(["--server", "https://example.test"]).secretStore, true)
+  assert.equal(parseWorkerCliOptions(["--server", "https://example.test", "--no-secret-store"]).secretStore, false)
+  assert.throws(() => parseWorkerCliOptions(["--no-secret-store", "unexpected"]), /Usage/)
+})
+
+for (const [label, options, expected] of [
+  ["shared starter default (hosted-safe)", {}, false],
+  ["paired enabled", { secretStore: true }, true],
+  ["paired opt-out", { secretStore: false }, false],
+]) {
+  test(`worker assignment secret store: ${label}`, async t => {
+    const sessions = []
+    class Session extends EventEmitter {
+      async write() { return { exitCode: 0 } }
+      interrupt() {}
+      dispose() {}
+    }
+    const fixture = await harness(t, value => { sessions.push(value); return new Session() }, options)
+    const peer = await fixture.welcome(0)
+    await executeTask(peer, { runId: randomUUID(), agent })
+    assert.equal(sessions[0].interactiveSecretStore, expected)
+  })
+}
+
+test("paired worker passes its signed-in user to the assignment", async t => {
+  const sessions = []
+  class Session extends EventEmitter {
+    async write() { return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const entraSession = { user: () => "worker@example.com", token: () => "fixture" }
+  const fixture = await harness(t, options => { sessions.push(options); return new Session() }, { entraSession })
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, { runId: randomUUID(), agent })
+  assert.equal(sessions[0].signedInUpn, "worker@example.com")
+})
 
 test("worker passes an explicit resource Azure CLI context to assignment sessions", async t => {
   const sessions = []
@@ -340,9 +379,11 @@ for (const explicitRole of [true, false]) for (const [providerEnabled, postEnabl
         assert.doesNotMatch(this.options.instructions, /Hosted harness capability: provider_read/)
       }
       if (postEnabled) {
+        assert.match(this.options.instructions, /Failed or succeededWithIssues pipeline stage retries/)
         assert.match(this.options.instructions, /explicitly authorized without per-retry human approval/)
         assert.match(this.options.instructions, /Never retry a stage whose observed attempt is greater than 5/)
         assert.match(this.options.instructions, /Never blindly replay the request/)
+        assert.match(this.options.instructions, /Only a confirmed newer failed or succeededWithIssues attempt/)
         await this.options.tools.find(tool => tool.name === "provider_post").execute({
           path: "/v1/builds/123/stages/c952ca9e-c683-5349-c7b6-e858fdfdd2c1/retry", body: { expectedAttempt: 2 },
         })

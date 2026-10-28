@@ -16,6 +16,14 @@ not Windows PowerShell 5.1; there is no automatic fallback. The agent's shell
 guidance matches that runtime, so commands do not need a nested PowerShell
 wrapper. On other platforms, command execution continues to use Bash.
 
+## Signed-in user for skills
+
+Agent shell tools receive `MINICODE_AGENT_USER_UPN` when the harness knows an Entra user: the authenticated paired-worker session takes precedence, otherwise an explicitly configured and verified Azure model user is used. Hosted assignments do not receive this identity. It is absent for API-key, managed-identity, GitHub Copilot, and Azure profiles without a known user. The harness removes inherited values and supplies its own for each invocation; tools should treat it as read-only identity metadata, not a credential or proof of authorization. A subprocess can alter its own environment, so it is not a security boundary. Restart Minicode or the worker to load changes.
+
+## Process-memory secret store
+
+Interactive CLI REPL and web agent sessions provide shell commands a capability for a bounded in-memory store shared among sessions in the same Minicode process. Paired Devbox workers started with `minicode worker` enable the store by default and share it across that worker process's assignments; pass `--no-secret-store` to disable it. Hosted workers and one-shot CLI commands do not receive the capability. Helpers can reuse credentials across subprocesses without printing them or saving them to disk. Entries expire eight hours after their last write and disappear when the process exits; separate Minicode processes do not share them. The store is not a security boundary: arbitrary commands with the inherited capability and other same-user processes may access its values. Do not use it with untrusted tools or assume per-session isolation. Tool authors must avoid writing secrets to stdout, stderr, arguments, files, or logs. The Academy EngHub skill provides an example client.
+
 ## Managed Hosted runtime
 
 Hosted sessions relay bounded, secret-redacted activity to the parent for the
@@ -121,8 +129,8 @@ Hosted sessions receive `provider_post` and advertise `provider_post_v1`.
 The tool accepts only `{path, body}`, binds the admitted run privately, and
 forwards a JSON object of at most 8 KiB. Routes and body schema remain
 provider-owned; the trusted parent validates and authorizes the operation.
-Engsys advertises only failed-stage retries, requiring the stage UUID and
-observed `expectedAttempt` from 1 to 5 inclusive; observed attempts greater than
+Engsys advertises only failed or succeededWithIssues stage retries, requiring
+the stage UUID and observed `expectedAttempt` from 1 to 5 inclusive; observed attempts greater than
 5 cannot be retried. Those retries may rerun deployment jobs and are
 authorized without per-retry human approval; no other deployment or provider
 write is implied. Other providers must supply their own task authorization.
@@ -131,7 +139,8 @@ Timeouts, cancellations and connection failures can leave a mutation outcome
 unknown: inspect live state with `provider_read` before considering another
 request, and report a blocker when the outcome cannot be established.
 Tracked stage reads can lag ADO; never repeat an uncertain stage retry at the
-same observed attempt. Only a confirmed newer failed attempt permits another retry.
+same observed attempt. Only a confirmed newer failed or succeededWithIssues
+attempt permits another retry.
 
 The provider must bound response sizes and request durations. Small JSON is included in the
 tool result; binary responses and larger JSON can be read from the returned artifact

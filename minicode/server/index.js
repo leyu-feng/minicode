@@ -141,7 +141,7 @@ function appendBuffer(entry, text) {
 function createSession(sessionId, kind, cwd, cols, rows) {
   const session =
     kind === "agent"
-      ? new AgentSession({ id: sessionId, cwd })
+      ? new AgentSession({ id: sessionId, cwd, interactiveSecretStore: true })
       : kind === "pi"
         ? new PiSession({ id: sessionId, cwd, cols, rows })
         : new ShellSession({ id: sessionId, cwd })

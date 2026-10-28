@@ -59,6 +59,7 @@ Options:
   --tenant <id>           Select the Entra tenant (with 'auth add --entra-user')
   --clippy-auth <cli.js>  Override the Easy Auth helper (with 'worker' only)
   --tool-azure-config-dir <absolute-dir>  Azure CLI context for worker shell tools
+  --no-secret-store       Disable process-memory secrets for paired workers
   --worker-shared <dir>   Worker read-only shared folder (default: sibling worker_shared)
   --reference-repo [<branch>@]<name>=<dir>  Attach a synced read-only reference checkout (repeatable)
   --workspace-mode <mode>  worktree (default): clean worker-agent siblings; clone: legacy per-agent clones
@@ -334,7 +335,7 @@ const cwd = path.resolve(options.repoRoot || process.env.MINICODE_REPO_ROOT || p
 
 // The same session class the web portal drives, so the CLI and the browser
 // share one agent implementation.
-const session = new AgentSession({ id: "cli", cwd })
+const session = new AgentSession({ id: "cli", cwd, interactiveSecretStore: !options.positional.join(" ").trim() })
 
 session.on("output", ({ stream, data }) => {
   // AgentSession emits terminal-style CRLF for xterm.js; normalise for a TTY.

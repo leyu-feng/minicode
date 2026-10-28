@@ -672,6 +672,6 @@ export async function resolveModelConfig() {
     getAccessToken,
     model: process.env.OPENCODE_MODEL || process.env.AZURE_OPENAI_MODEL || deployment.model,
     user: deployment.user || "login@az.cli",
-    ...(deployment.azureConfigDir ? { azureConfigDir: deployment.azureConfigDir } : {}),
+    ...(deployment.azureConfigDir ? { azureConfigDir: deployment.azureConfigDir, signedInUpn: deployment.user } : {}),
   }
 }
