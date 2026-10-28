@@ -124,6 +124,23 @@ async function harness(t, factory, workerOptions = {}) {
   }
 }
 
+test("worker passes an explicit resource Azure CLI context to assignment sessions", async t => {
+  const sessions = []
+  class Session extends EventEmitter {
+    async write() { return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, options => { sessions.push(options); return new Session() },
+    { toolAzureConfigDir: os.tmpdir() })
+  const peer = await fixture.welcome(0)
+  await waitUntil(() => peer.messages.some(message => message.type === "ready"))
+  await executeTask(peer, { runId: "azure-context", agent })
+  assert.equal(sessions[0].toolAzureConfigDir, os.tmpdir())
+  await assert.rejects(startAgentPoolWorker({ ...fixture.options, toolAzureConfigDir: "relative" }), /absolute/)
+  await assert.rejects(startAgentPoolWorker({ ...fixture.options, toolAzureConfigDir: path.join(os.tmpdir(), randomUUID()) }), /ENOENT/)
+})
+
 test("Academy failure capture completes before reporting the original failed result and includes only structured evidence", async t => {
   const evidence = []
   let release

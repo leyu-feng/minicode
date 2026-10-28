@@ -58,6 +58,7 @@ Options:
   --entra-user <upn>      Sign in with an isolated Azure CLI identity (with 'auth add')
   --tenant <id>           Select the Entra tenant (with 'auth add --entra-user')
   --clippy-auth <cli.js>  Override the Easy Auth helper (with 'worker' only)
+  --tool-azure-config-dir <absolute-dir>  Azure CLI context for worker shell tools
   --worker-shared <dir>   Worker read-only shared folder (default: sibling worker_shared)
   --reference-repo [<branch>@]<name>=<dir>  Attach a synced read-only reference checkout (repeatable)
   --workspace-mode <mode>  worktree (default): clean worker-agent siblings; clone: legacy per-agent clones
