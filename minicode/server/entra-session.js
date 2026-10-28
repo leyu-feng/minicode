@@ -133,6 +133,7 @@ export function createEntraSession({
 
   return {
     token: () => current?.sessionToken ?? "",
+    user: () => current?.user ?? null,
     async ensure() {
       const saved = await readSavedSession(server, user)
       current = usable(saved) ? saved : await this.renew()

@@ -51,6 +51,71 @@ test("without a tool override the model Azure context remains the shell default"
   assert.equal(shellEnv.AZURE_CONFIG_DIR, "model-context")
 })
 
+test("tool identity is sourced from the harness, not inherited environment", async t => {
+  const outputs = []
+  const actions = []
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] })
+  t.mock.method(childProcess, "spawn", (_file, _args, options) => {
+    outputs.push(options.env)
+    const proc = new EventEmitter()
+    proc.stdout = new EventEmitter()
+    proc.stderr = new EventEmitter()
+    queueMicrotask(() => proc.emit("close", 0))
+    return proc
+  })
+  const sessions = [
+    new AgentSession({ id: "model-user", cwd: process.cwd(), env: { MINICODE_AGENT_USER_UPN: "spoof@example.com" } }),
+    new AgentSession({ id: "worker-user", cwd: process.cwd(), signedInUpn: "worker@example.com" }),
+    new AgentSession({ id: "no-user", cwd: process.cwd(), env: { minicode_agent_user_upn: "spoof@example.com" } }),
+    new AgentSession({ id: "hosted", cwd: process.cwd(), signedInUpn: "" }),
+  ]
+  t.after(() => sessions.forEach(session => session.dispose()))
+  for (const [index, session] of sessions.entries()) {
+    session.config = { api: "chat-completions", endpoint: "https://example.test", apiKey: "fixture", model: "fixture",
+      ...(index !== 2 ? { signedInUpn: "model@example.com" } : {}) }
+    actions.push({ type: "tool", command: "echo fixture" }, { type: "final", message: "done" })
+    assert.equal((await session.write("Check identity")).exitCode, 0)
+  }
+  assert.equal(outputs[0].MINICODE_AGENT_USER_UPN, "model@example.com")
+  assert.equal(outputs[1].MINICODE_AGENT_USER_UPN, "worker@example.com")
+  assert.equal(outputs[2].MINICODE_AGENT_USER_UPN, undefined)
+  assert.equal(outputs[2].minicode_agent_user_upn, undefined)
+  assert.equal(outputs[3].MINICODE_AGENT_USER_UPN, undefined)
+})
+
+test("secret store is opt-in for interactive sessions and inherited capabilities are stripped otherwise", async t => {
+  const outputs = []
+  const actions = []
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] })
+  t.mock.method(childProcess, "spawn", (_file, _args, options) => {
+    outputs.push(options.env)
+    const proc = new EventEmitter()
+    proc.stdout = new EventEmitter()
+    proc.stderr = new EventEmitter()
+    queueMicrotask(() => proc.emit("close", 0))
+    return proc
+  })
+  const inherited = { MINICODE_SECRET_STORE_PORT: "1234", MINICODE_SECRET_STORE_CAPABILITY: "inherited", OTHER_SETTING: "kept" }
+  const sessions = [
+    new AgentSession({ id: "worker", cwd: process.cwd(), env: inherited }),
+    new AgentSession({ id: "interactive-1", cwd: process.cwd(), env: inherited, interactiveSecretStore: true }),
+    new AgentSession({ id: "interactive-2", cwd: process.cwd(), env: inherited, interactiveSecretStore: true }),
+  ]
+  t.after(() => sessions.forEach(session => session.dispose()))
+  for (const session of sessions) {
+    session.config = { api: "chat-completions", endpoint: "https://example.test", apiKey: "fixture", model: "fixture" }
+    actions.push({ type: "tool", command: "echo fixture" }, { type: "final", message: "done" })
+    assert.equal((await session.write("Check store")).exitCode, 0)
+  }
+  assert.equal(outputs[0].MINICODE_SECRET_STORE_PORT, undefined)
+  assert.equal(outputs[0].MINICODE_SECRET_STORE_CAPABILITY, undefined)
+  assert.equal(outputs[0].OTHER_SETTING, "kept")
+  assert.match(outputs[1].MINICODE_SECRET_STORE_CAPABILITY, /^[a-f0-9]{64}$/)
+  assert.notEqual(outputs[1].MINICODE_SECRET_STORE_CAPABILITY, "inherited")
+  assert.equal(outputs[1].MINICODE_SECRET_STORE_CAPABILITY, outputs[2].MINICODE_SECRET_STORE_CAPABILITY)
+  assert.equal(outputs[1].MINICODE_SECRET_STORE_PORT, outputs[2].MINICODE_SECRET_STORE_PORT)
+})
+
 afterEach(() => {
   globalThis.fetch = originalFetch
 })
