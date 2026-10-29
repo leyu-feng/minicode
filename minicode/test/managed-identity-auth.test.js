@@ -60,6 +60,23 @@ test("managed identity validates configuration instead of prompting or falling b
   await assert.rejects(resolveModelConfig(), /requires AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_MODEL/)
 })
 
+test("managed identity uses separate cached model and management tokens for the same identity", async t => {
+  configure(t)
+  const scopes = []
+  t.mock.method(ManagedIdentityCredential.prototype, "getToken", async scope => {
+    scopes.push(scope)
+    return { token: `fixture-${scope}`, expiresOnTimestamp: Date.now() + 3600_000 }
+  })
+  const config = await resolveModelConfig()
+  await config.getManagementAccessToken()
+  await config.getManagementAccessToken()
+  await config.getAccessToken()
+  assert.deepEqual(scopes, [
+    "https://cognitiveservices.azure.com/.default",
+    "https://management.azure.com/.default",
+  ])
+})
+
 test("managed identity errors and invalid tokens are surfaced without Azure CLI fallback", async t => {
   configure(t)
   const getToken = t.mock.method(ManagedIdentityCredential.prototype, "getToken", async () => {

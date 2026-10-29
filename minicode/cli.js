@@ -81,7 +81,8 @@ REPL commands:
   cls, clear         Clear the screen and forget the conversation
   /clear             Forget the conversation so far
   /cwd               Show the working directory
-  /model             Show the active model
+  /model, /models    List available models with their numbers
+  /model <number|name>  Switch this session's model (also /models)
 
 Ctrl+C cancels the current turn; Ctrl+C at an empty prompt exits.
 
@@ -416,13 +417,6 @@ async function runRepl() {
       rl.prompt()
       continue
     }
-    if (value === "/model") {
-      const active = session.config || config
-      console.log(`${C.dim}${active.deployment || "API key"} · ${active.model} · ${active.user || "API key"}${C.reset}`)
-      rl.prompt()
-      continue
-    }
-
     rl.pause()
     await runTurn(value)
     rl.resume()

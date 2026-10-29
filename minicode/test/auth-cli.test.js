@@ -8,6 +8,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import vm from "node:vm"
 import test from "node:test"
+import WebSocket from "ws"
 
 const CLI = fileURLToPath(new URL("../cli.js", import.meta.url))
 const SERVER = fileURLToPath(new URL("../server/index.js", import.meta.url))
@@ -151,6 +152,9 @@ globalThis.fetch = async (url, init) => {
     if (init.headers.Authorization !== "Bearer fixture-api-token" || init.headers["x-initiator"] !== "user") {
       throw new Error("Incorrect Copilot model authorization")
     }
+    if (process.env.FIXTURE_EXPECTED_MODEL && JSON.parse(init.body).model !== process.env.FIXTURE_EXPECTED_MODEL) {
+      throw new Error("Session model did not switch")
+    }
     data = { output_text: "Copilot fixture reply" }
   } else throw new Error("Unexpected fixture URL: " + url)
   return new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } })
@@ -178,7 +182,16 @@ globalThis.fetch = async (url, init) => {
   assert.equal(JSON.parse(saved)["github-copilot"].model, "gpt-5.4")
   assert.match(await app.cli(["--copilot", "--no-tools", "hello"]), /Copilot fixture reply/)
   assert.match(await app.cli(["--auth", "@copilot", "--no-tools", "hello"]), /Copilot fixture reply/)
-  assert.ok((await app.cli(["--auth", "@copilot"], "/model\nexit\n")).includes(label))
+  app.env.FIXTURE_EXPECTED_MODEL = "catalog-choice"
+  const repl = await app.cli(["--auth", "@copilot"],
+    "/model\n/model 02\nSay hello\n/models\n/models gpt-5.4\nexit\n")
+  delete app.env.FIXTURE_EXPECTED_MODEL
+  assert.ok(repl.includes(label))
+  assert.match(repl, /01 gpt-5\.4 \(current\)\r?\n02 catalog-choice/)
+  assert.match(repl, /01 gpt-5\.4\r?\n02 catalog-choice \(current\)/)
+  assert.match(repl, /Model switched to catalog-choice/)
+  assert.match(repl, /Copilot fixture reply/)
+  assert.match(repl, /Model switched to gpt-5\.4/)
   if (process.platform === "win32") {
     const result = await app.start(LAUNCHER, ["--copilot", "--no-tools", "hello"]).closed
     assert.equal(result.code, 0, result.output)
@@ -195,6 +208,33 @@ globalThis.fetch = async (url, init) => {
   assert.equal(info.deployment, "@copilot")
   assert.equal(info.model, "gpt-5.4")
   assert.equal(info.user, "octocat@github.com")
+  const socket = new WebSocket(origin.replace("http:", "ws:"))
+  t.after(() => socket.close())
+  await once(socket, "open")
+  const events = []
+  socket.on("message", raw => events.push(JSON.parse(raw)))
+  async function sendAndWait(payload, type) {
+    const received = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { socket.off("message", listener); reject(new Error(`Missing ${type}`)) }, 3000)
+      function listener(raw) {
+        const event = JSON.parse(raw)
+        if (event.type !== type) return
+        clearTimeout(timer)
+        socket.off("message", listener)
+        resolve(event)
+      }
+      socket.on("message", listener)
+    })
+    socket.send(JSON.stringify({ sessionId: "model-pane", ...payload }))
+    return received
+  }
+  await sendAndWait({ type: "create", kind: "agent" }, "ready")
+  await sendAndWait({ type: "input", data: "/model 02" }, "done")
+  assert.deepEqual(events.filter(event => event.type === "model").map(event => event.model), ["gpt-5.4", "catalog-choice"])
+  const restored = await sendAndWait({ type: "create", kind: "agent" }, "ready")
+  assert.equal(restored.restored, true)
+  assert.equal(restored.model, "catalog-choice")
+  assert.equal((await (await fetch(`${origin}/api/info`)).json()).model, "gpt-5.4")
   assert.ok(!JSON.stringify(info).includes("fixture-secret"))
   assert.equal(await fs.readFile(file, "utf8"), saved)
   for (const args of [
@@ -241,14 +281,40 @@ test("web API and toolbar show the selected UPN or Azure CLI marker without obta
     const info = await response.json()
     assert.equal(info.user, user)
     const repoEl = {}
-    await vm.runInNewContext(source, {
+    const listeners = {}
+    const context = vm.createContext({
       window: { Terminal: {}, FitAddon: { FitAddon: {} }, addEventListener() {} },
       document: { getElementById: () => repoEl, querySelectorAll: () => [] },
       fetch: async () => ({ json: async () => info }),
       location: { host: new URL(origin).host },
-      WebSocket: class { addEventListener() {} },
+      WebSocket: class { addEventListener(type, listener) { listeners[type] = listener } },
     })
+    await vm.runInContext(source, context)
     assert.equal(repoEl.textContent, `${info.repoRoot} · ${info.deployment} · ${info.model} · ${user}`)
+    vm.runInContext(`
+      for (const id of ["first", "second"]) panes.set(id, {
+        id, kind: "agent", el: { classList: { toggle() {} } },
+        fit: { fit() {} }, term: { focus() {} },
+      })
+      focusPane("first")
+    `, context)
+    const modelMessage = (id, model) => listeners.message({ data: JSON.stringify({ type: "model", sessionId: id, model }) })
+    modelMessage("first", "selected-model")
+    assert.equal(repoEl.textContent, `${info.repoRoot} · ${info.deployment} · selected-model · ${user}`)
+    modelMessage("second", "other-model")
+    assert.ok(repoEl.textContent.includes(" · selected-model · "))
+    vm.runInContext('focusPane("second")', context)
+    assert.ok(repoEl.textContent.includes(" · other-model · "))
+    vm.runInContext('focusPane("first")', context)
+    assert.ok(repoEl.textContent.includes(" · selected-model · "))
+    vm.runInContext(`
+      panes.get("first").raw = true
+      panes.get("first").header = { querySelector: () => ({}) }
+      panes.get("first").term.write = () => {}
+      panes.get("first").term.options = {}
+    `, context)
+    listeners.message({ data: JSON.stringify({ type: "ready", sessionId: "first", model: "restored-model", cwd: info.repoRoot, restored: true }) })
+    assert.ok(repoEl.textContent.includes(" · restored-model · "))
     assert.ok(!JSON.stringify(info).includes("fixture-secret"))
   }
   await assertDisplay("alice@contoso.com")

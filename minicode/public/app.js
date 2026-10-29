@@ -12,6 +12,14 @@ let paneCounter = 0
 let socket = null
 let started = false
 let repoRoot = ""
+let serverInfo = null
+
+function updateToolbar() {
+  if (!serverInfo) return
+  const pane = panes.get(focusedId)
+  const model = pane?.kind === "agent" && pane.model ? pane.model : serverInfo.model
+  repoEl.textContent = `${serverInfo.repoRoot} · ${serverInfo.deployment} · ${model} · ${serverInfo.user}`
+}
 
 const THEME = {
   background: "#010409",
@@ -104,6 +112,7 @@ function removePane(paneId) {
     layout = null
     render()
     focusedId = null
+    updateToolbar()
     saveState()
     return
   }
@@ -204,6 +213,7 @@ function focusPane(paneId) {
   focusedId = paneId
   panes.forEach((pane) => pane.el.classList.toggle("focused", pane.id === paneId))
   const pane = panes.get(paneId)
+  updateToolbar()
   if (pane) {
     fitPane(pane)
     pane.term.focus()
@@ -827,6 +837,8 @@ function connect() {
     if (!pane) return
 
     if (message.type === "ready") {
+      pane.model = message.model
+      updateToolbar()
       pane.cwd = message.cwd
       pane.header.querySelector(".pane-title").textContent = message.cwd
       pane.term.reset?.()
@@ -860,6 +872,12 @@ function connect() {
       if (pane.busy) pane.term.write("\u001b[90mstill working…\u001b[0m\r\n")
       else prompt(pane)
       saveState()
+      return
+    }
+
+    if (message.type === "model") {
+      pane.model = message.model
+      updateToolbar()
       return
     }
 
@@ -940,6 +958,7 @@ fetch("/api/info")
   .then((res) => res.json())
   .then((info) => {
     repoRoot = info.repoRoot
-    repoEl.textContent = `${info.repoRoot} · ${info.deployment} · ${info.model} · ${info.user}`
+    serverInfo = info
+    updateToolbar()
   })
   .finally(connect)

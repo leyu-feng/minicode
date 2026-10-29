@@ -22,9 +22,120 @@ import {
   setActiveAuth,
   resolveModelConfig,
   loginActiveDeployment,
+  listAvailableModels,
 } from "../server/auth.js"
 
 let configHome
+
+test("model discovery uses the current provider endpoint and credentials", async t => {
+  const config = {
+    api: "responses", endpoint: "https://resource.test/openai/v1/responses?api-version=fixture",
+    model: "current", getAccessToken: async () => "fixture-token", headers: { "X-Provider": "fixture" },
+  }
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    assert.equal(String(url), "https://resource.test/openai/v1/models?api-version=fixture")
+    assert.equal(options.headers.Authorization, "Bearer fixture-token")
+    assert.equal(options.headers["X-Provider"], "fixture")
+    return Response.json({ data: [{ id: "gpt-6.1-sol" }, { id: "kimi-k3" }, { id: "kimi-k3" }, {}, { id: "\u001b[31m" }] })
+  })
+  assert.deepEqual(await listAvailableModels(config), [
+    { id: "gpt-6.1-sol", api: "responses", endpoint: config.endpoint },
+    { id: "kimi-k3", api: "responses", endpoint: config.endpoint },
+  ])
+  assert.equal(config.model, "current")
+})
+
+test("Copilot discovery filters unavailable models and selects each model's API", async t => {
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    assert.equal(String(url), "https://api.githubcopilot.com/models")
+    assert.equal(options.headers.Authorization, "Bearer fixture-key")
+    return Response.json({ data: [
+      { id: "gpt-6.1-sol", supported_endpoints: ["/responses"] },
+      { id: "kimi-k3", supported_endpoints: ["/chat/completions"] },
+      { id: "disabled", policy: { state: "disabled" } },
+      { id: "hidden", model_picker_enabled: false },
+      { id: "unsupported", supported_endpoints: ["/embeddings"] },
+    ] })
+  })
+
+  assert.deepEqual(await listAvailableModels({
+    provider: "github-copilot", api: "responses", apiKey: "fixture-key",
+    endpoint: "https://api.githubcopilot.com/responses",
+  }), [
+    { id: "gpt-6.1-sol", api: "responses", endpoint: "https://api.githubcopilot.com/responses" },
+    { id: "kimi-k3", api: "chat-completions", endpoint: "https://api.githubcopilot.com/chat/completions" },
+  ])
+})
+
+test("Azure discovery lists deployed names, filters non-chat models, and follows pagination", async t => {
+  const resourceId = "/subscriptions/sub/resourceGroups/group/providers/Microsoft.CognitiveServices/accounts/resource"
+  const requests = []
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    const target = new URL(url)
+    requests.push(target.href)
+    if (target.hostname === "resource.services.ai.azure.com") {
+      assert.equal(options.headers.Authorization, "Bearer model-token")
+      return Response.json({ data: [
+        { id: "gpt-6.1-sol", capabilities: { chat_completion: true } },
+        { id: "Kimi-K3", capabilities: { chat_completion: true } },
+        { id: "image-model", capabilities: { chat_completion: false } },
+      ] })
+    }
+    assert.equal(target.origin, "https://management.azure.com")
+    assert.equal(options.headers.Authorization, "Bearer management-token")
+    if (target.pathname.includes("ResourceGraph")) {
+      assert.equal(options.method, "POST")
+      assert.match(JSON.parse(options.body).query, /name =~ 'resource'/)
+      return Response.json({ data: [{ id: resourceId }] })
+    }
+    if (target.searchParams.has("page")) {
+      return Response.json({ value: [
+        { name: "kimi-k3", properties: { provisioningState: "Succeeded", model: { name: "Kimi-K3", format: "MoonshotAI" } } },
+      ] })
+    }
+    return Response.json({ value: [
+      { name: "my-gpt", properties: { provisioningState: "Succeeded", model: { name: "gpt-6.1-sol", format: "OpenAI" } } },
+      { name: "failed-gpt", properties: { provisioningState: "Failed", model: { name: "gpt-6.1-sol", format: "OpenAI" } } },
+      { name: "images", properties: { provisioningState: "Succeeded", model: { name: "image-model", format: "OpenAI" } } },
+    ], nextLink: `https://management.azure.com${resourceId}/deployments?page=2` })
+  })
+  assert.deepEqual(await listAvailableModels({
+    api: "responses", endpoint: "https://resource.services.ai.azure.com/openai/v1/responses",
+    getAccessToken: async () => "model-token", getManagementAccessToken: async () => "management-token",
+  }), [
+    { id: "my-gpt", api: "responses", endpoint: "https://resource.services.ai.azure.com/openai/v1/responses" },
+    { id: "kimi-k3", api: "chat-completions", endpoint: "https://resource.services.ai.azure.com/openai/v1/chat/completions" },
+  ])
+  assert.equal(requests.length, 4)
+})
+
+test("Azure discovery reports management access failures without listing undeployed models", async t => {
+  for (const [response, expected] of [
+    [Response.json({ error: "access denied" }, { status: 403 }), /management-plane read access is required/],
+    [Response.json({ data: [] }), /Could not uniquely find Azure resource/],
+  ]) {
+    t.mock.method(globalThis, "fetch", async url => new URL(url).hostname === "resource.test"
+      ? Response.json({ data: [{ id: "undeployed-base-model" }] }) : response)
+    await assert.rejects(listAvailableModels({
+      api: "responses", endpoint: "https://resource.test/openai/v1/responses", apiKey: "fixture",
+      getManagementAccessToken: async () => "management-token",
+    }), expected)
+    t.mock.restoreAll()
+  }
+})
+
+test("model discovery reports provider errors, invalid catalogs, and empty lists", async t => {
+  const config = { api: "chat-completions", endpoint: "https://provider.test/v1/chat/completions", apiKey: "fixture-key" }
+  for (const [response, expected] of [
+    [Response.json({ error: "access denied" }, { status: 403 }), /Could not list models \(HTTP 403\)/],
+    [Response.json({ unexpected: [] }), /invalid model catalog/],
+    [Response.json({ data: [] }), /No available models/],
+  ]) {
+    t.mock.method(globalThis, "fetch", async () => response)
+    await assert.rejects(listAvailableModels(config), expected)
+    t.mock.restoreAll()
+  }
+})
 
 before(async () => {
   configHome = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-auth-test-"))

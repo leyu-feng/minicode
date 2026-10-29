@@ -4,7 +4,7 @@ import path from "node:path"
 import { EventEmitter } from "node:events"
 import { randomUUID } from "node:crypto"
 import { stripVTControlCharacters } from "node:util"
-import { resolveModelConfig } from "./auth.js"
+import { listAvailableModels, resolveModelConfig } from "./auth.js"
 import { killTree } from "./kill-tree.js"
 import { httpErrorInfo, redactSecrets } from "./http-error.js"
 import { secretStoreEnvironment } from "./secret-store.js"
@@ -369,7 +369,7 @@ export function callModelOnce(config, messages) {
  * for the lifetime of the session.
  */
 export class AgentSession extends EventEmitter {
-  constructor({ id, cwd, env, toolAzureConfigDir, signedInUpn, instructions = "", tools = [], modelConfigProvider = resolveModelConfig, captureFailedPrompt = false, interactiveSecretStore = false }) {
+  constructor({ id, cwd, env, toolAzureConfigDir, signedInUpn, instructions = "", tools = [], modelConfigProvider = resolveModelConfig, modelCatalogProvider = listAvailableModels, captureFailedPrompt = false, interactiveSecretStore = false }) {
     super()
     this.id = id
     this.kind = "agent"
@@ -380,6 +380,7 @@ export class AgentSession extends EventEmitter {
     this.interactiveSecretStore = interactiveSecretStore === true
     this.captureFailedPrompt = captureFailedPrompt
     this.modelConfigProvider = modelConfigProvider
+    this.modelCatalogProvider = modelCatalogProvider
     this.tools = new Map()
     for (const tool of tools) {
       if (!/^[a-z][a-z0-9_]*$/.test(tool.name) || this.tools.has(tool.name)
@@ -485,8 +486,30 @@ export class AgentSession extends EventEmitter {
         const config = await this.modelConfigProvider()
         this.#throwIfInactive(run)
         this.config = config
+        this.emit("model", { model: config.model })
       }
       this.#throwIfInactive(run)
+      const modelCommand = /^\/models?(?:\s+(.*))?$/s.exec(prompt)
+      if (modelCommand) {
+        const selection = modelCommand[1]?.trim()
+        if (!selection || !this.availableModels) {
+          const models = await this.modelCatalogProvider(this.config, { signal })
+          this.#throwIfInactive(run)
+          this.availableModels = models
+        }
+        if (!selection) {
+          this.#emitOutput(this.availableModels.map((model, index) =>
+            `${String(index + 1).padStart(2, "0")} ${model.id}${model.id === this.config.model ? " (current)" : ""}\r\n`).join(""))
+        } else {
+          const selected = this.availableModels.find(model => model.id === selection)
+            || (/^\d+$/.test(selection) ? this.availableModels[Number(selection) - 1] : undefined)
+          if (!selected) throw new Error(`Unknown model "${selection}". Use /model to list available models.`)
+          this.config = { ...this.config, model: selected.id, api: selected.api, endpoint: selected.endpoint }
+          this.emit("model", { model: selected.id })
+          this.#emitOutput(`Model switched to ${selected.id}\r\n`)
+        }
+        return result
+      }
       const modelConfig = { ...this.config }
       this.messages.push({ role: "user", content: prompt })
       this.#emitActivity({ kind: "prompt", action: "prompt", summary: prompt })
