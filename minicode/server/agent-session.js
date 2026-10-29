@@ -8,6 +8,7 @@ import { listAvailableModels, resolveModelConfig } from "./auth.js"
 import { killTree } from "./kill-tree.js"
 import { httpErrorInfo, redactSecrets } from "./http-error.js"
 import { secretStoreEnvironment } from "./secret-store.js"
+import { AgentPowerShell } from "./agent-shell.js"
 
 const MAX_TOOL_TURNS = 1000
 const MAX_OUTPUT_CHARS = 12000
@@ -369,12 +370,14 @@ export function callModelOnce(config, messages) {
  * for the lifetime of the session.
  */
 export class AgentSession extends EventEmitter {
-  constructor({ id, cwd, env, toolAzureConfigDir, signedInUpn, instructions = "", tools = [], modelConfigProvider = resolveModelConfig, modelCatalogProvider = listAvailableModels, captureFailedPrompt = false, interactiveSecretStore = false }) {
+  constructor({ id, cwd, env, workerLabel, shellLog, toolAzureConfigDir, signedInUpn, instructions = "", tools = [], modelConfigProvider = resolveModelConfig, modelCatalogProvider = listAvailableModels, captureFailedPrompt = false, interactiveSecretStore = false }) {
     super()
     this.id = id
     this.kind = "agent"
     this.cwd = cwd
     this.env = env
+    this.workerLabel = workerLabel ?? id
+    this.shellLog = shellLog
     this.toolAzureConfigDir = toolAzureConfigDir
     this.signedInUpn = signedInUpn
     this.interactiveSecretStore = interactiveSecretStore === true
@@ -398,14 +401,25 @@ export class AgentSession extends EventEmitter {
     // after the browser has returned to its prompt.
     this.activeRun = null
     this.nextRunId = 0
+    this.shells = new Map()
+    this.shellStateNotices = []
     this.systemPrompt = [
       "You are a practical coding agent.",
       `You are running inside the local working directory ${cwd} and can read and modify project files.`,
       "For coding tasks, inspect files first before answering.",
-      "Use non-destructive read commands like Get-ChildItem, Get-Content, and git --no-pager status/log/diff.",
+      "Use non-destructive read commands like Get-Content and git --no-pager status/log/diff.",
+      "File discovery must be nonrecursive: list only the immediate children of ONE task-relevant folder per request. Never scan the whole workspace or Git tree, or automatically walk every subfolder through repeated shallow listings. Commands have a 120-second limit; narrow the scope instead of retrying a broad scan.",
+      "For repository discovery, use git ls-tree --name-only HEAD for the top level, or git ls-tree --name-only HEAD:<known-folder> for one known folder; never add -r. These list committed Git-managed entries only. Inspect a returned subfolder only when the task or previous results identify it as relevant.",
+      "Do not use git ls-files for discovery: even a directory-scoped pathspec enumerates descendants recursively. Do not use Get-ChildItem -Recurse, ls -R, tree, find, recursive globs, or scripts/tools that recursively enumerate files. Piping a recursive scan into Select-Object -First or head does not make it an acceptable shallow listing.",
+      "Search tracked file contents only in explicitly identified files or direct-child file globs within ONE known folder, for example git grep -n -I -e <pattern> -- ':(top,glob)src/*.js'. Never run unscoped git grep, pass a bare directory pathspec, or use **; these search recursively. Read only the relevant files.",
+      "Do not enumerate untracked or ignored files, node_modules, build output, or .git internals unless the task explicitly requires them; any necessary listing must still be one folder deep and nonrecursive.",
+      "If Git is unavailable, HEAD does not exist, or the directory is not in a Git worktree, report that limitation and list only the immediate children of one task-relevant folder (Get-ChildItem -LiteralPath <folder> without -Recurse on Windows); do not silently fall back to recursive filesystem scans.",
       "Do not claim you cannot access files when the tools below can read them.",
       "Respond ONLY with one JSON object, one of:",
       '{"type":"tool","command":"<shell command>","reason":"<short reason>"}',
+      ...(process.platform === "win32" ? [
+        '{"type":"tool","command":"<Windows PowerShell 5.1-only command>","shell":"powershell-5.1","reason":"<why Windows PowerShell 5.1 is required>"}',
+      ] : []),
       ...(tools.length ? [
         '{"type":"tool","name":"<harness tool name>","arguments":{},"reason":"<short reason>"}',
         `Available harness tools (use their exact argument schemas): ${JSON.stringify(tools.map(({ name, description, parameters }) => ({ name, description, parameters })))}`,
@@ -417,8 +431,10 @@ export class AgentSession extends EventEmitter {
       "To change files, ALWAYS prefer the write/edit actions over shell commands — they take plain strings and need no shell escaping.",
       "Paths are relative to the working directory. For edit, 'find' must appear exactly once (set \"all\":true to replace every occurrence).",
       ...(process.platform === "win32" ? [
-        "Shell commands already execute directly in PowerShell 7 (pwsh.exe -NoProfile -NonInteractive -Command). Do not wrap them in another pwsh/powershell command or switch to Windows PowerShell 5.1.",
+        "PowerShell language mode is detected from $ExecutionContext.SessionState.LanguageMode in each actual shell process, separately for PowerShell 7 and 5.1, and reported in TOOL_RESULT. This is informational: ConstrainedLanguage does not prevent running PowerShell commands, and the harness supports commands in that mode. Until detected, its mode is unknown; never assume FullLanguage. In ConstrainedLanguage, prefer ordinary cmdlets and policy-permitted operations; avoid Add-Type, arbitrary .NET/COM method calls, reflection, or other restricted features. Let PowerShell enforce its policy and report specific command failures, not a blanket inability to use PowerShell. Never change LanguageMode, disable application-control/security policy, or switch shells, hosts, identities or interpreters to evade restrictions.",
+        "Shell commands already execute directly in PowerShell 7 (pwsh.exe -NoProfile -NonInteractive -Command) by default. For a command or module that requires Windows PowerShell 5.1, set shell to \"powershell-5.1\" on that tool action; it runs directly in powershell.exe with the same flags for that command only. Omit shell or use \"powershell-7\" for PowerShell 7. Do not wrap commands in another pwsh/powershell invocation. No automatic shell fallback occurs.",
         "Escape quotes inside PowerShell strings with a backtick (`\"), never a backslash.",
+        "Each PowerShell version has its own persistent process for this conversation. Variables, functions, imported modules, environment changes and current directory persist between commands of that version, not across versions or conversations. Commands run sequentially. If a timeout, cancellation or process exit loses shell state, the harness reports it; re-establish required context rather than assuming it survived.",
       ] : ["Shell commands already execute in bash -lc; use Bash syntax."]),
       // Scheduled tasks outlive the session, so keep every one Minicode creates in one folder the
       // user can review and clean up, and make sure the user hears about it.
@@ -516,6 +532,9 @@ export class AgentSession extends EventEmitter {
 
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         this.#throwIfInactive(run)
+        if (this.shellStateNotices.length) {
+          this.messages.push({ role: "user", content: `SHELL_STATE_NOTICE\n${this.shellStateNotices.splice(0).join("\n")}` })
+        }
         const raw = await callModel(modelConfig, this.messages, this.systemPrompt, signal, turn === 0 ? "user" : "agent",
           message => this.#emitOutput(`\u001b[33m${message}\u001b[0m\r\n`, "stderr"),
           this.captureFailedPrompt ? (body, apiKey) => {
@@ -647,7 +666,10 @@ export class AgentSession extends EventEmitter {
         }
 
         const command = action.command.trim()
-        this.#emitOutput(`\u001b[33m$ ${command}\u001b[0m\r\n`)
+        if (action.shell !== undefined && (process.platform !== "win32" || !["powershell-7", "powershell-5.1"].includes(action.shell))) {
+          throw new Error('Unsupported shell selection. On Windows, use "powershell-7" or "powershell-5.1"; otherwise omit shell.')
+        }
+        this.#emitOutput(`\u001b[33m$ ${action.shell === "powershell-5.1" ? "[Windows PowerShell 5.1] " : ""}${command}\u001b[0m\r\n`)
         const shellEnv = { ...(this.env ?? process.env) }
         // Never propagate a parent process's capability into a worker or an unrelated session.
         for (const key of Object.keys(shellEnv)) {
@@ -664,10 +686,21 @@ export class AgentSession extends EventEmitter {
         if (this.toolAzureConfigDir ?? this.config.azureConfigDir) {
           shellEnv.AZURE_CONFIG_DIR = this.toolAzureConfigDir ?? this.config.azureConfigDir
         }
-        const shellResult = await runShellCommand(command, {
+        const shellOptions = {
           cwd: this.cwd,
           env: shellEnv,
           signal,
+          onRequest: ({ shell, pid }) => {
+            if (!this.#isActive(run)) return
+            const secrets = [this.config.apiKey, ...Object.entries(shellEnv)
+              .filter(([key, value]) => /token|secret|password|api_key/i.test(key) && typeof value === "string")
+              .map(([, value]) => value)]
+            const safe = stripVTControlCharacters(redactSecrets(command, secrets)).replace(/\s+/g, " ").trim()
+            const script = /^(?:[&.]\s*)?(?:'([^']+\.ps1)'|"([^"]+\.ps1)"|([^\s'"]+\.ps1))(?=\s|$)/i.exec(safe)
+            const preview = script ? (script[1] ?? script[2] ?? script[3]).slice(-40) : safe.slice(0, 40)
+            const worker = stripVTControlCharacters(String(this.workerLabel)).replace(/\s+/g, " ")
+            this.shellLog?.(`[minicode] [worker=${worker} ${shell} pid=${pid ?? "unavailable"}] ${preview}`)
+          },
           // A killed process can flush buffered output after Ctrl+C. Do not
           // let output from an invalidated run appear in the next prompt.
           onData: (chunk) => {
@@ -675,7 +708,34 @@ export class AgentSession extends EventEmitter {
             // tint just these lines (not the "$ command" or "exit code" lines).
             if (this.#isActive(run)) this.#emitOutput(chunk.replace(/\r?\n/g, "\r\n"), "command")
           },
-        })
+        }
+        let shellResult
+        if (process.platform === "win32") {
+          const shellName = action.shell ?? "powershell-7"
+          let shell = this.shells.get(shellName)
+          if (!shell) {
+            shell = new AgentPowerShell({
+              shell: shellName, cwd: this.cwd, env: shellEnv,
+              onLanguageMode: ({ shell, pid, languageMode }) => {
+                if (this.closed) return
+                const notice = `${shell} pid=${pid ?? "unavailable"} language mode: ${languageMode}.`
+                this.#emitOutput(`${shell} language mode: ${languageMode}.\r\n`, "stderr")
+                const worker = stripVTControlCharacters(String(this.workerLabel)).replace(/\s+/g, " ")
+                this.shellLog?.(`[minicode] [worker=${worker}] ${notice}`)
+              },
+              onStateLost: notice => {
+                if (this.closed) return
+                this.shellStateNotices.push(notice)
+                this.#emitOutput(`${notice}\r\n`, "stderr")
+              },
+              onBackgroundOutput: text => {
+                if (!this.closed) this.#emitOutput(text.replace(/\r?\n/g, "\r\n"), "command")
+              },
+            })
+            this.shells.set(shellName, shell)
+          }
+          shellResult = { ...await shell.run(command, shellOptions), languageMode: shell.languageMode ?? "unknown" }
+        } else shellResult = await runShellCommand(command, shellOptions)
         this.#throwIfInactive(run)
         this.#emitOutput(`\u001b[90mexit code: ${shellResult.code}\u001b[0m\r\n`)
 
@@ -686,6 +746,8 @@ export class AgentSession extends EventEmitter {
             content: [
               "TOOL_RESULT",
               `command: ${command}`,
+              ...(action.shell === undefined ? [] : [`shell: ${action.shell}`]),
+              ...(shellResult.languageMode === undefined ? [] : [`languageMode: ${shellResult.languageMode}`]),
               `exitCode: ${shellResult.code}`,
               `output:\n${truncate(shellResult.output) || "<empty>"}`,
             ].join("\n"),
@@ -753,5 +815,7 @@ export class AgentSession extends EventEmitter {
     this.activeRun = null
     this.controller = null
     run?.controller.abort()
+    for (const shell of this.shells.values()) shell.dispose()
+    this.shells.clear()
   }
 }

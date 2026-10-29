@@ -10,11 +10,55 @@ Both drive the same `AgentSession` class and the same `auth.js`, so there is one
 agent implementation and one credential path to maintain. Nothing here needs
 native modules (no `node-pty`, no platform binaries).
 
+The core agent guidance requires nonrecursive discovery of one task-relevant
+folder's immediate children per request: `git ls-tree --name-only HEAD` or
+`git ls-tree --name-only HEAD:<known-folder>`, never `-r`. These list committed
+entries only. It prohibits whole-workspace/Git-tree scans, `git ls-files`
+discovery, recursive filesystem listings, and walking every subfolder through
+repeated shallow requests. Content searches use `git grep` only for known files
+or direct-child file globs in one folder, never unscoped or recursive pathspecs.
+It avoids untracked/ignored files and generated directories unless required,
+still with nonrecursive listings. Outside a Git worktree, without Git, or
+without a commit, it reports the limitation and lists only one folder's
+immediate children. Commands remain subject to the 120-second timeout;
+the guidance requires narrowing scope rather than retrying broad scans.
+
 On Windows, install **PowerShell 7** and ensure `pwsh.exe` is available on
 `PATH`. Agent commands and web terminal shells run directly in PowerShell 7,
-not Windows PowerShell 5.1; there is no automatic fallback. The agent's shell
-guidance matches that runtime, so commands do not need a nested PowerShell
-wrapper. On other platforms, command execution continues to use Bash.
+not Windows PowerShell 5.1, by default; there is no automatic fallback.
+For Windows-only commands or modules requiring Windows PowerShell 5.1, the
+model can set `"shell":"powershell-5.1"` on an individual shell tool action.
+That command runs directly in `powershell.exe`; subsequent commands still
+default to PowerShell 7. `"shell":"powershell-7"` explicitly selects the default.
+Each conversation keeps a separate persistent process for each PowerShell
+version, so variables, imported modules, functions, environment changes and
+current directory survive between commands and prompts using that version.
+State is not shared across versions or conversations. Commands run sequentially
+with captured output and completion status; no nested wrapper is needed.
+Before sending the first command to each PowerShell process, Minicode queries
+`$ExecutionContext.SessionState.LanguageMode` using a cmdlet-only probe and
+reports the actual mode to the model, web transcript, and backend console.
+The model must respect ConstrainedLanguage and must not change language mode,
+weaken security policy, or switch hosts/interpreters to bypass restrictions.
+Language mode is informational, not a blanket command block. Under
+ConstrainedLanguage the persistent transport uses cmdlets, preserves session
+scope, and captures output/errors without FullLanguage-only .NET calls.
+PowerShell still enforces its restrictions on individual commands; the model
+should use permitted cmdlets and report specific failures.
+If mode detection fails, no user command is sent; it fails after 10 seconds
+rather than assuming FullLanguage.
+The web backend console (not the browser transcript) logs every PowerShell
+request with worker/conversation identity, version and process ID, plus the
+first 40 command characters or the last 40 characters of a directly invoked
+`.ps1` path. Repeated process IDs indicate session reuse. Paired workers send
+the same diagnostics to their worker log.
+Cancellation, the 120-second command timeout, or process exit discards that
+shell's state. Minicode reports the loss and starts a fresh process on the next
+command, without replaying the interrupted command. Closing the conversation
+stops both shells. Interactive/full-screen programs are not supported.
+The web shell pane remains
+PowerShell 7. On other platforms, commands use Bash and Windows shell selections
+are rejected.
 
 ## Session model commands
 

@@ -516,6 +516,8 @@ export async function startAgentPoolWorker({
       if (stopped || run.cancelled) return { exitCode: 130 }
       const session = sessionFactory({
         id: task.runId, cwd: workspace, toolAzureConfigDir,
+        workerLabel: workerName ?? workerId,
+        shellLog: log,
         signedInUpn: hostedRoot ? "" : entraSession?.user?.(),
         interactiveSecretStore: secretStore === true,
         captureFailedPrompt: Boolean(onModelFailure),
