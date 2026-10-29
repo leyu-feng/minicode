@@ -35,6 +35,15 @@ version, so variables, imported modules, functions, environment changes and
 current directory survive between commands and prompts using that version.
 State is not shared across versions or conversations. Commands run sequentially
 with captured output and completion status; no nested wrapper is needed.
+AgentPool workers instead own one persistent process per PowerShell version
+for their entire lifetime, shared across all assignments and agents on that
+worker. Assignment completion releases the conversation, not its shells.
+Variables, functions, modules, custom environment state, and authenticated
+connections remain available. On each assignment's first use of a version,
+the harness refreshes run credentials/task environment and resets the current
+directory to that assignment's workspace. Use current environment credentials,
+not cached run tokens/headers. Retained state never grants task authorization;
+conversation history and harness tools remain assignment-specific.
 Before sending the first command to each PowerShell process, Minicode queries
 `$ExecutionContext.SessionState.LanguageMode` using a cmdlet-only probe and
 reports the actual mode to the model, web transcript, and backend console.
@@ -54,8 +63,11 @@ first 40 command characters or the last 40 characters of a directly invoked
 the same diagnostics to their worker log.
 Cancellation, the 120-second command timeout, or process exit discards that
 shell's state. Minicode reports the loss and starts a fresh process on the next
-command, without replaying the interrupted command. Closing the conversation
-stops both shells. Interactive/full-screen programs are not supported.
+command, without replaying the interrupted command. Closing an interactive
+conversation stops both shells; worker-owned shells stop when the worker
+stops or restarts, not when an assignment finishes. Moving an assignment to
+another worker cannot preserve its process ID. Interactive/full-screen programs
+are not supported.
 The web shell pane remains
 PowerShell 7. On other platforms, commands use Bash and Windows shell selections
 are rejected.
