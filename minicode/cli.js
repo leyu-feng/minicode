@@ -1,10 +1,12 @@
 #!/usr/bin/env node
+import fs from "node:fs"
 import path from "node:path"
 import readline from "node:readline"
 import readlinePromises from "node:readline/promises"
 import { AgentSession, callModelOnce } from "./server/agent-session.js"
 import { runAgentPoolWorkerCli } from "./server/agent-pool-worker.js"
 import { runHostedWorkerCli } from "./server/hosted-worker.js"
+import { runWorkersMode } from "./server/workers-mode.js"
 import {
   DEFAULT_AZURE_MODEL,
   COPILOT_AUTH_NAME,
@@ -37,7 +39,7 @@ Usage:
   minicode                       Interactive REPL (conversation is remembered)
   minicode "<prompt>"            Run one prompt, print the answer, exit
   minicode --no-tools "<prompt>" Answer without running any shell commands
-  minicode web [port]            Start the browser portal
+  minicode web [port]            Start the browser portal and workers from workers.yml when present
   minicode auth login            Sign in with the selected auth provider
   minicode auth add [name]       Add an Azure deployment
   minicode auth add --copilot    Add/sign in to the @copilot entry
@@ -61,7 +63,6 @@ Options:
   --tool-azure-config-dir <absolute-dir>  Azure CLI context for worker shell tools
   --no-secret-store       Disable process-memory secrets for paired workers
   --worker-shared <dir>   Worker read-only shared folder (default: sibling worker_shared)
-  --skill-approvals <file>  Absolute path to operator-owned external skill approvals
   --reference-repo [<branch>@]<name>=<dir>  Attach a synced read-only reference checkout (repeatable)
   --workspace-mode <mode>  worktree (default): clean worker-agent siblings; clone: legacy per-agent clones
   --worker-name <name>    Short sibling prefix, e.g. w1 creates w1a1 (default: w-<worker-id prefix>)
@@ -312,10 +313,12 @@ if (options.positional[0] === "web") {
       throw new Error("Usage: minicode web [port] [--auth <entry>]")
     }
     if (port !== undefined && Number(port) > 65535) throw new Error("Web port must be between 0 and 65535.")
-    process.env.MINICODE_REPO_ROOT = path.resolve(options.repoRoot || process.env.MINICODE_REPO_ROOT || process.cwd())
+    const workspace = path.resolve(options.repoRoot || process.env.MINICODE_REPO_ROOT || process.cwd())
+    process.env.MINICODE_REPO_ROOT = workspace
     process.env.MINICODE_WEB_PORT = port ?? process.env.MINICODE_WEB_PORT ?? "0"
     await ensureAuthConfigured()
-    await import("./server/index.js")
+    if (fs.existsSync(path.join(workspace, "workers.yml"))) await runWorkersMode({ workspace, port })
+    else await import("./server/index.js")
   } catch (error) {
     console.error(`Minicode web: ${error.message}`)
     process.exitCode = 1
