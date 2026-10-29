@@ -61,6 +61,7 @@ Options:
   --tool-azure-config-dir <absolute-dir>  Azure CLI context for worker shell tools
   --no-secret-store       Disable process-memory secrets for paired workers
   --worker-shared <dir>   Worker read-only shared folder (default: sibling worker_shared)
+  --skill-approvals <file>  Absolute path to operator-owned external skill approvals
   --reference-repo [<branch>@]<name>=<dir>  Attach a synced read-only reference checkout (repeatable)
   --workspace-mode <mode>  worktree (default): clean worker-agent siblings; clone: legacy per-agent clones
   --worker-name <name>    Short sibling prefix, e.g. w1 creates w1a1 (default: w-<worker-id prefix>)

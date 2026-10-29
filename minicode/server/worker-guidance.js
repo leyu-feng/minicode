@@ -1,5 +1,6 @@
 import fs from "node:fs/promises"
 import path from "node:path"
+import { skillDigest } from "./skill-approvals.js"
 
 async function optionalEntry(file, directory = false) {
   try {
@@ -20,22 +21,29 @@ async function readInstructions(root) {
 }
 
 async function discoverSkills(root, source) {
-  const agents = path.join(root, ".agents")
-  if (!await optionalEntry(agents, true)) return []
-  const directory = path.join(agents, "skills")
-  if (!await optionalEntry(directory, true)) return []
   const skills = []
-  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-    if (entry.isFile()) continue
-    const location = path.join(directory, entry.name)
-    await optionalEntry(location, true)
-    const file = path.join(location, "SKILL.md")
-    if (await optionalEntry(file)) skills.push({ name: entry.name, file, source })
+  const names = new Set()
+  for (const folder of [".agents", ".github"]) {
+    const parent = path.join(root, folder)
+    if (!await optionalEntry(parent, true)) continue
+    const directory = path.join(parent, "skills")
+    if (!await optionalEntry(directory, true)) continue
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      if (entry.isFile()) continue
+      const location = path.join(directory, entry.name)
+      await optionalEntry(location, true)
+      const file = path.join(location, "SKILL.md")
+      if (!await optionalEntry(file)) continue
+      const name = entry.name.toLowerCase()
+      if (names.has(name)) throw new Error(`Duplicate worker skill name in ${source}: ${entry.name}`)
+      names.add(name)
+      skills.push({ name: entry.name, file, source })
+    }
   }
   return skills
 }
 
-export async function readWorkerGuidance({ workspace, workerShared, bundle, repositories = [] }) {
+export async function readWorkerGuidance({ workspace, workerShared, workspaceSource, bundle, repositories = [], references = [], approvals = [] }) {
   const supervisory = repositories.filter(repo => repo.supervisory === true)
   if (supervisory.length > 1 || supervisory.some(repo => !repo.readOnly || path.resolve(repo.path) !== path.resolve(workerShared))) {
     throw new Error("The supervisory repository must be the single read-only worker_shared checkout")
@@ -45,28 +53,43 @@ export async function readWorkerGuidance({ workspace, workerShared, bundle, repo
     throw new Error(`The supervisory repository must provide AGENTS.md: ${path.join(workerShared, "AGENTS.md")}`)
   }
   const sharedSkills = await discoverSkills(workerShared, "worker_shared")
+  // Reject linked helpers in trusted skills as well as approved skills.
+  for (const skill of sharedSkills) skill.sha256 = await skillDigest(path.dirname(skill.file))
   const [workspaceInstructions, workspaceSkills] = await Promise.all([
     readInstructions(workspace), discoverSkills(workspace, "worktree"),
   ])
-  const selected = new Map()
-  const repositorySkills = await Promise.all(repositories.filter(repo => !repo.readOnly).map(async repo => ({
-    repository: repo.name, skills: await discoverSkills(repo.path, `repository:${repo.name}`),
-  })))
+  const repositorySkills = await Promise.all([
+    ...repositories.filter(repo => !repo.supervisory).map(async repo => ({ repository: repo.name, approvalSource: `repository:${repo.name}:${path.resolve(repo.path)}`, skills: await discoverSkills(repo.path, `repository:${repo.name}`) })),
+    ...references.map(async repo => ({ repository: repo.name, approvalSource: `reference:${repo.name}:${path.resolve(repo.path)}`, skills: await discoverSkills(repo.path, `reference:${repo.name}`) })),
+  ])
+  const candidates = [
+    ...(bundle?.entries ?? []).map(entry => ({ name: entry.split("/")[0], file: path.join(bundle.directory, ...entry.split("/")), source: "bundle" })),
+    ...workspaceSkills,
+    ...repositorySkills.flatMap(group => group.skills.map(skill => ({ ...skill, repository: group.repository, approvalSource: group.approvalSource }))),
+  ]
+  const approved = []
+  for (const skill of candidates) {
+    let approvalSource
+    if (skill.source === "bundle" && /^[a-f0-9]{64}$/.test(bundle?.sha256 ?? "")) approvalSource = `bundle:${bundle.sha256}`
+    else if (skill.source === "worktree" && workspaceSource) approvalSource = `worktree:${path.resolve(workspaceSource)}`
+    else if (skill.repository) approvalSource = skill.approvalSource
+    const possible = approvals.filter(a => a.source === approvalSource && a.name === skill.name)
+    if (!possible.length) continue
+    const digest = await skillDigest(path.dirname(skill.file))
+    if (possible.some(a => a.sha256 === digest)) approved.push({ ...skill, approvalSource, sha256: digest })
+  }
   const grouped = new Map()
-  for (const { repository, skills } of repositorySkills) for (const skill of skills) {
+  for (const skill of approved.filter(skill => skill.repository)) {
     const name = skill.name.toLowerCase()
     const entries = grouped.get(name) ?? []
-    entries.push({ ...skill, repository })
+    entries.push(skill)
     grouped.set(name, entries)
   }
-  const sharedNames = new Set(sharedSkills.map(skill => skill.name.toLowerCase()))
-  const catalogSkills = [...grouped.entries()].flatMap(([name, entries]) => sharedNames.has(name) ? []
-    : entries.length === 1 ? entries : entries.map(skill => ({ ...skill, name: `${skill.repository}/${skill.name}` })))
+  const catalogSkills = [...grouped.values()].flatMap(entries => entries.length === 1 ? entries : entries.map(skill => ({ ...skill, name: `${skill.repository}/${skill.name}` })))
+  const selected = new Map()
   for (const [source, skills] of [
-    ["bundle", (bundle?.entries ?? []).map(entry => ({
-      name: entry.split("/")[0], file: path.join(bundle.directory, ...entry.split("/")), source: "bundle",
-    }))],
-    ["worktree", workspaceSkills],
+    ["bundle", approved.filter(skill => skill.source === "bundle")],
+    ["worktree", approved.filter(skill => skill.source === "worktree")],
     ["repositories", catalogSkills],
     ["worker_shared", sharedSkills],
   ]) {
@@ -80,8 +103,17 @@ export async function readWorkerGuidance({ workspace, workerShared, bundle, repo
   }
   const skills = [...selected.values()].sort((a, b) => a.name.localeCompare(b.name))
   const paperclip = selected.get("paperclip")
-  return {
-    workspaceInstructions, sharedInstructions, skills,
-    paperclipInstructions: paperclip ? await fs.readFile(paperclip.file, "utf8") : null,
+  // Check both sides of the inline read; this is best-effort, not an atomic snapshot.
+  if (paperclip) await assertWorkerSkillsUnchanged([paperclip])
+  const paperclipInstructions = paperclip ? await fs.readFile(paperclip.file, "utf8") : null
+  await assertWorkerSkillsUnchanged(skills)
+  return { workspaceInstructions, sharedInstructions, skills, paperclipInstructions }
+}
+
+export async function assertWorkerSkillsUnchanged(skills) {
+  for (const skill of skills) {
+    if (await skillDigest(path.dirname(skill.file)) !== skill.sha256) {
+      throw new Error(`Worker skill contents changed after catalog resolution: ${skill.name}; renewed operator review required`)
+    }
   }
 }
