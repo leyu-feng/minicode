@@ -12,9 +12,28 @@ native modules (no `node-pty`, no platform binaries).
 
 On Windows, install **PowerShell 7** and ensure `pwsh.exe` is available on
 `PATH`. Agent commands and web terminal shells run directly in PowerShell 7,
-not Windows PowerShell 5.1; there is no automatic fallback. The agent's shell
-guidance matches that runtime, so commands do not need a nested PowerShell
-wrapper. On other platforms, command execution continues to use Bash.
+not Windows PowerShell 5.1, by default; there is no automatic fallback.
+For Windows-only commands or modules requiring Windows PowerShell 5.1, the
+model can set `"shell":"powershell-5.1"` on an individual shell tool action.
+That command runs directly in `powershell.exe`; subsequent commands still
+default to PowerShell 7. `"shell":"powershell-7"` explicitly selects the default.
+Each conversation keeps a separate persistent process for each PowerShell
+version, so variables, imported modules, functions, environment changes and
+current directory survive between commands and prompts using that version.
+State is not shared across versions or conversations. Commands run sequentially
+with captured output and completion status; no nested wrapper is needed.
+The web backend console (not the browser transcript) logs every PowerShell
+request with worker/conversation identity, version and process ID, plus the
+first 40 command characters or the last 40 characters of a directly invoked
+`.ps1` path. Repeated process IDs indicate session reuse. Paired workers send
+the same diagnostics to their worker log.
+Cancellation, the 120-second command timeout, or process exit discards that
+shell's state. Minicode reports the loss and starts a fresh process on the next
+command, without replaying the interrupted command. Closing the conversation
+stops both shells. Interactive/full-screen programs are not supported.
+The web shell pane remains
+PowerShell 7. On other platforms, commands use Bash and Windows shell selections
+are rejected.
 
 ## Session model commands
 

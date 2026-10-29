@@ -28,7 +28,7 @@ async function fixture(t) {
   t.after(async () => {
     for (const { child, closed, powershell } of children) {
       if (child.exitCode === null && child.signalCode === null) {
-        if (powershell) {
+        if (powershell || process.platform === "win32") {
           const stop = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" })
           await once(stop, "close")
         } else child.kill()
@@ -148,6 +148,13 @@ globalThis.fetch = async (url, init) => {
       { id: "gpt-5.4", supported_endpoints: ["/responses"] },
       { id: "catalog-choice", name: "Catalog Choice", supported_endpoints: ["/responses"] },
     ] }
+  } else if (url === "https://api.githubcopilot.com/responses" && process.env.FIXTURE_PERSISTENT_SHELL === "1") {
+    const body = JSON.parse(init.body)
+    const continuation = body.input.at(-1)?.content.startsWith("TOOL_RESULT")
+    if (init.headers["x-initiator"] !== (continuation ? "agent" : "user")) throw new Error("Incorrect shell continuation initiator")
+    data = { output_text: body.input.at(-1)?.content === "Check persistent shell"
+      ? JSON.stringify({ type: "tool", command: "$fixtureShellCount += 1; Write-Output ('persisted-count=' + $fixtureShellCount)" })
+      : "Copilot fixture reply" }
   } else if (url === "https://api.githubcopilot.com/responses") {
     if (init.headers.Authorization !== "Bearer fixture-api-token" || init.headers["x-initiator"] !== "user") {
       throw new Error("Incorrect Copilot model authorization")
@@ -202,7 +209,9 @@ globalThis.fetch = async (url, init) => {
   assert.equal(noninteractive.code, 1)
   assert.match(noninteractive.output, /model selection requires a terminal.*--model <id>/)
   assert.equal(await fs.readFile(file, "utf8"), saved)
+  app.env.FIXTURE_PERSISTENT_SHELL = "1"
   const portal = app.start(CLI, ["web", "--copilot", "0"])
+  delete app.env.FIXTURE_PERSISTENT_SHELL
   const origin = await portalOrigin(portal)
   const info = await (await fetch(`${origin}/api/info`)).json()
   assert.equal(info.deployment, "@copilot")
@@ -235,6 +244,27 @@ globalThis.fetch = async (url, init) => {
   assert.equal(restored.restored, true)
   assert.equal(restored.model, "catalog-choice")
   assert.equal((await (await fetch(`${origin}/api/info`)).json()).model, "gpt-5.4")
+  if (process.platform === "win32") {
+    const logs = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { portal.child.stdout.off("data", check); reject(new Error("Missing backend shell diagnostics")) }, 5000)
+      function check() {
+        const matches = [...portal.output.matchAll(/\[worker=model-pane powershell-7 pid=(\d+)\]/g)]
+        if (matches.length < 2) return
+        clearTimeout(timer)
+        portal.child.stdout.off("data", check)
+        resolve(matches)
+      }
+      portal.child.stdout.on("data", check)
+    })
+    await sendAndWait({ type: "input", data: "Check persistent shell" }, "done")
+    await sendAndWait({ type: "input", data: "Check persistent shell" }, "done")
+    const diagnostics = await logs
+    assert.equal(diagnostics[0][1], diagnostics[1][1])
+    assert.ok(events.some(event => event.type === "output" && event.stream === "command" && event.data.includes("persisted-count=1")))
+    assert.ok(events.some(event => event.type === "output" && event.stream === "command" && event.data.includes("persisted-count=2")))
+    assert.ok(!events.some(event => event.type === "output" && event.data.includes("[worker=")))
+    socket.send(JSON.stringify({ type: "close", sessionId: "model-pane" }))
+  }
   assert.ok(!JSON.stringify(info).includes("fixture-secret"))
   assert.equal(await fs.readFile(file, "utf8"), saved)
   for (const args of [

@@ -8,6 +8,24 @@ import { ShellSession } from "../server/shell-session.js"
 
 const originalFetch = globalThis.fetch
 
+function shellProcessFixture() {
+  const proc = new EventEmitter()
+  proc.stdout = new EventEmitter()
+  proc.stderr = new EventEmitter()
+  proc.stdin = new EventEmitter()
+  proc.stdin.destroy = () => {}
+  proc.stdin.end = () => {}
+  proc.stdin.write = script => {
+    const marker = script.match(/__MINICODE_[a-f0-9]+_DONE__:/)?.[0]
+    if (marker) queueMicrotask(() => {
+      proc.stdout.emit("data", `${marker}0:END__`)
+      proc.stderr.emit("data", `${marker}0:END__`)
+    })
+  }
+  if (process.platform !== "win32") queueMicrotask(() => proc.emit("close", 0))
+  return proc
+}
+
 test("model command aliases list and switch session models without losing context", async t => {
   let catalogs = 0
   const config = { api: "responses", endpoint: "https://provider.test/responses", model: "original", apiKey: "fixture" }
@@ -110,11 +128,7 @@ test("worker shell uses its selected Azure context instead of the model context"
   let shellEnv
   t.mock.method(childProcess, "spawn", (_file, _args, options) => {
     shellEnv = options.env
-    const proc = new EventEmitter()
-    proc.stdout = new EventEmitter()
-    proc.stderr = new EventEmitter()
-    queueMicrotask(() => proc.emit("close", 0))
-    return proc
+    return shellProcessFixture()
   })
   const session = new AgentSession({ id: "azure-context", cwd: process.cwd(),
     env: { AZURE_CONFIG_DIR: "inherited", OTHER_SETTING: "kept" }, toolAzureConfigDir: "resource-context" })
@@ -133,11 +147,7 @@ test("without a tool override the model Azure context remains the shell default"
   let shellEnv
   t.mock.method(childProcess, "spawn", (_file, _args, options) => {
     shellEnv = options.env
-    const proc = new EventEmitter()
-    proc.stdout = new EventEmitter()
-    proc.stderr = new EventEmitter()
-    queueMicrotask(() => proc.emit("close", 0))
-    return proc
+    return shellProcessFixture()
   })
   const session = new AgentSession({ id: "azure-default", cwd: process.cwd(), env: { AZURE_CONFIG_DIR: "inherited" } })
   t.after(() => session.dispose())
@@ -153,11 +163,7 @@ test("tool identity is sourced from the harness, not inherited environment", asy
   globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] })
   t.mock.method(childProcess, "spawn", (_file, _args, options) => {
     outputs.push(options.env)
-    const proc = new EventEmitter()
-    proc.stdout = new EventEmitter()
-    proc.stderr = new EventEmitter()
-    queueMicrotask(() => proc.emit("close", 0))
-    return proc
+    return shellProcessFixture()
   })
   const sessions = [
     new AgentSession({ id: "model-user", cwd: process.cwd(), env: { MINICODE_AGENT_USER_UPN: "spoof@example.com" } }),
@@ -185,11 +191,7 @@ test("secret store is opt-in for interactive sessions and inherited capabilities
   globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] })
   t.mock.method(childProcess, "spawn", (_file, _args, options) => {
     outputs.push(options.env)
-    const proc = new EventEmitter()
-    proc.stdout = new EventEmitter()
-    proc.stderr = new EventEmitter()
-    queueMicrotask(() => proc.emit("close", 0))
-    return proc
+    return shellProcessFixture()
   })
   const inherited = { MINICODE_SECRET_STORE_PORT: "1234", MINICODE_SECRET_STORE_CAPABILITY: "inherited", OTHER_SETTING: "kept" }
   const sessions = [
@@ -407,14 +409,143 @@ test("Windows terminal shells use PowerShell 7 and preserve state between comman
   assert.match(output, /saved-major=[7-9]\d*/)
 })
 
+test("Windows agent commands can explicitly use PowerShell 5.1 without changing the default", { skip: process.platform !== "win32", timeout: 15_000 }, async t => {
+  const requests = []
+  const actions = [
+    { type: "tool", shell: "powershell-5.1", command: "if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { throw 'Expected Windows PowerShell 5.1' }; $savedLegacy=42; Write-Output 'legacy-verified'" },
+    { type: "tool", command: "if ($PSVersionTable.PSVersion.Major -lt 7 -or $savedLegacy) { throw 'Expected independent PowerShell 7' }; Write-Output 'default-verified'" },
+    { type: "tool", shell: "powershell-7", command: "Write-Output $PSVersionTable.PSEdition" },
+    { type: "final", message: "done" },
+  ]
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return Response.json({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] })
+  }
+  const diagnostics = []
+  const session = new AgentSession({ id: "legacy-powershell", cwd: process.cwd(), workerLabel: "worker-fixture", shellLog: message => diagnostics.push(message) })
+  session.config = { api: "chat-completions", endpoint: "https://example.test", apiKey: "fixture", model: "fixture" }
+  t.after(() => session.dispose())
+  let output = ""
+  session.on("output", event => { output += event.data })
+  assert.equal((await session.write("Run a legacy command then a normal command")).exitCode, 0)
+  assert.match(requests[0].messages[0].content, /"shell":"powershell-5.1"/)
+  assert.match(requests[1].messages.at(-1).content, /shell: powershell-5.1[\s\S]*exitCode: 0[\s\S]*legacy-verified/)
+  assert.match(requests[2].messages.at(-1).content, /exitCode: 0[\s\S]*default-verified/)
+  assert.match(requests[3].messages.at(-1).content, /shell: powershell-7[\s\S]*exitCode: 0[\s\S]*Core/)
+  assert.match(output, /\[Windows PowerShell 5.1\]/)
+  actions.push({ type: "tool", shell: "powershell-5.1", command: "Write-Output $savedLegacy" }, { type: "final", message: "done" })
+  assert.equal((await session.write("Continue in the same legacy shell")).exitCode, 0)
+  assert.match(requests.at(-1).messages.at(-1).content, /exitCode: 0[\s\S]*42/)
+  const legacyPids = diagnostics.filter(line => line.includes("powershell-5.1")).map(line => /pid=(\d+)/.exec(line)[1])
+  assert.equal(legacyPids.length, 2)
+  assert.equal(legacyPids[0], legacyPids[1])
+  const defaultPids = diagnostics.filter(line => line.includes("powershell-7")).map(line => /pid=(\d+)/.exec(line)[1])
+  assert.equal(defaultPids[0], defaultPids[1])
+  assert.notEqual(defaultPids[0], legacyPids[0])
+  assert.ok(diagnostics.every(line => line.includes("worker=worker-fixture")))
+  assert.ok(!output.includes("pid="), "Backend diagnostics must not enter the browser transcript")
+  const other = new AgentSession({ id: "separate-conversation", cwd: process.cwd() })
+  other.config = session.config
+  t.after(() => other.dispose())
+  actions.push({ type: "tool", shell: "powershell-5.1", command: "if ($savedLegacy) { throw 'Conversation state leaked' }; Write-Output 'isolated'" }, { type: "final", message: "done" })
+  assert.equal((await other.write("Check independent context")).exitCode, 0)
+  assert.match(requests.at(-1).messages.at(-1).content, /exitCode: 0[\s\S]*isolated/)
+})
+
+test("PowerShell backend diagnostics summarize commands and script paths without exposing configured secrets", { skip: process.platform !== "win32" }, async t => {
+  const script = "C:\\a-very-long-directory\\another-long-directory\\diagnostic-script.ps1"
+  const command = "Write-Output 'diagnostic-secret'; " + "x".repeat(80)
+  const actions = [
+    { type: "tool", command },
+    { type: "tool", command: `& '${script}' -Argument fixture` },
+    { type: "final", message: "done" },
+  ]
+  globalThis.fetch = async () => Response.json({ output_text: JSON.stringify(actions.shift()) })
+  t.mock.method(childProcess, "spawn", () => {
+    const proc = shellProcessFixture()
+    proc.pid = 321
+    return proc
+  })
+  const diagnostics = []
+  const session = new AgentSession({ id: "diagnostics", workerLabel: "worker-1", cwd: process.cwd(),
+    env: { EXAMPLE_SECRET: "diagnostic-secret" }, shellLog: line => diagnostics.push(line) })
+  session.config = { api: "responses", endpoint: "https://example.test", apiKey: "fixture", model: "fixture" }
+  t.after(() => session.dispose())
+  assert.equal((await session.write("Run commands")).exitCode, 0)
+  assert.deepEqual(diagnostics, [
+    `[minicode] [worker=worker-1 powershell-7 pid=321] ${command.replace("diagnostic-secret", "[redacted]").slice(0, 40)}`,
+    `[minicode] [worker=worker-1 powershell-7 pid=321] ${script.slice(-40)}`,
+  ])
+})
+
+test("interrupted PowerShell context loss is reported to the next model turn", { skip: process.platform !== "win32", timeout: 15000 }, async t => {
+  const requests = []
+  const actions = [
+    { type: "tool", shell: "powershell-5.1", command: "[Console]::Out.Write('shell-ready'); Start-Sleep -Seconds 60" },
+    { type: "final", message: "Context was reset" },
+  ]
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return Response.json({ output_text: JSON.stringify(actions.shift()) })
+  }
+  const session = new AgentSession({ id: "interrupted-context", cwd: process.cwd() })
+  session.config = { api: "responses", endpoint: "https://example.test", apiKey: "fixture", model: "fixture" }
+  t.after(() => session.dispose())
+  let started
+  const ready = new Promise(resolve => { started = resolve })
+  session.on("output", event => { if (event.stream === "command" && event.data.includes("shell-ready")) started() })
+  const running = session.write("Run a long command")
+  await ready
+  session.interrupt()
+  assert.equal((await running).exitCode, 130)
+  assert.equal((await session.write("Continue after cancelling")).exitCode, 0)
+  assert.ok(requests.at(-1).input.some(message => /SHELL_STATE_NOTICE[\s\S]*powershell-5.1 session state was lost/.test(message.content)))
+})
+
+test("invalid or non-Windows shell selections fail explicitly without launching a process", async t => {
+  t.mock.method(childProcess, "spawn", assert.fail)
+  for (const shell of ["cmd", "", null, ...(process.platform === "win32" ? [] : ["powershell-5.1", "powershell-7"])]) {
+    globalThis.fetch = async () => Response.json({ output_text: JSON.stringify({ type: "tool", command: "echo test", shell }) })
+    const session = new AgentSession({ id: "invalid-shell", cwd: process.cwd() })
+    session.config = { api: "responses", endpoint: "https://example.test", apiKey: "fixture", model: "fixture" }
+    try {
+      const result = await session.write("Run command")
+      assert.equal(result.exitCode, 1)
+      assert.match(result.error, /Unsupported shell selection/)
+    } finally { session.dispose() }
+  }
+})
+
+test("missing requested Windows PowerShell 5.1 fails without falling back to PowerShell 7", { skip: process.platform !== "win32" }, async t => {
+  const launches = []
+  t.mock.method(childProcess, "spawn", file => {
+    launches.push(file)
+    const proc = shellProcessFixture()
+    queueMicrotask(() => proc.emit("error", Object.assign(new Error("spawn failed"), { code: "ENOENT" })))
+    return proc
+  })
+  const requests = []
+  const actions = [
+    { type: "tool", shell: "powershell-5.1", command: "Write-Output test" },
+    { type: "final", message: "Blocked", error: "Legacy PowerShell unavailable" },
+  ]
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return Response.json({ output_text: JSON.stringify(actions.shift()) })
+  }
+  const session = new AgentSession({ id: "missing-legacy-shell", cwd: process.cwd() })
+  session.config = { api: "responses", endpoint: "https://example.test", apiKey: "fixture", model: "fixture" }
+  t.after(() => session.dispose())
+  assert.equal((await session.write("Run a legacy command")).exitCode, 1)
+  assert.match(requests[1].input.find(message => message.content.startsWith("TOOL_RESULT")).content, /exitCode: 1[\s\S]*Windows PowerShell 5.1 was requested but powershell.exe is unavailable/)
+  assert.deepEqual(launches, ["powershell.exe"])
+})
+
 test("missing PowerShell 7 fails commands explicitly without falling back", { skip: process.platform !== "win32" }, async t => {
   const launches = []
   t.mock.method(childProcess, "spawn", (file) => {
     launches.push(file)
-    const proc = new EventEmitter()
-    proc.stdout = new EventEmitter()
-    proc.stderr = new EventEmitter()
-    proc.stdin = { end() {} }
+    const proc = shellProcessFixture()
     queueMicrotask(() => {
       proc.emit("error", Object.assign(new Error("spawn failed"), { code: "ENOENT" }))
       proc.emit("close", -2)
@@ -431,7 +562,7 @@ test("missing PowerShell 7 fails commands explicitly without falling back", { sk
   agent.config = { api: "chat-completions", endpoint: "https://example.test", apiKey: "fixture", model: "fixture" }
   t.after(() => agent.dispose())
   assert.equal((await agent.write("Run command")).exitCode, 1)
-  assert.match(requests[1].messages.at(-1).content, /exitCode: 1[\s\S]*PowerShell 7 \(pwsh\) is required/)
+  assert.match(requests[1].messages.find(message => message.content.startsWith("TOOL_RESULT")).content, /exitCode: 1[\s\S]*PowerShell 7 \(pwsh\) is required/)
   const shell = new ShellSession({ id: "missing-terminal-powershell", cwd: process.cwd() })
   let output = ""
   shell.on("output", ({ data }) => { output += data })
@@ -906,11 +1037,7 @@ test("AgentSession reports failure when shell actions exhaust the tool turn limi
     choices: [{ message: { content: '{"type":"tool","command":"echo fixture"}' } }],
   }), { status: 200, headers: { "Content-Type": "application/json" } })
   t.mock.method(childProcess, "spawn", () => {
-    const proc = new EventEmitter()
-    proc.stdout = new EventEmitter()
-    proc.stderr = new EventEmitter()
-    queueMicrotask(() => proc.emit("close", 0))
-    return proc
+    return shellProcessFixture()
   })
 
   const session = new AgentSession({ id: "exhausted-worker", cwd: process.cwd() })
