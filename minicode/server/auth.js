@@ -8,6 +8,7 @@ import { ManagedIdentityCredential } from "@azure/identity"
 import { httpErrorDetails } from "./http-error.js"
 
 const AZURE_OPENAI_RESOURCE = "https://cognitiveservices.azure.com"
+const AZURE_MANAGEMENT_RESOURCE = "https://management.azure.com"
 export const DEFAULT_AZURE_MODEL = "gpt-5.6-sol"
 export const COPILOT_AUTH_NAME = "@copilot"
 const COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98"
@@ -524,11 +525,11 @@ function verifyAzureTokenIdentity(accessToken, profile) {
   }
 }
 
-export async function getAzureAccessToken(profile) {
+export async function getAzureAccessToken(profile, resource = AZURE_OPENAI_RESOURCE) {
   profile ||= await getActiveAzureDeployment()
   credentialFields(profile)
   const cacheKey = JSON.stringify([
-    authFilePath(), AZURE_OPENAI_RESOURCE,
+    authFilePath(), resource,
     profile.user?.toLowerCase(), profile.tenant?.toLowerCase(), profile.azureConfigDir,
   ])
   const cached = tokenCache.get(cacheKey)
@@ -539,7 +540,7 @@ export async function getAzureAccessToken(profile) {
     "account",
     "get-access-token",
     "--resource",
-    AZURE_OPENAI_RESOURCE,
+    resource,
     ...(profile.azureConfigDir ? ["--tenant", profile.tenant] : []),
     "--output",
     "json",
@@ -618,21 +619,121 @@ export function getManagedIdentityAuthSummary() {
   }
 }
 
+async function listAzureSessionModels(config, catalog, signal) {
+  const account = new URL(config.endpoint).hostname.split(".")[0]
+  if (!/^[a-z0-9][a-z0-9-]*$/i.test(account)) throw new Error("Cannot identify the Azure model resource from its endpoint.")
+  const token = await config.getManagementAccessToken()
+  async function request(url, body) {
+    const target = new URL(url, AZURE_MANAGEMENT_RESOURCE)
+    if (target.origin !== AZURE_MANAGEMENT_RESOURCE) throw new Error("Azure returned an invalid management URL.")
+    const response = await fetch(target.href, {
+      method: body ? "POST" : "GET",
+      signal,
+      headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    })
+    if (!response.ok) {
+      const detail = await httpErrorDetails(response, [token])
+      throw new Error(`Could not list Azure deployments (HTTP ${response.status}); management-plane read access is required:\n${detail}`)
+    }
+    return response.json()
+  }
+  const resources = await request("/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01", {
+    query: `Resources | where type =~ 'microsoft.cognitiveservices/accounts' | where name =~ '${account}' | project id`,
+    options: { resultFormat: "objectArray" },
+  })
+  if (!Array.isArray(resources?.data) || resources.data.length !== 1) {
+    throw new Error(`Could not uniquely find Azure resource "${account}". Management-plane read access to that resource is required.`)
+  }
+  const resourceId = resources.data[0]?.id
+  if (typeof resourceId !== "string"
+    || !/^\/subscriptions\/[^/]+\/resourceGroups\/[^/]+\/providers\/Microsoft\.CognitiveServices\/accounts\/[^/]+$/i.test(resourceId)
+    || resourceId.split("/").at(-1).toLowerCase() !== account.toLowerCase()) {
+    throw new Error("Azure returned an invalid model resource ID.")
+  }
+  const deployments = []
+  const visited = new Set()
+  let url = `${AZURE_MANAGEMENT_RESOURCE}${resourceId}/deployments?api-version=2024-10-01`
+  while (url) {
+    if (visited.has(url) || visited.size >= 100) throw new Error("Azure deployment pagination did not complete.")
+    visited.add(url)
+    const page = await request(url)
+    if (!Array.isArray(page?.value)) throw new Error("Azure returned an invalid deployment list.")
+    deployments.push(...page.value)
+    url = page.nextLink
+  }
+  const models = []
+  for (const deployment of deployments) {
+    const model = deployment.properties?.model
+    const remote = catalog.find(item => typeof item?.id === "string" && [
+      model?.name, `${model?.name}-${model?.version}`,
+    ].some(name => typeof name === "string" && item.id.toLowerCase() === name.toLowerCase()))
+    if (deployment.properties?.provisioningState !== "Succeeded"
+      || remote?.capabilities?.chat_completion === false || remote?.capabilities?.inference === false) continue
+    const api = model?.format?.toLowerCase() === "openai" ? "responses" : "chat-completions"
+    const endpoint = new URL(config.endpoint)
+    endpoint.pathname = endpoint.pathname.replace(/\/(?:responses|chat\/completions)$/,
+      api === "responses" ? "/responses" : "/chat/completions")
+    models.push({ id: deployment.name, api, endpoint: endpoint.href })
+  }
+  return models
+}
+
+export async function listAvailableModels(config, { signal } = {}) {
+  signal = signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000)
+  const url = new URL(config.endpoint)
+  if (!/\/(?:responses|chat\/completions)$/.test(url.pathname)) {
+    throw new Error("Cannot discover models from the configured model endpoint.")
+  }
+  url.pathname = url.pathname.replace(/\/(?:responses|chat\/completions)$/, "/models")
+  const token = config.getAccessToken ? await config.getAccessToken() : config.apiKey
+  const response = await fetch(url.href, {
+    signal,
+    headers: { ...config.headers, Authorization: `Bearer ${token}` },
+  })
+  if (!response.ok) {
+    const detail = await httpErrorDetails(response, [token])
+    throw new Error(`Could not list models (HTTP ${response.status}):\n${detail}`)
+  }
+  const catalog = await response.json()
+  if (!Array.isArray(catalog?.data)) throw new Error("Provider returned an invalid model catalog.")
+  const available = config.getManagementAccessToken
+    ? await listAzureSessionModels(config, catalog.data, signal) : catalog.data
+  const models = new Map()
+  for (const model of available) {
+    if (typeof model?.id !== "string" || !model.id || /[\s\u0000-\u001f\u007f]/.test(model.id)) continue
+    let api = config.getManagementAccessToken ? model.api : config.api
+    let endpoint = config.getManagementAccessToken ? model.endpoint : config.endpoint
+    if (config.provider === "github-copilot") {
+      api = copilotModelApi(model)
+      if (!api || model.policy?.state === "disabled" || model.model_picker_enabled === false) continue
+      const target = new URL(config.endpoint)
+      target.pathname = api === "responses" ? "/responses" : "/chat/completions"
+      endpoint = target.href
+    }
+    if (!models.has(model.id)) models.set(model.id, { id: model.id, api, endpoint })
+  }
+  if (!models.size) throw new Error("No available models were returned by the current provider.")
+  return [...models.values()]
+}
+
 export async function resolveModelConfig() {
   const managedIdentity = getManagedIdentityAuthSummary()
   if (managedIdentity) {
     const clientId = process.env.AZURE_CLIENT_ID?.trim()
     const credential = new ManagedIdentityCredential(clientId ? { clientId } : {})
-    let cached
-    const getAccessToken = async () => {
+    const tokens = new Map()
+    const getAccessToken = async (resource = AZURE_OPENAI_RESOURCE) => {
+      let cached = tokens.get(resource)
       if (!cached || cached.expiresOnTimestamp <= Date.now() + TOKEN_EXPIRY_MARGIN_MS) {
-        const token = await credential.getToken(`${AZURE_OPENAI_RESOURCE}/.default`, {
+        const token = await credential.getToken(`${resource}/.default`, {
           abortSignal: AbortSignal.timeout(30_000),
         })
         if (!token?.token || !Number.isFinite(token.expiresOnTimestamp) || token.expiresOnTimestamp <= Date.now()) {
           throw new Error("Managed identity returned no valid model access token.")
         }
         cached = token
+        tokens.set(resource, token)
       }
       return cached.token
     }
@@ -640,6 +741,7 @@ export async function resolveModelConfig() {
     return {
       api: "responses", deployment: managedIdentity.name, endpoint: managedIdentity.endpoint,
       model: managedIdentity.model, user: managedIdentity.user, getAccessToken,
+      getManagementAccessToken: () => getAccessToken(AZURE_MANAGEMENT_RESOURCE),
     }
   }
   const envKey = process.env.MINICODE_AUTH_ENTRY ? undefined : process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY
@@ -670,6 +772,7 @@ export async function resolveModelConfig() {
     deployment: deployment.name,
     endpoint: (process.env.AZURE_OPENAI_ENDPOINT || deployment.endpoint).replace(/\/$/, ""),
     getAccessToken,
+    getManagementAccessToken: () => getAzureAccessToken(deployment, AZURE_MANAGEMENT_RESOURCE),
     model: process.env.OPENCODE_MODEL || process.env.AZURE_OPENAI_MODEL || deployment.model,
     user: deployment.user || "login@az.cli",
     ...(deployment.azureConfigDir ? { azureConfigDir: deployment.azureConfigDir, signedInUpn: deployment.user } : {}),

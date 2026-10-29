@@ -16,6 +16,22 @@ not Windows PowerShell 5.1; there is no automatic fallback. The agent's shell
 guidance matches that runtime, so commands do not need a nested PowerShell
 wrapper. On other platforms, command execution continues to use Bash.
 
+## Session model commands
+
+Use `/model` or `/models` in the CLI REPL or a web agent pane to list models
+available from the current provider, numbered `01`, `02`, and so on, with
+`(current)` marking the active model. The web top bar follows the focused agent
+pane's model, including after reconnecting. Switch with
+`/model 01` or `/model gpt-6.1-sol`; `/models` accepts the same arguments.
+Numbers refer to the most recently displayed list. Switching preserves the
+conversation and affects only that session, not saved authentication defaults
+or other sessions. Listing failures and unknown selections are reported without
+changing the current model.
+Azure lists only successful deployments on the current resource, using the
+same identity's Azure management-plane read access. Non-chat deployments are
+excluded when the provider advertises their capabilities. Missing management
+access is reported rather than falling back to Azure's undeployed base models.
+
 ## Signed-in user for skills
 
 Agent shell tools receive `MINICODE_AGENT_USER_UPN` when the harness knows an Entra user: the authenticated paired-worker session takes precedence, otherwise an explicitly configured and verified Azure model user is used. Hosted assignments do not receive this identity. It is absent for API-key, managed-identity, GitHub Copilot, and Azure profiles without a known user. The harness removes inherited values and supplies its own for each invocation; tools should treat it as read-only identity metadata, not a credential or proof of authorization. A subprocess can alter its own environment, so it is not a security boundary. Restart Minicode or the worker to load changes.

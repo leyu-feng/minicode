@@ -147,6 +147,9 @@ function createSession(sessionId, kind, cwd, cols, rows) {
         : new ShellSession({ id: sessionId, cwd })
   const entry = { session, kind: session.kind, cwd, buffer: "", busy: false, subscriber: null, detachedAt: 0 }
 
+  session.on("model", ({ model }) => {
+    sendTo(entry.subscriber, { type: "model", sessionId, model })
+  })
   session.on("output", ({ stream, data }) => {
     // Store exactly what a client would render so replay is byte-identical.
     appendBuffer(entry, stream === "stderr" ? `\u001b[31m${data}\u001b[0m` : data)
@@ -212,6 +215,7 @@ wss.on("connection", (socket) => {
           cwd: existing.cwd,
           restored: true,
           busy: existing.busy,
+          model: existing.session.config?.model,
           buffer: existing.buffer,
         })
         return
@@ -222,7 +226,7 @@ wss.on("connection", (socket) => {
         const entry = createSession(sessionId, message.kind, cwd, message.cols, message.rows)
         entry.subscriber = socket
         owned.add(sessionId)
-        send({ type: "ready", sessionId, kind: entry.kind, cwd, restored: false, busy: false, buffer: "" })
+        send({ type: "ready", sessionId, kind: entry.kind, cwd, model: entry.session.config?.model, restored: false, busy: false, buffer: "" })
       } catch (error) {
         send({ type: "output", sessionId, stream: "stderr", data: `${error.message}\r\n` })
       }

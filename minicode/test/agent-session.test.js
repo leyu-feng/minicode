@@ -8,6 +8,102 @@ import { ShellSession } from "../server/shell-session.js"
 
 const originalFetch = globalThis.fetch
 
+test("model command aliases list and switch session models without losing context", async t => {
+  let catalogs = 0
+  const config = { api: "responses", endpoint: "https://provider.test/responses", model: "original", apiKey: "fixture" }
+  const models = [
+    { id: "gpt-6.1-sol", api: "responses", endpoint: config.endpoint },
+    { id: "kimi-k3", api: "chat-completions", endpoint: "https://provider.test/chat/completions" },
+  ]
+  const session = new AgentSession({ id: "models", cwd: process.cwd(),
+    modelConfigProvider: async () => config,
+    modelCatalogProvider: async () => { catalogs++; return models },
+  })
+  const other = new AgentSession({ id: "other", cwd: process.cwd() })
+  other.config = config
+  t.after(() => { session.dispose(); other.dispose() })
+  const output = []
+  session.on("output", event => output.push(event.data))
+  const history = [{ role: "user", content: "Remember the conversation" }]
+  session.messages.push(...history)
+  let done = 0
+  session.on("done", () => done++)
+  const modelEvents = []
+  session.on("model", event => modelEvents.push(event.model))
+
+  for (const command of ["/model", "/models"]) {
+    assert.equal((await session.write(command)).exitCode, 0)
+    assert.equal(output.at(-1), "01 gpt-6.1-sol\r\n02 kimi-k3\r\n")
+  }
+  for (const [command, expected] of [
+    ["/model 02", models[1]], ["/models 01", models[0]],
+    ["/model kimi-k3", models[1]], ["/models gpt-6.1-sol", models[0]],
+  ]) {
+    assert.equal((await session.write(command)).exitCode, 0)
+    assert.equal(session.config.model, expected.id)
+    assert.equal(session.config.api, expected.api)
+    assert.equal(session.config.endpoint, expected.endpoint)
+  }
+  assert.equal(catalogs, 2)
+  assert.equal(done, 6)
+  assert.deepEqual(session.messages, history)
+  assert.equal(other.config.model, "original")
+  assert.deepEqual(modelEvents, ["original", "kimi-k3", "gpt-6.1-sol", "kimi-k3", "gpt-6.1-sol"])
+  await session.write("/model")
+  assert.equal(output.at(-1), "01 gpt-6.1-sol (current)\r\n02 kimi-k3\r\n")
+  await session.write("/models 02")
+  await session.write("/models")
+  assert.equal(output.at(-1), "01 gpt-6.1-sol\r\n02 kimi-k3 (current)\r\n")
+  await session.write("/model 01")
+
+  const requests = []
+  globalThis.fetch = async (_url, options) => {
+    requests.push(JSON.parse(options.body))
+    return Response.json({ output_text: JSON.stringify({ type: "final", message: "done" }) })
+  }
+  assert.equal((await session.write("Continue")).exitCode, 0)
+  assert.equal(requests[0].model, "gpt-6.1-sol")
+  assert.equal(requests[0].input[0].content, history[0].content)
+})
+
+test("model selection before listing discovers models and rejects invalid selections", async t => {
+  const session = new AgentSession({ id: "model-selection", cwd: process.cwd(),
+    modelConfigProvider: async () => ({ model: "original", api: "responses", endpoint: "https://provider.test/responses" }),
+    modelCatalogProvider: async () => [{ id: "kimi-k3", api: "responses", endpoint: "https://provider.test/responses" }],
+  })
+  t.after(() => session.dispose())
+  const output = []
+  session.on("output", event => output.push(event))
+  assert.equal((await session.write("/model kimi-k3")).exitCode, 0)
+  const selected = session.config
+  for (const command of ["/model 00", "/models 02", "/model 1.5", "/model missing"]) {
+    assert.equal((await session.write(command)).exitCode, 1)
+    assert.equal(session.config, selected)
+    assert.equal(output.at(-1).stream, "stderr")
+    assert.match(output.at(-1).data, /Unknown model/)
+  }
+  assert.deepEqual(session.messages, [])
+})
+
+test("model discovery failures and interrupted listings leave session state unchanged", async t => {
+  let finish
+  const session = new AgentSession({ id: "model-errors", cwd: process.cwd(),
+    modelConfigProvider: async () => ({ model: "original" }),
+    modelCatalogProvider: async () => { throw new Error("Provider unavailable") },
+  })
+  t.after(() => session.dispose())
+  assert.equal((await session.write("/models")).error, "Provider unavailable")
+  assert.equal(session.config.model, "original")
+  session.modelCatalogProvider = () => new Promise(resolve => { finish = resolve })
+  const listing = session.write("/model")
+  session.interrupt()
+  finish([{ id: "late", api: "responses", endpoint: "https://provider.test/responses" }])
+  await listing
+  assert.equal(session.availableModels, undefined)
+  assert.equal(session.config.model, "original")
+  assert.deepEqual(session.messages, [])
+})
+
 test("worker shell uses its selected Azure context instead of the model context", async t => {
   const actions = [{ type: "tool", command: "echo fixture" }, { type: "final", message: "done" }]
   globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] })
