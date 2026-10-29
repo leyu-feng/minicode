@@ -34,7 +34,10 @@ function fixture(t, { languageMode = "FullLanguage", autoDetect = true } = {}) {
         if (marker) proc.marker = marker
       }
     }
-    proc.stdin.destroy = () => { proc.destroyed = true }
+    proc.stdin.destroy = () => {
+      proc.destroyed = true
+      queueMicrotask(() => { proc.exitCode = 1; proc.emit("close", 1) })
+    }
     processes.push(proc)
     return proc
   })

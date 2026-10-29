@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { EventEmitter, once } from "node:events"
 import { createHash, randomUUID } from "node:crypto"
-import { execFile } from "node:child_process"
+import childProcess, { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { fileURLToPath } from "node:url"
 import test from "node:test"
@@ -122,6 +122,88 @@ async function harness(t, factory, workerOptions = {}) {
       worker = await startAgentPoolWorker(options)
     },
   }
+}
+
+for (const languageMode of ["FullLanguage", "ConstrainedLanguage"]) {
+  test(`worker retains both PowerShell versions across agents/assignments in ${languageMode}`, {
+    skip: process.platform !== "win32", timeout: 30000,
+  }, async t => {
+    if (languageMode === "ConstrainedLanguage") {
+      const spawn = childProcess.spawn
+      t.mock.method(childProcess, "spawn", (file, args, options) => {
+        const proc = spawn(file, args, options)
+        if (file === "pwsh.exe" || file === "powershell.exe") {
+          proc.stdin.write("$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n")
+        }
+        return proc
+      })
+    }
+    const actions = []
+    t.mock.method(globalThis, "fetch", async () => {
+      assert.ok(actions.length, "Unexpected model request")
+      return Response.json({ output_text: JSON.stringify(actions.shift()) })
+    })
+    const sessions = []
+    const logs = []
+    const fixture = await harness(t, options => {
+      const session = new AgentSession(options)
+      session.config = { api: "responses", endpoint: "https://provider.test", apiKey: "fixture", model: "fixture" }
+      sessions.push(session)
+      return session
+    }, { workspaceMode: "worktree", log: line => logs.push(line) })
+    const peer = await fixture.welcome(0)
+    const versions = ["powershell-5.1", "powershell-7"]
+    for (const shell of versions) actions.push({ type: "tool", shell, command: `
+$savedWorker='${shell}'
+function Get-WorkerSaved { $savedWorker }
+$env:RETAINED_CUSTOM='kept'
+$env:PAPERCLIP_OBSOLETE='stale'
+$env:MINICODE_SECRET_STORE_URL='stale'
+$env:MINICODE_SECRET_STORE_CAPABILITY='stale'
+Set-Location $env:WORKER_SHARED
+Write-Output 'first-completed'
+` })
+    actions.push({ type: "final", message: "done" })
+    await executeTask(peer, { runId: "first-assignment", agent, authToken: "first-token",
+      context: { taskId: "first-task", wakeCommentId: "first-comment" } })
+    assert.equal(sessions[0].closed, true)
+    const shells = sessions[0].shells
+    const processes = versions.map(version => shells.get(version).proc)
+    assert.ok(processes.every(proc => proc && proc.exitCode === null))
+    assert.notEqual(processes[0].pid, processes[1].pid)
+
+    for (const shell of versions) actions.push({ type: "tool", shell, command: `
+if ((Get-WorkerSaved) -ne '${shell}' -or $env:RETAINED_CUSTOM -ne 'kept') { throw 'Worker state was lost' }
+if ($env:PAPERCLIP_RUN_ID -ne 'second-assignment' -or $env:PAPERCLIP_AGENT_ID -ne 'agent-b') { throw 'Stale run/agent metadata' }
+if ($env:PAPERCLIP_API_KEY -ne 'second-token' -or $env:PAPERCLIP_TASK_ID -ne 'second-task') { throw 'Stale task credentials' }
+if ($env:PAPERCLIP_WAKE_COMMENT_ID -or $env:PAPERCLIP_OBSOLETE -or $env:MINICODE_SECRET_STORE_URL -or $env:MINICODE_SECRET_STORE_CAPABILITY) { throw 'Stale task environment' }
+Write-Output ('current-directory=' + (Get-Location).Path)
+$ExecutionContext.SessionState.LanguageMode
+` })
+    actions.push({ type: "final", message: "done" })
+    await executeTask(peer, { runId: "second-assignment", agent: { id: "agent-b", name: "Agent B" },
+      authToken: "second-token", context: { taskId: "second-task" } })
+    assert.equal(sessions[1].shells, shells)
+    assert.notEqual(sessions[0].cwd, sessions[1].cwd)
+    for (const [index, version] of versions.entries()) {
+      assert.equal(shells.get(version).proc, processes[index], "Assignment completion must not replace the process")
+      assert.equal(shells.get(version).languageMode, languageMode)
+      const result = sessions[1].messages.find(message => message.content.startsWith("TOOL_RESULT") && message.content.includes(`shell: ${version}`)).content
+      assert.ok(result.includes(`current-directory=${sessions[1].cwd}`), result)
+      const requests = logs.filter(line => line.includes(` ${version} pid=${processes[index].pid}]`))
+      assert.equal(requests.length, 2, "Both assignments must log the same worker PID")
+      assert.ok(!sessions[1].messages.some(message => message.content.includes("first-completed")))
+    }
+    assert.match(sessions[1].systemPrompt, /shared across ALL assignments and agents/)
+    let closedCount = 0
+    for (const proc of processes) proc.once("close", () => { closedCount++ })
+    const closed = Promise.all(processes.map(proc => once(proc, "close")))
+    await fixture.worker.stop()
+    assert.equal(closedCount, 2, "Worker stop must wait for retained processes to exit")
+    await closed
+    assert.equal(shells.size, 0)
+    assert.equal(actions.length, 0)
+  })
 }
 
 test("worker automatically loads worktree and verified bundle skills", async t => {

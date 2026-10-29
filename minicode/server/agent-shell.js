@@ -17,6 +17,7 @@ export class AgentPowerShell {
     this.proc = null
     this.pending = null
     this.closed = false
+    this.processClosures = new Set()
   }
 
   run(command, { signal, onData, onRequest } = {}) {
@@ -81,6 +82,9 @@ export class AgentPowerShell {
       cwd: this.cwd, env: this.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
     })
     this.proc = proc
+    const closed = new Promise(resolve => proc.once("close", resolve))
+    this.processClosures.add(closed)
+    void closed.then(() => this.processClosures.delete(closed))
     proc.modeMarker = `__MINICODE_${randomUUID().replaceAll("-", "")}_MODE__:`
     proc.modeBuffer = ""
     for (const stream of ["stdout", "stderr"]) {
@@ -234,6 +238,8 @@ export class AgentPowerShell {
       clearTimeout(proc.exitTimer)
       if (proc.exitCode === null) killTree(proc.pid)
       proc.stdin.destroy()
+      proc.stdout.destroy?.()
+      proc.stderr.destroy?.()
     }
     const notice = `${this.shell} session state was lost. ${reason} The next command will start a fresh session.`
     if (this.pending) {
@@ -246,11 +252,12 @@ export class AgentPowerShell {
   }
 
   dispose() {
-    if (this.closed) return
+    if (this.closed) return Promise.all(this.processClosures)
     this.closed = true
     this.onStateLost = null
     this.onBackgroundOutput = null
     this.onLanguageMode = null
     this.#reset("Session closed.", 130)
+    return Promise.all(this.processClosures)
   }
 }

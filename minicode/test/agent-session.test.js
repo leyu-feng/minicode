@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import childProcess from "node:child_process"
-import { EventEmitter } from "node:events"
+import { EventEmitter, once } from "node:events"
 import { fileURLToPath } from "node:url"
 import test, { afterEach } from "node:test"
 import { AgentSession, callModelOnce } from "../server/agent-session.js"
@@ -56,6 +56,42 @@ for (const api of ["responses", "chat-completions"]) {
     assert.ok(guidance.includes(instructions))
   })
 }
+
+test("shared PowerShell context refresh failure discards the process without executing the next assignment command", {
+  skip: process.platform !== "win32", timeout: 15000,
+}, async t => {
+  const powerShells = new Map()
+  const sessions = []
+  t.after(() => {
+    for (const session of sessions) session.dispose()
+    for (const shell of powerShells.values()) shell.dispose()
+  })
+  const actions = [
+    { type: "tool", shell: "powershell-5.1", command: "$savedWorker=42" },
+    { type: "final", message: "done" },
+    { type: "tool", shell: "powershell-5.1", command: "Write-Output 'never-executed'" },
+  ]
+  globalThis.fetch = async () => Response.json({ output_text: JSON.stringify(actions.shift()) })
+  const logs = []
+  const createSession = (id, cwd) => {
+    const session = new AgentSession({ id, cwd, powerShells, shellLog: line => logs.push(line) })
+    session.config = { api: "responses", endpoint: "https://provider.test", apiKey: "fixture", model: "fixture" }
+    sessions.push(session)
+    return session
+  }
+  const first = createSession("first-assignment", process.cwd())
+  assert.equal((await first.write("Establish worker state")).exitCode, 0)
+  first.dispose()
+  const proc = powerShells.get("powershell-5.1").proc
+  const closed = once(proc, "close")
+  const second = createSession("second-assignment", `${process.cwd()}\\missing-workspace-${proc.pid}`)
+  const result = await second.write("Continue on the same worker")
+  assert.equal(result.exitCode, 1)
+  assert.match(result.error, /Could not refresh powershell-5.1 assignment context.*task command was not executed/)
+  assert.equal(powerShells.size, 0)
+  await closed
+  assert.ok(!logs.some(line => line.includes("never-executed")))
+})
 
 test("model command aliases list and switch session models without losing context", async t => {
   let catalogs = 0

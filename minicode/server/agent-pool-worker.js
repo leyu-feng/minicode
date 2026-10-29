@@ -308,6 +308,8 @@ export async function startAgentPoolWorker({
   let stopped = false
   let connected = false
   let active = null
+  const powerShells = new Map()
+  const shellController = new AbortController()
   let previousServer = null
   let retiring = false
   let idleSince = null
@@ -345,13 +347,16 @@ export async function startAgentPoolWorker({
     clearTimeout(retirementTimer)
     clearTimeout(active?.deadline)
     active?.controller.abort()
+    shellController.abort()
     active?.session?.interrupt()
     socket?.close(1000, "worker stopped")
     // write() settles only after its active model/tool operation unwinds.
     await active?.execution
     await diskCheck
-    worktree?.release()
     active?.session?.dispose()
+    await Promise.all([...powerShells.values()].map(shell => shell.dispose()))
+    powerShells.clear()
+    worktree?.release()
     await proxy?.close()
     try { await onStateChange({ state: "stopped", runId: null, agentId: null }) }
     catch (stateError) { error ??= stateError }
@@ -379,9 +384,24 @@ export async function startAgentPoolWorker({
     active.events = active.events.filter((event) => event.seq > seq)
     if (completed) {
       if (!active.done || seq !== active.seq) throw new Error("AgentPool completed an unfinished execution")
+      if (active.completing) return
+      active.completing = true
       await active.execution
+      if (stopped) return
       clearTimeout(active.deadline)
       active.session?.dispose()
+      // Idle shells must not hold an assignment worktree open on Windows.
+      for (const [name, shell] of powerShells) {
+        if (!shell.proc) continue
+        const parked = await shell.run(`Set-Location -LiteralPath '${workerShared.replaceAll("'", "''")}' -ErrorAction Stop`, { signal: shellController.signal })
+        if (stopped) return
+        if (parked.code !== 0) {
+          log(`[minicode] ${name} could not leave its assignment workspace (exit ${parked.code}); discarding its session state.`)
+          await shell.dispose()
+          if (stopped) return
+          powerShells.delete(name)
+        }
+      }
       worktree?.release()
       active = null
       await enterIdle()
@@ -518,6 +538,7 @@ export async function startAgentPoolWorker({
         id: task.runId, cwd: workspace, toolAzureConfigDir,
         workerLabel: workerName ?? workerId,
         shellLog: log,
+        powerShells,
         signedInUpn: hostedRoot ? "" : entraSession?.user?.(),
         interactiveSecretStore: secretStore === true,
         captureFailedPrompt: Boolean(onModelFailure),
@@ -572,7 +593,7 @@ export async function startAgentPoolWorker({
           "If a required skill/instruction is not supplied or available inside the workspace or the read-only shared folder, or a required endpoint/credential is missing, stop and report the blocker. Do not improvise a replacement workflow.",
           "If a required server/tool request cannot connect or returns an authentication/authorization failure, stop task execution. Do not expand filesystem searches or try alternate servers to work around the failure.",
           'Report the failed operation, sanitized HTTP status or connection error, and the access/material needed. Use an already-working authorized reporting channel if available; otherwise report through the worker result only. Never print credentials or claim the server was updated when it was not.',
-          'Waiting for human input is not a failed execution. After successfully saving a human question through the supplied task API, save progress and durable artifacts, set the task to its waiting/blocked state, then finish with {"type":"final","message":"<saved progress and question awaiting an answer>"} without error. Do not keep tools running or poll for an answer. The harness releases this assignment; the answer starts a fresh session for the same agent on any available worker.',
+          'Waiting for human input is not a failed execution. After successfully saving a human question through the supplied task API, save progress and durable artifacts, set the task to its waiting/blocked state, then finish with {"type":"final","message":"<saved progress and question awaiting an answer>"} without error. Do not keep tools running or poll for an answer. The harness releases this assignment; the answer starts a fresh conversation for the same agent on any available worker. On the same worker, each PowerShell version retains its process across all assignments and agents; another worker or a worker restart has separate shell state.',
           "A fresh continuation contains the original task, saved conversation, human answers and recorded completed actions. Continue only the remaining work. Do not replay old commands, repeat completed mutations, publish another PR, or assume local files survived. Verify uncertain external outcomes through authorized read-only tools before deciding what to do; ask a human when they cannot be verified.",
           'For actual execution failures or blockers without a successfully saved human question, finish with {"type":"final","message":"<blocker and required next step>","error":"<short failure reason>"} so the run is marked failed rather than successful. A question must not hide failed publication/registration, incomplete cleanup, or an uncertain mutating operation; report those failures explicitly.',
           ...(guidance.sharedInstructions === null ? [] : [

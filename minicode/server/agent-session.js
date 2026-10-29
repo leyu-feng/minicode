@@ -13,6 +13,7 @@ import { AgentPowerShell } from "./agent-shell.js"
 const MAX_TOOL_TURNS = 1000
 const MAX_OUTPUT_CHARS = 12000
 const MAX_ACTIVITY_CHARS = 24000
+const ASSIGNMENT_SHELL_ENV = /^(PAPERCLIP_|MINICODE_(?:ORCHESTRATOR_)?SECRET_STORE_|MINICODE_AGENT_USER_UPN$|WORKER_SHARED$|WORKER_REFERENCE_REPOS_JSON$|AZURE_CONFIG_DIR$)/i
 const AZURE_MODEL_FALLBACK_CHAIN = [
   "gpt-5.6-sol",
   "gpt-6-sol",
@@ -370,7 +371,7 @@ export function callModelOnce(config, messages) {
  * for the lifetime of the session.
  */
 export class AgentSession extends EventEmitter {
-  constructor({ id, cwd, env, workerLabel, shellLog, toolAzureConfigDir, signedInUpn, instructions = "", tools = [], modelConfigProvider = resolveModelConfig, modelCatalogProvider = listAvailableModels, captureFailedPrompt = false, interactiveSecretStore = false }) {
+  constructor({ id, cwd, env, workerLabel, shellLog, powerShells, toolAzureConfigDir, signedInUpn, instructions = "", tools = [], modelConfigProvider = resolveModelConfig, modelCatalogProvider = listAvailableModels, captureFailedPrompt = false, interactiveSecretStore = false }) {
     super()
     this.id = id
     this.kind = "agent"
@@ -401,7 +402,9 @@ export class AgentSession extends EventEmitter {
     // after the browser has returned to its prompt.
     this.activeRun = null
     this.nextRunId = 0
-    this.shells = new Map()
+    this.sharedPowerShells = powerShells !== undefined
+    this.shells = powerShells ?? new Map()
+    this.boundShells = new Set()
     this.shellStateNotices = []
     this.systemPrompt = [
       "You are a practical coding agent.",
@@ -434,7 +437,10 @@ export class AgentSession extends EventEmitter {
         "PowerShell language mode is detected from $ExecutionContext.SessionState.LanguageMode in each actual shell process, separately for PowerShell 7 and 5.1, and reported in TOOL_RESULT. This is informational: ConstrainedLanguage does not prevent running PowerShell commands, and the harness supports commands in that mode. Until detected, its mode is unknown; never assume FullLanguage. In ConstrainedLanguage, prefer ordinary cmdlets and policy-permitted operations; avoid Add-Type, arbitrary .NET/COM method calls, reflection, or other restricted features. Let PowerShell enforce its policy and report specific command failures, not a blanket inability to use PowerShell. Never change LanguageMode, disable application-control/security policy, or switch shells, hosts, identities or interpreters to evade restrictions.",
         "Shell commands already execute directly in PowerShell 7 (pwsh.exe -NoProfile -NonInteractive -Command) by default. For a command or module that requires Windows PowerShell 5.1, set shell to \"powershell-5.1\" on that tool action; it runs directly in powershell.exe with the same flags for that command only. Omit shell or use \"powershell-7\" for PowerShell 7. Do not wrap commands in another pwsh/powershell invocation. No automatic shell fallback occurs.",
         "Escape quotes inside PowerShell strings with a backtick (`\"), never a backslash.",
-        "Each PowerShell version has its own persistent process for this conversation. Variables, functions, imported modules, environment changes and current directory persist between commands of that version, not across versions or conversations. Commands run sequentially. If a timeout, cancellation or process exit loses shell state, the harness reports it; re-establish required context rather than assuming it survived.",
+        this.sharedPowerShells
+          ? "Each PowerShell version has one worker-owned persistent process shared across ALL assignments and agents on this worker. Variables, functions, modules, non-task environment changes and authenticated connections can survive assignment completion. The harness refreshes run credentials/task environment and resets the current directory to the assigned workspace at each assignment's first use of that shell. Always use current environment credentials, not cached run tokens/headers from prior assignments. Retained state is not authorization for the current task; verify needed state without exposing credentials. Conversation history and harness tools remain assignment-specific. State is not shared across PowerShell versions or workers."
+          : "Each PowerShell version has its own persistent process for this conversation. Variables, functions, imported modules, environment changes and current directory persist between commands of that version, not across versions or conversations.",
+        "Commands run sequentially. If a timeout, cancellation or process exit loses shell state, the harness reports it; re-establish required context rather than assuming it survived.",
       ] : ["Shell commands already execute in bash -lc; use Bash syntax."]),
       // Scheduled tasks outlive the session, so keep every one Minicode creates in one folder the
       // user can review and clean up, and make sure the user hears about it.
@@ -713,26 +719,50 @@ export class AgentSession extends EventEmitter {
         if (process.platform === "win32") {
           const shellName = action.shell ?? "powershell-7"
           let shell = this.shells.get(shellName)
+          const callbacks = {
+            onLanguageMode: ({ shell, pid, languageMode }) => {
+              if (this.closed) return
+              const notice = `${shell} pid=${pid ?? "unavailable"} language mode: ${languageMode}.`
+              this.#emitOutput(`${shell} language mode: ${languageMode}.\r\n`, "stderr")
+              const worker = stripVTControlCharacters(String(this.workerLabel)).replace(/\s+/g, " ")
+              this.shellLog?.(`[minicode] [worker=${worker}] ${notice}`)
+            },
+            onStateLost: notice => {
+              if (this.closed) return
+              this.shellStateNotices.push(notice)
+              this.#emitOutput(`${notice}\r\n`, "stderr")
+            },
+            onBackgroundOutput: text => {
+              if (!this.closed) this.#emitOutput(text.replace(/\r?\n/g, "\r\n"), "command")
+            },
+          }
           if (!shell) {
-            shell = new AgentPowerShell({
-              shell: shellName, cwd: this.cwd, env: shellEnv,
-              onLanguageMode: ({ shell, pid, languageMode }) => {
-                if (this.closed) return
-                const notice = `${shell} pid=${pid ?? "unavailable"} language mode: ${languageMode}.`
-                this.#emitOutput(`${shell} language mode: ${languageMode}.\r\n`, "stderr")
-                const worker = stripVTControlCharacters(String(this.workerLabel)).replace(/\s+/g, " ")
-                this.shellLog?.(`[minicode] [worker=${worker}] ${notice}`)
-              },
-              onStateLost: notice => {
-                if (this.closed) return
-                this.shellStateNotices.push(notice)
-                this.#emitOutput(`${notice}\r\n`, "stderr")
-              },
-              onBackgroundOutput: text => {
-                if (!this.closed) this.#emitOutput(text.replace(/\r?\n/g, "\r\n"), "command")
-              },
-            })
+            shell = new AgentPowerShell({ shell: shellName, cwd: this.cwd, env: shellEnv, ...callbacks })
             this.shells.set(shellName, shell)
+          } else {
+            Object.assign(shell, callbacks)
+          }
+          const firstUse = !this.boundShells.has(shell)
+          this.boundShells.add(shell)
+          if (this.sharedPowerShells && firstUse) {
+            shell.cwd = this.cwd
+            shell.env = shellEnv
+            if (shell.proc) {
+              const quote = value => `'${String(value).replaceAll("'", "''")}'`
+              const refresh = [
+                `Set-Location -LiteralPath ${quote(this.cwd)} -ErrorAction Stop`,
+                `Get-ChildItem Env: | Where-Object { $_.Name -match ${quote(ASSIGNMENT_SHELL_ENV.source)} } | Remove-Item -ErrorAction Stop`,
+                ...Object.entries(shellEnv).filter(([key, value]) => ASSIGNMENT_SHELL_ENV.test(key) && value !== undefined)
+                  .map(([key, value]) => `Set-Item -LiteralPath ${quote(`Env:\\${key}`)} -Value ${quote(value)} -ErrorAction Stop`),
+              ].join("\n")
+              const refreshed = await shell.run(`try {\n${refresh}\n} catch { throw 'Assignment PowerShell environment/workspace refresh failed; task command was not executed.' }`, { signal })
+              this.#throwIfInactive(run)
+              if (refreshed.code !== 0) {
+                await shell.dispose()
+                this.shells.delete(shellName)
+                throw new Error(`Could not refresh ${shellName} assignment context (exit ${refreshed.code}); task command was not executed.`)
+              }
+            }
           }
           shellResult = { ...await shell.run(command, shellOptions), languageMode: shell.languageMode ?? "unknown" }
         } else shellResult = await runShellCommand(command, shellOptions)
@@ -815,7 +845,18 @@ export class AgentSession extends EventEmitter {
     this.activeRun = null
     this.controller = null
     run?.controller.abort()
-    for (const shell of this.shells.values()) shell.dispose()
-    this.shells.clear()
+    if (this.sharedPowerShells) {
+      const log = this.shellLog
+      const worker = stripVTControlCharacters(String(this.workerLabel)).replace(/\s+/g, " ")
+      for (const shell of this.boundShells) {
+        shell.onLanguageMode = null
+        shell.onStateLost = null
+        shell.onBackgroundOutput = text => log?.(`[minicode] [worker=${worker} ${shell.shell} idle] ${text}`)
+      }
+    } else {
+      for (const shell of this.shells.values()) shell.dispose()
+      this.shells.clear()
+    }
+    this.boundShells.clear()
   }
 }
