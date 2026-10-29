@@ -26,6 +26,29 @@ function shellProcessFixture() {
   return proc
 }
 
+for (const api of ["responses", "chat-completions"]) {
+  test(`${api} requests include Git-scoped discovery guidance alongside worker instructions`, async t => {
+    let request
+    globalThis.fetch = async (_url, options) => {
+      request = JSON.parse(options.body)
+      const content = JSON.stringify({ type: "final", message: "done" })
+      return Response.json(api === "responses" ? { output_text: content } : { choices: [{ message: { content } }] })
+    }
+    const instructions = "Inspect the assigned service before making changes."
+    const session = new AgentSession({ id: "git-discovery", cwd: process.cwd(), instructions })
+    session.config = { api, endpoint: "https://provider.test", apiKey: "fixture", model: "fixture" }
+    t.after(() => session.dispose())
+    assert.equal((await session.write("Find the implementation")).exitCode, 0)
+    const guidance = api === "responses" ? request.instructions : request.messages[0].content
+    assert.match(guidance, /only Git-managed files with git ls-files -- <task-relevant pathspecs>/)
+    assert.match(guidance, /Search tracked file contents with git grep/)
+    assert.match(guidance, /Do not map a repository with Get-ChildItem/)
+    assert.match(guidance, /If Git is unavailable or the directory is not in a Git worktree/)
+    assert.match(guidance, /do not silently fall back to recursive filesystem scans/)
+    assert.ok(guidance.includes(instructions))
+  })
+}
+
 test("model command aliases list and switch session models without losing context", async t => {
   let catalogs = 0
   const config = { api: "responses", endpoint: "https://provider.test/responses", model: "original", apiKey: "fixture" }

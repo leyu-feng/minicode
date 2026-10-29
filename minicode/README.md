@@ -10,6 +10,12 @@ Both drive the same `AgentSession` class and the same `auth.js`, so there is one
 agent implementation and one credential path to maintain. Nothing here needs
 native modules (no `node-pty`, no platform binaries).
 
+The core agent guidance uses `git ls-files` for repository discovery and
+`git grep` for content searches, scoped to task-relevant paths. It avoids
+untracked/ignored files and generated directories unless the task requires
+them, rather than recursively mapping the filesystem. Outside a Git worktree
+or without Git, it reports the limitation and uses shallow, scoped listings.
+
 On Windows, install **PowerShell 7** and ensure `pwsh.exe` is available on
 `PATH`. Agent commands and web terminal shells run directly in PowerShell 7,
 not Windows PowerShell 5.1, by default; there is no automatic fallback.
