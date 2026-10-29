@@ -38,15 +38,26 @@ export class AgentPowerShell {
           if (this.pending !== run) return
           clearTimeout(run.timer)
           run.timer = setTimeout(() => this.#reset("Command timed out after 120s.", 1), 120000)
-          if (this.languageMode !== "FullLanguage") {
-            this.#finish(1, `${this.shell} language mode: ${this.languageMode}. Command was not executed: the persistent shell transport requires FullLanguage. Use an approved compatible harness tool or report the restriction; do not bypass language-mode or application-control policy.`)
-            return
-          }
           try {
             const status = `__minicode_${randomUUID().replaceAll("-", "")}`
             const completed = `${status}_finished`
-            const encoded = Buffer.from(`try {\n${command}\n} finally { $global:${status}=if ($?) { 0 } else { 1 } }`, "utf8").toString("base64")
+            const script = `try {\n${command}\n} finally { $global:${status}=if ($?) { 0 } else { 1 } }`
             onRequest?.({ shell: this.shell, pid: this.proc.pid })
+            if (this.languageMode !== "FullLanguage") {
+              // Invoke-Expression uses the current scope and enforced language
+              // mode; no ScriptBlock compilation or policy changes are needed.
+              const literal = "'" + script.replaceAll("'", "''").replace(/[^\x20-\x7e]/g, char => `' + [char]${char.charCodeAt(0)} + '`) + "'"
+              run.singleStream = true
+              run.outputMarker = marker.replace("_DONE__:", "_OUTPUT__:")
+              // ASCII framing preserves Unicode without changing Console's
+              // encoding, which ConstrainedLanguage does not permit.
+              const output = `Out-String -Stream | ForEach-Object { Write-Output ('${run.outputMarker}' + (-join ($_.ToCharArray() | ForEach-Object { ([int]$_).ToString('x4') })) + '000a:END__') }`
+              this.proc.stdin.write(
+                `$${status}=1; $${completed}=$false; try { Invoke-Expression -Command (${literal}) 2>&1 | ${output}; $${completed}=$true } catch { $${status}=1; $${completed}=$true; $_ | ${output} } finally { if ($${completed}) { Write-Output ('${marker}'+$${status}+':END__') }; Remove-Variable -Name '${status}','${completed}' -ErrorAction SilentlyContinue }\n`,
+              )
+              return
+            }
+            const encoded = Buffer.from(script, "utf8").toString("base64")
             // Dot-sourcing preserves variables, functions and modules. Out-Default
             // flushes PowerShell's formatter before either completion marker.
             this.proc.stdin.write(
@@ -154,6 +165,25 @@ export class AgentPowerShell {
     if (!run) return this.#append(text)
     const state = run.streams[stream]
     state.buffer += text
+    if (run.singleStream && stream === "stdout") {
+      let start
+      while ((start = state.buffer.indexOf(run.outputMarker)) !== -1) {
+        const end = state.buffer.indexOf(":END__", start + run.outputMarker.length)
+        if (end === -1) return
+        const newline = state.buffer.slice(end + ":END__".length).match(/^\r?\n/)
+        if (!newline) return
+        const hex = state.buffer.slice(start + run.outputMarker.length, end)
+        if (!/^(?:[0-9a-f]{4})*$/i.test(hex)) {
+          this.#reset("PowerShell returned an invalid output frame.", 1)
+          return
+        }
+        this.#append(state.buffer.slice(0, start))
+        if (this.pending !== run) return
+        this.#append(Buffer.from(hex, "hex").swap16().toString("utf16le"))
+        if (this.pending !== run) return
+        state.buffer = state.buffer.slice(end + ":END__".length + newline[0].length)
+      }
+    }
     const index = state.buffer.indexOf(run.marker)
     if (index !== -1) {
       this.#append(state.buffer.slice(0, index))
@@ -167,6 +197,10 @@ export class AgentPowerShell {
       state.buffer = ""
       if (remainder) this.#append(remainder)
       if (this.pending !== run) return
+      if (run.singleStream && stream === "stdout") {
+        this.#finish(state.code)
+        return
+      }
       if (run.streams.stdout.done && run.streams.stderr.done) {
         if (run.streams.stdout.code !== run.streams.stderr.code) {
           this.#reset("PowerShell completion markers disagreed.", 1)
@@ -174,8 +208,9 @@ export class AgentPowerShell {
       }
       return
     }
-    let keep = Math.min(state.buffer.length, run.marker.length - 1)
-    while (keep && !state.buffer.endsWith(run.marker.slice(0, keep))) keep--
+    const markers = run.outputMarker ? [run.marker, run.outputMarker] : [run.marker]
+    let keep = Math.min(state.buffer.length, Math.max(...markers.map(marker => marker.length)) - 1)
+    while (keep && !markers.some(marker => state.buffer.endsWith(marker.slice(0, keep)))) keep--
     this.#append(state.buffer.slice(0, state.buffer.length - keep))
     if (this.pending !== run) return
     state.buffer = state.buffer.slice(state.buffer.length - keep)

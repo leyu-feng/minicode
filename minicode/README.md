@@ -40,10 +40,11 @@ Before sending the first command to each PowerShell process, Minicode queries
 reports the actual mode to the model, web transcript, and backend console.
 The model must respect ConstrainedLanguage and must not change language mode,
 weaken security policy, or switch hosts/interpreters to bypass restrictions.
-The current persistent shell transport requires FullLanguage; under
-ConstrainedLanguage or another restricted mode it rejects commands explicitly
-without sending them or attempting its unsupported initialization. The model
-must use an approved compatible harness tool or report the blocker.
+Language mode is informational, not a blanket command block. Under
+ConstrainedLanguage the persistent transport uses cmdlets, preserves session
+scope, and captures output/errors without FullLanguage-only .NET calls.
+PowerShell still enforces its restrictions on individual commands; the model
+should use permitted cmdlets and report specific failures.
 If mode detection fails, no user command is sent; it fails after 10 seconds
 rather than assuming FullLanguage.
 The web backend console (not the browser transcript) logs every PowerShell

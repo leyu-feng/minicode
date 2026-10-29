@@ -60,20 +60,33 @@ test("language-mode handshake handles split output before sending any command", 
   assert.deepEqual(await pending, { code: 0, output: "" })
 })
 
-for (const languageMode of ["ConstrainedLanguage", "RestrictedLanguage", "NoLanguage"]) {
-  test(`${languageMode} is reported without sending commands or FullLanguage initialization`, async t => {
-    const { shell, processes, modes } = fixture(t, { languageMode })
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const result = await shell.run("Write-Output 'must-not-execute'")
-      assert.equal(result.code, 1)
-      assert.ok(result.output.includes(`language mode: ${languageMode}`))
-      assert.match(result.output, /Command was not executed/)
-    }
-    assert.equal(processes.length, 1)
-    assert.equal(processes[0].scripts.length, 1)
-    assert.equal(modes[0].languageMode, languageMode)
-  })
-}
+test("ConstrainedLanguage runs commands without FullLanguage initialization and completes on merged output", async t => {
+  const { shell, processes, modes, complete } = fixture(t, { languageMode: "ConstrainedLanguage" })
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const pending = shell.run("Write-Output 'permitted'")
+    processes[0].stdout.emit("data", "permitted\n")
+    complete(processes[0], "stdout")
+    assert.deepEqual(await pending, { code: 0, output: "permitted\n" })
+  }
+  assert.equal(processes.length, 1)
+  assert.equal(processes[0].scripts.length, 3)
+  assert.equal(modes[0].languageMode, "ConstrainedLanguage")
+  assert.ok(processes[0].scripts.every(script => !/ScriptBlock|Text.Encoding|FromBase64String|Console/.test(script)))
+})
+
+test("ConstrainedLanguage output frames preserve split Unicode and do not interpret decoded text as control markers", async t => {
+  const { shell, processes, complete } = fixture(t, { languageMode: "ConstrainedLanguage" })
+  let live = ""
+  const pending = shell.run("fixture", { onData: text => { live += text } })
+  const proc = processes[0]
+  const outputMarker = proc.marker.replace("_DONE__:", "_OUTPUT__:")
+  const expected = `quoted 'text' \u4e2d \ud83d\ude00 ${proc.marker}0:END__\n`
+  const frame = `${outputMarker}${Buffer.from(expected, "utf16le").swap16().toString("hex")}:END__\r\n`
+  for (let offset = 0; offset < frame.length; offset += 3) proc.stdout.emit("data", frame.slice(offset, offset + 3))
+  assert.equal(live, expected)
+  complete(proc, "stdout")
+  assert.deepEqual(await pending, { code: 0, output: expected })
+})
 
 test("unreadable language mode fails explicitly without executing the command", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] })
@@ -177,7 +190,7 @@ test("disposal kills the persistent process and settles a pending command withou
 })
 
 for (const version of ["powershell-7", "powershell-5.1"]) {
-  test(`${version} detects real ConstrainedLanguage without attempting its unsupported transport`, {
+  test(`${version} executes and preserves state in real ConstrainedLanguage while policy still rejects restricted operations`, {
     skip: process.platform !== "win32", timeout: 15000,
   }, async t => {
     const spawn = childProcess.spawn
@@ -190,11 +203,38 @@ for (const version of ["powershell-7", "powershell-5.1"]) {
     })
     const shell = new AgentPowerShell({ shell: version, cwd: process.cwd(), env: process.env })
     t.after(() => shell.dispose())
-    const result = await shell.run("throw 'User command must not execute'")
+    const result = await shell.run("$saved=42; function Get-Saved { $saved }; Write-Output 'permitted'")
     assert.equal(shell.languageMode, "ConstrainedLanguage")
-    assert.equal(result.code, 1)
-    assert.match(result.output, /Command was not executed/)
-    assert.doesNotMatch(result.output, /User command must not execute|MethodInvocationNotSupported/)
+    assert.equal(result.code, 0, result.output)
+    assert.match(result.output, /permitted/)
+    const persisted = await shell.run("Get-Saved; $ExecutionContext.SessionState.LanguageMode; Write-Output 'quoted ''text'' \u4e2d'")
+    assert.equal(persisted.code, 0, persisted.output)
+    assert.match(persisted.output, /42[\s\S]*ConstrainedLanguage[\s\S]*quoted 'text' \u4e2d/)
+    for (const command of ["throw 'fixture-failure'", "Write-Error 'nonterminating-error'", "if (", "[Console]::WriteLine('restricted')", "cmd.exe /c exit 9"]) {
+      const failure = await shell.run(command)
+      assert.equal(failure.code, 1, `${command}: ${failure.output}`)
+      assert.ok(failure.output.length > 0 || command === "cmd.exe /c exit 9")
+    }
+    const recovered = await shell.run("return (Get-Saved)")
+    assert.equal(recovered.code, 0, recovered.output)
+    assert.match(recovered.output, /42/)
+    const controller = new AbortController()
+    let started
+    const ready = new Promise(resolve => { started = resolve })
+    const running = shell.run("Write-Output 'ready'; Start-Sleep -Seconds 60", {
+      signal: controller.signal, onData: text => { if (text.includes("ready")) started() },
+    })
+    await ready
+    const closed = once(shell.proc, "close")
+    controller.abort()
+    assert.equal((await running).code, 130)
+    await closed
+    const fresh = await shell.run("if ($saved) { throw 'State leaked' }; $ExecutionContext.SessionState.LanguageMode")
+    assert.equal(fresh.code, 0, fresh.output)
+    assert.match(fresh.output, /ConstrainedLanguage/)
+    const exited = await shell.run("exit 7")
+    assert.equal(exited.code, 1)
+    assert.match(exited.output, /session state was lost.*exited \(7\)/)
   })
 
   test(`${version} retains variables, modules, functions, environment and cwd while capturing command errors`, {

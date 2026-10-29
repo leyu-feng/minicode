@@ -21,7 +21,7 @@ function shellProcessFixture(languageMode = "FullLanguage") {
     const marker = script.match(/__MINICODE_[a-f0-9]+_DONE__:/)?.[0]
     if (marker) queueMicrotask(() => {
       proc.stdout.emit("data", `${marker}0:END__`)
-      proc.stderr.emit("data", `${marker}0:END__`)
+      if (!script.includes("Invoke-Expression -Command")) proc.stderr.emit("data", `${marker}0:END__`)
     })
   }
   if (process.platform !== "win32") queueMicrotask(() => proc.emit("close", 0))
@@ -521,8 +521,8 @@ for (const api of ["responses", "chat-completions"]) {
     })
     const requests = []
     const actions = [
-      { type: "tool", shell: "powershell-5.1", command: "Write-Output 'must-not-execute'" },
-      { type: "final", message: "Blocked by the shell transport", error: "Unsupported constrained transport" },
+      { type: "tool", shell: "powershell-5.1", command: "Write-Output 'permitted'" },
+      { type: "final", message: "done" },
     ]
     globalThis.fetch = async (_url, init) => {
       requests.push(JSON.parse(init.body))
@@ -532,16 +532,18 @@ for (const api of ["responses", "chat-completions"]) {
     const session = new AgentSession({ id: "constrained", cwd: process.cwd() })
     session.config = { api, endpoint: "https://provider.test", apiKey: "fixture", model: "fixture" }
     t.after(() => session.dispose())
-    assert.equal((await session.write("Run a command")).exitCode, 1)
+    assert.equal((await session.write("Run a command")).exitCode, 0)
     const guidance = api === "responses" ? requests[0].instructions : requests[0].messages[0].content
     assert.match(guidance, /never assume FullLanguage/)
     assert.match(guidance, /Never change LanguageMode/)
     assert.match(guidance, /interpreters to evade restrictions/)
+    assert.match(guidance, /informational: ConstrainedLanguage does not prevent running PowerShell commands/)
     const messages = api === "responses" ? requests[1].input : requests[1].messages
     const result = messages.find(message => message.content.startsWith("TOOL_RESULT")).content
     assert.match(result, /languageMode: ConstrainedLanguage/)
-    assert.match(result, /Command was not executed/)
-    assert.equal(scripts.length, 1)
+    assert.match(result, /exitCode: 0/)
+    assert.doesNotMatch(result, /Command was not executed/)
+    assert.equal(scripts.length, 2)
   })
 }
 
