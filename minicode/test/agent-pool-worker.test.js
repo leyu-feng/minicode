@@ -14,7 +14,6 @@ import { WebSocketServer } from "ws"
 import { agentPoolServerUrl, loadWorkerCredential, parseWorkerCliOptions, parseWorkerReferences, startAgentPoolWorker } from "../server/agent-pool-worker.js"
 import { AgentSession } from "../server/agent-session.js"
 import { createHostedProviderTool, createHostedProviderPostTool } from "../server/hosted-provider.js"
-import { skillDigest } from "../server/skill-approvals.js"
 
 const execFileAsync = promisify(execFile)
 const agent = { id: "agent-a", name: "Agent A" }
@@ -125,11 +124,7 @@ async function harness(t, factory, workerOptions = {}) {
   }
 }
 
-test("worker operator approvals are loaded at startup and revoke changed helper content", async t => {
-  const operatorRoot = await fs.mkdtemp(path.join(os.tmpdir(), "worker-operator-"))
-  t.after(() => fs.rm(operatorRoot, { recursive: true, force: true }))
-  const manifest = path.join(operatorRoot, "approvals.json")
-  await fs.writeFile(manifest, JSON.stringify({ version: 1, approvals: [] }))
+test("worker automatically loads worktree and verified bundle skills", async t => {
   const sessions = []
   class Session extends EventEmitter {
     async write() { return { exitCode: 0 } }
@@ -137,57 +132,20 @@ test("worker operator approvals are loaded at startup and revoke changed helper 
     dispose() {}
   }
   const bundle = skillBundle()
-  const fixture = await harness(t, options => { sessions.push(options); return new Session() }, { bundle, workspaceMode: "worktree", skillApprovalsFile: manifest })
+  const fixture = await harness(t, options => { sessions.push(options); return new Session() }, { bundle, workspaceMode: "worktree" })
   const directory = path.join(fixture.source, ".github", "skills", "review")
   await fs.mkdir(directory, { recursive: true })
   await fs.writeFile(path.join(directory, "SKILL.md"), "Reviewed workspace skill")
   await fs.writeFile(path.join(directory, "helper.js"), "original helper")
   await fixture.git("add", ".github")
   await fixture.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "commit", "-m", "Skill fixture")
-  let peer = await fixture.welcome(0)
-  await executeTask(peer, { runId: "unapproved", agent, skills: bundle.skills, authToken: "run-credential" })
-  assert.doesNotMatch(sessions[0].instructions, /review \[worktree\]:/)
-  assert.ok(!sessions[0].instructions.includes("Post progress with the issue comments API"))
-  const approvals = [
-    { source: `worktree:${await fs.realpath(fixture.source)}`, name: "review", sha256: await skillDigest(directory) },
-    { source: `bundle:${bundle.skills.sha256}`, name: "paperclip", sha256: await skillDigest(path.join(sessions[0].cwd, ".worker", "skills", "paperclip")) },
-  ]
-  await fs.writeFile(manifest, JSON.stringify({ version: 1, approvals }))
-  await fixture.restart()
-  peer = await fixture.welcome(1)
-  await executeTask(peer, { runId: "approved", agent, skills: bundle.skills, authToken: "run-credential" })
-  assert.match(sessions[1].instructions, /review \[worktree\]:/)
-  assert.ok(sessions[1].instructions.includes("Post progress with the issue comments API"))
-  assert.ok(sessions[1].instructions.includes(`approval source: ${approvals[0].source}`))
-  await fs.writeFile(path.join(directory, "helper.js"), "changed helper")
-  await fixture.git("add", ".github")
-  await fixture.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "commit", "-m", "Changed helper")
-  await executeTask(peer, { runId: "changed", agent, skills: bundle.skills, authToken: "run-credential" })
-  assert.doesNotMatch(sessions[2].instructions, /review \[worktree\]:/)
-  assert.ok(sessions[2].instructions.includes("Post progress with the issue comments API"))
-})
-
-test("worker startup rejects writable, invalid, missing and Hosted approval manifests", async t => {
-  let sessions = 0
-  const fixture = await harness(t, () => { sessions++; throw new Error("Model must not start") })
-  for (const root of [fixture.source, fixture.workspaceRoot, path.join(path.dirname(fixture.source), "worker_shared")]) {
-    const file = path.join(root, "operator-approvals.json")
-    await fs.writeFile(file, JSON.stringify({ version: 1, approvals: [] }))
-    await assert.rejects(startAgentPoolWorker({ ...fixture.options, skillApprovalsFile: file }), /outside all worker repositories/)
-  }
-  const operatorRoot = await fs.mkdtemp(path.join(os.tmpdir(), "worker-invalid-approvals-"))
-  t.after(() => fs.rm(operatorRoot, { recursive: true, force: true }))
-  const file = path.join(operatorRoot, "approvals.json")
-  await assert.rejects(startAgentPoolWorker({ ...fixture.options, skillApprovalsFile: file }), { code: "ENOENT" })
-  await fs.writeFile(file, JSON.stringify({ version: 2, approvals: [] }))
-  await assert.rejects(startAgentPoolWorker({ ...fixture.options, skillApprovalsFile: file }), /Invalid skill approval manifest/)
-  await assert.rejects(startAgentPoolWorker({ ...fixture.options, skillApprovalsFile: "relative.json" }), /absolute path/)
-  let providerCalls = 0
-  await assert.rejects(startAgentPoolWorker({ ...fixture.options, skillApprovalsFile: file,
-    prepareHostedRepositories: async () => { providerCalls++; throw new Error("Provider must not run") },
-  }), /local approval files are disabled/)
-  assert.equal(providerCalls, 0)
-  assert.equal(sessions, 0)
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, { runId: "all-skills", agent, skills: bundle.skills, authToken: "run-credential" })
+  assert.match(sessions[0].instructions, /review \[worktree\]:/)
+  assert.ok(sessions[0].instructions.includes("Post progress with the issue comments API"))
+  assert.ok(sessions[0].instructions.includes("worker_shared and verified downloaded bundle skills"))
+  assert.ok(sessions[0].instructions.includes("repository, reference, and worktree skills"))
+  assert.ok(!sessions[0].instructions.includes("approval source:"))
 })
 
 test("paired worker CLI defaults the secret store on and accepts an explicit opt-out", () => {
@@ -417,7 +375,7 @@ for (const explicitRole of [true, false]) for (const [providerEnabled, postEnabl
       assert.match(this.options.instructions, /there is no primary repository/)
       assert.match(this.options.instructions, /Hosted identity restrictions take precedence over skill helper permission/)
       assert.doesNotMatch(this.options.instructions, /human task message or human response explicitly authorizes a named provider CLI/)
-      assert.ok(!this.options.instructions.includes("Post progress with the issue comments API"))
+      assert.ok(this.options.instructions.includes("Post progress with the issue comments API"))
       assert.match(this.options.instructions, /worker_shared guidance and same-named skills override every repository/)
       assert.match(this.options.instructions, /repository marked supervisory: true in workspace.json/)
       const lines = this.options.instructions.split("\n")
@@ -431,7 +389,7 @@ for (const explicitRole of [true, false]) for (const [providerEnabled, postEnabl
       assert.ok(this.options.instructions.includes(`Load supervisory instructions first from ${path.join(shared, "AGENTS.md")}`))
       assert.ok(this.options.instructions.includes(`Load applicable skills from ${path.join(shared, ".agents", "skills", "<name>", "SKILL.md")} first`))
       assert.ok(this.options.instructions.includes(`review [worker_shared]: ${path.join(shared, ".agents", "skills", "review", "SKILL.md")}`))
-      assert.ok(!this.options.instructions.includes(`review [repository:Main]: ${path.join(writable, ".agents", "skills", "review", "SKILL.md")}`))
+      assert.equal(this.options.instructions.includes(`review [repository:Main]: ${path.join(writable, ".agents", "skills", "review", "SKILL.md")}`), !explicitRole)
       assert.equal(this.options.env.WORKER_SHARED, shared)
       assert.ok(this.options.instructions.indexOf("Shared catalog guidance wins.")
         < this.options.instructions.indexOf("Conflicting workspace guidance loses."))
@@ -739,7 +697,7 @@ test("bundled skills download once, repair extracted files each assignment, and 
   const root = path.join(workspace, ".worker", "skills")
   assert.equal(bundle.downloads[0].authorization, "Bearer run-credential")
   assert.equal(bundle.downloads[0]["x-paperclip-run-id"], "skills-0")
-  assert.ok(!sessions[0].instructions.includes("Post progress with the issue comments API"))
+  assert.ok(sessions[0].instructions.includes("Post progress with the issue comments API"))
   assert.equal(sessions[0].env.PAPERCLIP_COMPANY_ID, "company-a")
   assert.equal(sessions[0].env.PAPERCLIP_TASK_ID, "task-a")
   assert.equal(sessions[0].env.PAPERCLIP_WAKE_REASON, "issue_assigned")
@@ -759,7 +717,7 @@ test("bundled skills download once, repair extracted files each assignment, and 
   bundle.archive = next.archive
   await assign(3)
   assert.equal(bundle.downloads.length, 3)
-  assert.ok(!sessions[3].instructions.includes("# Updated Paperclip instructions"))
+  assert.ok(sessions[3].instructions.includes("# Updated Paperclip instructions"))
   await assert.rejects(fs.stat(path.join(root, "paperclip", "scripts")), { code: "ENOENT" })
   const status = await execFileAsync("git", ["status", "--porcelain"], { cwd: workspace, windowsHide: true })
   assert.equal(status.stdout, "")
@@ -784,8 +742,8 @@ test("bundled skills download through the Entra proxy with its path prefix and c
   assert.equal(bundle.downloads[0]["x-zumo-auth"], "entra-session")
   assert.equal(bundle.downloads[0].authorization, `Bearer ${"run-credential"}`)
   assert.equal(bundle.downloads[0]["x-paperclip-run-id"], "proxied-skills")
-  assert.ok(!sessions[0].instructions.includes("Post progress with the issue comments API"))
-  assert.ok(sessions[0].instructions.includes("The downloaded Paperclip operational skill is not approved"))
+  assert.ok(sessions[0].instructions.includes("Post progress with the issue comments API"))
+  assert.ok(!sessions[0].instructions.includes("The downloaded Paperclip operational skill is not approved"))
 })
 
 test("invalid skill manifests, ZIP hashes, and archive contents fail before starting the model", async (t) => {
@@ -922,7 +880,7 @@ test("separate workers can read the same configured shared folder without copyin
 })
 
 for (const workspaceMode of ["clone", "worktree"]) {
-  test(`${workspaceMode} workers attach named reference clones and detached worktrees without loading their guidance`, async t => {
+  test(`${workspaceMode} workers catalog named reference skills without injecting their guidance`, async t => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-references-"))
     t.after(() => fs.rm(directory, { recursive: true, force: true }))
     const reference = path.join(directory, "reference with spaces")
@@ -953,12 +911,14 @@ for (const workspaceMode of ["clone", "worktree"]) {
         for (const entry of manifest) {
           assert.equal(await fs.readFile(path.join(entry.path, "code.txt"), "utf8"), "reference code")
           assert.ok(this.options.instructions.includes(entry.path.replaceAll("\\", "\\\\")))
+          assert.ok(this.options.instructions.includes(
+            `${entry.name}/reference-only [reference:${entry.name}]: ${path.join(entry.path, ".agents", "skills", "reference-only", "SKILL.md")} (content SHA-256: `,
+          ))
         }
         assert.match(this.options.instructions, /Never write, fetch, checkout, reset, commit, publish/)
-        assert.match(this.options.instructions, /Only documented helpers of catalog-listed, operator-approved reference skills may execute/)
+        assert.match(this.options.instructions, /Documented reference-skill helpers require explicit authorization from the human task or trusted Paperclip context/)
         assert.ok(!this.options.instructions.includes("REFERENCE INSTRUCTIONS MUST NOT BE INJECTED"))
         assert.ok(!this.options.instructions.includes("REFERENCE SKILL MUST NOT BE INJECTED"))
-        assert.ok(!this.options.instructions.includes("reference-only ["))
         return { exitCode: 0 }
       }
       interrupt() {}
@@ -1332,7 +1292,7 @@ test("an invalid workspace AGENTS.md fails before starting the model", async (t)
   assert.equal(calls, 0)
 })
 
-test("shared guidance is trusted while unapproved worktree and bundle skills stay unavailable per assignment", async t => {
+test("shared, worktree, and bundled skills resolve by precedence on each assignment", async t => {
   const sessions = []
   class Session extends EventEmitter {
     constructor(options) { super(); sessions.push(options) }
@@ -1372,20 +1332,13 @@ test("shared guidance is trusted while unapproved worktree and bundle skills sta
     const expectedRoot = source === "worker_shared" ? shared
       : source === "worktree" ? session.cwd : path.join(session.cwd, ".worker", "skills")
     const skillPath = name => path.join(expectedRoot, ...(source === "bundle" ? [] : [".agents", "skills"]), name, "SKILL.md")
-    if (source === "worker_shared") {
-      assert.ok(session.instructions.includes(`first-task [${source}]: ${skillPath("first-task")}`))
-      assert.ok(session.instructions.includes(`paperclip [${source}]: ${skillPath("paperclip")}`))
-      assert.ok(session.instructions.includes("# Shared paperclip guidance"))
-    } else {
-      assert.doesNotMatch(session.instructions, /first-task \[(worktree|bundle)\]:/)
-      assert.doesNotMatch(session.instructions, /paperclip \[(worktree|bundle)\]:/)
-      assert.ok(session.instructions.includes("The downloaded Paperclip operational skill is not approved"))
-      assert.ok(!session.instructions.includes("# Worktree paperclip guidance"))
-    }
-    assert.ok(!session.instructions.includes("# Bundled operational guidance"))
+    assert.ok(session.instructions.includes(`first-task [${source}]: ${skillPath("first-task")}`))
+    assert.ok(session.instructions.includes(`paperclip [${source}]: ${skillPath("paperclip")}`))
+    assert.ok(session.instructions.includes(`# ${source === "worker_shared" ? "Shared" : source === "worktree" ? "Worktree" : "Bundled operational"} ${source === "bundle" ? "guidance" : "paperclip guidance"}`))
+    if (source !== "bundle") assert.ok(!session.instructions.includes("# Bundled operational guidance"))
     assert.ok(session.instructions.includes(index ? "Updated shared policy" : "Shared policy overrides repository policy"))
     assert.ok(session.instructions.indexOf("Host-owned shared AGENTS.md") < session.instructions.indexOf("Repository policy"))
-    assert.match(session.instructions, /worker_shared overrides same-named approved skills/)
+    assert.match(session.instructions, /worker_shared skills take precedence over same-named repository, worktree, and bundle skills/)
     peer.send({ type: "ack", runId, seq: result.seq, completed: true })
     await waitUntil(() => peer.messages.filter(message => message.type === "ready").length > readyCount)
     if (source !== "bundle") {

@@ -38,7 +38,11 @@ Agent shell tools receive `MINICODE_AGENT_USER_UPN` when the harness knows an En
 
 ## Process-memory secret store
 
-Interactive CLI REPL and web agent sessions provide shell commands a capability for a bounded in-memory store shared among sessions in the same Minicode process. Paired Devbox workers started with `minicode worker` enable the store by default and share it across that worker process's assignments; pass `--no-secret-store` to disable it. Hosted workers and one-shot CLI commands do not receive the capability. Helpers can reuse credentials across subprocesses without printing them or saving them to disk. Entries expire eight hours after their last write and disappear when the process exits; separate Minicode processes do not share them. The store is not a security boundary: arbitrary commands with the inherited capability and other same-user processes may access its values. Do not use it with untrusted tools or assume per-session isolation. Tool authors must avoid writing secrets to stdout, stderr, arguments, files, or logs. The Academy EngHub skill provides an example client.
+Interactive CLI REPL and web agent sessions provide shell commands a capability for a bounded in-memory store shared among sessions in the same Minicode process. Paired Devbox workers started with `minicode worker` enable the store by default and share it across that worker process's assignments; pass `--no-secret-store` to disable it. When `minicode web` finds a workspace-root `workers.yml`, it starts every configured worker and shares the primary console's loopback-only HTTP secret API with all child workers. The API URL and bearer capability are injected only into authorized tool environments. Hosted workers and one-shot CLI commands do not receive the capability. Helpers can reuse credentials across subprocesses without printing them or saving them to disk. Entries expire eight hours after their last write and disappear when the primary process exits. The store is not a security boundary: arbitrary commands with the inherited capability and other same-user processes may access its values. Do not use it with untrusted tools or assume per-session isolation. Tool authors must avoid writing secrets to stdout, stderr, arguments, files, or logs. The Academy EngHub skill provides an example client.
+
+## Web workers
+
+Create `workers.yml` at the workspace root, then run `minicode web` (or `minicode web 4310`). If the file exists, the primary console reads it once, starts its browser portal, starts each configured AgentPool worker, and stops all child workers when it exits. Without the file, `minicode web` starts only the portal. Existing local pairing credentials are reused; for a first pairing, put the name of an environment variable containing the one-time token in `pairingTokenEnv` rather than writing the token to YAML. `workers.yml` accepts only `version`, optional `port`, and a `workers` list. Each worker requires `name`, `server`, `workerId`, and `repoRoot`; optional worker CLI settings use camelCase names such as `workerShared`, `entraUser`, and `toolAzureConfigDir`. A command-line web port overrides `port` in the file. The portal restart endpoint is intentionally disabled when workers are running because restarting only the portal would orphan workers and invalidate their shared secret capability.
 
 ## Managed Hosted runtime
 
@@ -617,11 +621,12 @@ the harness account's existing Git credentials without interactive sign-in.
 The tool's returned commits supersede the initial manifest; environment variables,
 loaded instructions and skills remain the assignment-start snapshot.
 
-References are for reading/searching code only, not executing scripts or accessing
-their `.git` metadata. Their instructions and skills are not loaded or added to the
-worker's skill catalog. Agents must request updates through the harness tool,
-not run Git network/mutation commands themselves. References grant no general
-write or publication permissions.
+References are for reading/searching code only, not executing arbitrary scripts or accessing
+their `.git` metadata. Their skills are added to the catalog, but documented helpers
+from reference skills require explicit authorization for the specific helper and action
+from the human task/request or trusted Paperclip context. Agents must request updates
+through the harness tool, not run Git network/mutation commands themselves. References
+grant no general write or publication permissions.
 Like `worker_shared`, **reference read-only access is instruction policy, not an
 OS-enforced sandbox**; use read-only mounts or restricted identities if enforcement
 is required. Reference attachments work with both workspace modes.
@@ -680,17 +685,24 @@ sessions are unchanged.
 
 ### Local skills and bundled fallbacks
 
-Before each new assignment, the harness discovers
-`.agents\skills\<name>\SKILL.md` under both `worker_shared` and the assigned
-checkout. For each name it selects **worker_shared > worktree > downloaded
-bundle fallback**, case-insensitively. It supplies the selected names and exact
-paths to the model, which reads the relevant/requested skill (including
-`/first-task` for the onboarding task) and resolves references relative to that
-selected skill. The selected `paperclip` operational skill is also injected
-automatically. Shared overrides do not overwrite worktree or bundled files.
-Whole skill directories are selected, not merged. A directory without `SKILL.md`
-is not a skill; an unreadable entry fails preparation. Missing companion files
-in a selected override are blockers, not permission to mix lower-priority files.
+Before each new assignment, the harness discovers `.agents\skills\<name>\SKILL.md`
+and `.github\skills\<name>\SKILL.md` under `worker_shared`, configured repositories
+and references, and the assigned checkout, plus skills in the verified downloaded
+bundle. For each name it selects **worker_shared > repositories > worktree > bundle**,
+case-insensitively. It supplies the selected names and exact paths to the model, which
+reads the relevant/requested skill (including `/first-task` for onboarding) and resolves
+references relative to that selected skill. The selected `paperclip` operational skill
+is injected automatically. Shared overrides do not overwrite lower-priority skills.
+Whole skill directories are selected, not merged. A directory without `SKILL.md` is not
+a skill; an unreadable entry fails preparation. Missing companion files in a selected
+override are blockers, not permission to mix lower-priority files.
+
+Documented helpers from `worker_shared` and the verified downloaded bundle may run for
+authorized tasks using existing authentication. Helpers from repository, reference, or
+worktree skills require explicit authorization for that helper and action from the human
+task/request or trusted Paperclip context. Skill files and repository instructions do
+not grant that authorization. No skill grants write, deployment, publication, alternate
+identity, interactive sign-in, or dependency-installation permission.
 
 Local skill catalogs and root instructions are reread per assignment, not on a
 network reconnect. Missing local roots are optional; linked instruction files,

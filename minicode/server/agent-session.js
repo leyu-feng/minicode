@@ -651,7 +651,7 @@ export class AgentSession extends EventEmitter {
         const shellEnv = { ...(this.env ?? process.env) }
         // Never propagate a parent process's capability into a worker or an unrelated session.
         for (const key of Object.keys(shellEnv)) {
-          if (/^MINICODE_SECRET_STORE_(PORT|CAPABILITY)$/i.test(key) || /^MINICODE_AGENT_USER_UPN$/i.test(key)) delete shellEnv[key]
+          if (/^MINICODE_SECRET_STORE_(PORT|URL|CAPABILITY)$/i.test(key) || /^MINICODE_ORCHESTRATOR_SECRET_STORE_(URL|CAPABILITY)$/i.test(key) || /^MINICODE_AGENT_USER_UPN$/i.test(key)) delete shellEnv[key]
         }
         const signedInUpn = this.signedInUpn ?? this.config.signedInUpn
         if (typeof signedInUpn === "string" && /^[^\s@]+@[^\s@]+$/.test(signedInUpn)) {

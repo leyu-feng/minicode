@@ -50,6 +50,11 @@ const server = http.createServer(async (req, res) => {
   const pathname = url.pathname
 
   if (pathname === "/api/restart" && req.method === "POST") {
+    if (process.env.MINICODE_WORKERS_MODE === "1") {
+      res.writeHead(409, { "Content-Type": "application/json" })
+      res.end(JSON.stringify({ ok: false, error: "Stop and restart workers mode from the primary console." }))
+      return
+    }
     res.writeHead(200, { "Content-Type": "application/json" })
     res.end(JSON.stringify({ ok: true }))
     // Respawn a fresh copy of the server with the same arguments, then exit so
