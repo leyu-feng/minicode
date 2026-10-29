@@ -408,10 +408,12 @@ export class AgentSession extends EventEmitter {
       `You are running inside the local working directory ${cwd} and can read and modify project files.`,
       "For coding tasks, inspect files first before answering.",
       "Use non-destructive read commands like Get-Content and git --no-pager status/log/diff.",
-      "For repository file discovery, list only Git-managed files with git ls-files -- <task-relevant pathspecs>; use git ls-files without pathspecs only when the relevant scope is unknown.",
-      "Search tracked file contents with git grep -n -I -e <pattern> -- <task-relevant pathspecs>, then read only the relevant files.",
-      "Do not map a repository with Get-ChildItem -Force/-Recurse, ls -R, find, or other broad filesystem scans. Do not enumerate untracked or ignored files, node_modules, build output, or .git internals unless the task explicitly requires them.",
-      "If Git is unavailable or the directory is not in a Git worktree, report that limitation and use only shallow, task-scoped directory listings; do not silently fall back to recursive filesystem scans.",
+      "File discovery must be nonrecursive: list only the immediate children of ONE task-relevant folder per request. Never scan the whole workspace or Git tree, or automatically walk every subfolder through repeated shallow listings. Commands have a 120-second limit; narrow the scope instead of retrying a broad scan.",
+      "For repository discovery, use git ls-tree --name-only HEAD for the top level, or git ls-tree --name-only HEAD:<known-folder> for one known folder; never add -r. These list committed Git-managed entries only. Inspect a returned subfolder only when the task or previous results identify it as relevant.",
+      "Do not use git ls-files for discovery: even a directory-scoped pathspec enumerates descendants recursively. Do not use Get-ChildItem -Recurse, ls -R, tree, find, recursive globs, or scripts/tools that recursively enumerate files. Piping a recursive scan into Select-Object -First or head does not make it an acceptable shallow listing.",
+      "Search tracked file contents only in explicitly identified files or direct-child file globs within ONE known folder, for example git grep -n -I -e <pattern> -- ':(top,glob)src/*.js'. Never run unscoped git grep, pass a bare directory pathspec, or use **; these search recursively. Read only the relevant files.",
+      "Do not enumerate untracked or ignored files, node_modules, build output, or .git internals unless the task explicitly requires them; any necessary listing must still be one folder deep and nonrecursive.",
+      "If Git is unavailable, HEAD does not exist, or the directory is not in a Git worktree, report that limitation and list only the immediate children of one task-relevant folder (Get-ChildItem -LiteralPath <folder> without -Recurse on Windows); do not silently fall back to recursive filesystem scans.",
       "Do not claim you cannot access files when the tools below can read them.",
       "Respond ONLY with one JSON object, one of:",
       '{"type":"tool","command":"<shell command>","reason":"<short reason>"}',
@@ -429,6 +431,7 @@ export class AgentSession extends EventEmitter {
       "To change files, ALWAYS prefer the write/edit actions over shell commands — they take plain strings and need no shell escaping.",
       "Paths are relative to the working directory. For edit, 'find' must appear exactly once (set \"all\":true to replace every occurrence).",
       ...(process.platform === "win32" ? [
+        "PowerShell language mode is detected from $ExecutionContext.SessionState.LanguageMode in each actual shell process, separately for PowerShell 7 and 5.1, and reported in TOOL_RESULT. Until detected, its mode is unknown; never assume FullLanguage. ConstrainedLanguage is an enforced security boundary: use only policy-permitted cmdlets and operations through approved compatible tools. Do not use Add-Type, arbitrary .NET/COM method calls, reflection, dynamic script compilation, or other features restricted by that mode. Never change LanguageMode, disable application-control/security policy, or switch shells, hosts, identities or interpreters to evade restrictions. If an operation or the shell transport is unsupported, report the restriction rather than retrying or bypassing it.",
         "Shell commands already execute directly in PowerShell 7 (pwsh.exe -NoProfile -NonInteractive -Command) by default. For a command or module that requires Windows PowerShell 5.1, set shell to \"powershell-5.1\" on that tool action; it runs directly in powershell.exe with the same flags for that command only. Omit shell or use \"powershell-7\" for PowerShell 7. Do not wrap commands in another pwsh/powershell invocation. No automatic shell fallback occurs.",
         "Escape quotes inside PowerShell strings with a backtick (`\"), never a backslash.",
         "Each PowerShell version has its own persistent process for this conversation. Variables, functions, imported modules, environment changes and current directory persist between commands of that version, not across versions or conversations. Commands run sequentially. If a timeout, cancellation or process exit loses shell state, the harness reports it; re-establish required context rather than assuming it survived.",
@@ -713,6 +716,13 @@ export class AgentSession extends EventEmitter {
           if (!shell) {
             shell = new AgentPowerShell({
               shell: shellName, cwd: this.cwd, env: shellEnv,
+              onLanguageMode: ({ shell, pid, languageMode }) => {
+                if (this.closed) return
+                const notice = `${shell} pid=${pid ?? "unavailable"} language mode: ${languageMode}.`
+                this.#emitOutput(`${shell} language mode: ${languageMode}.\r\n`, "stderr")
+                const worker = stripVTControlCharacters(String(this.workerLabel)).replace(/\s+/g, " ")
+                this.shellLog?.(`[minicode] [worker=${worker}] ${notice}`)
+              },
               onStateLost: notice => {
                 if (this.closed) return
                 this.shellStateNotices.push(notice)
@@ -724,7 +734,7 @@ export class AgentSession extends EventEmitter {
             })
             this.shells.set(shellName, shell)
           }
-          shellResult = await shell.run(command, shellOptions)
+          shellResult = { ...await shell.run(command, shellOptions), languageMode: shell.languageMode ?? "unknown" }
         } else shellResult = await runShellCommand(command, shellOptions)
         this.#throwIfInactive(run)
         this.#emitOutput(`\u001b[90mexit code: ${shellResult.code}\u001b[0m\r\n`)
@@ -737,6 +747,7 @@ export class AgentSession extends EventEmitter {
               "TOOL_RESULT",
               `command: ${command}`,
               ...(action.shell === undefined ? [] : [`shell: ${action.shell}`]),
+              ...(shellResult.languageMode === undefined ? [] : [`languageMode: ${shellResult.languageMode}`]),
               `exitCode: ${shellResult.code}`,
               `output:\n${truncate(shellResult.output) || "<empty>"}`,
             ].join("\n"),

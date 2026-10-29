@@ -6,12 +6,14 @@ import { killTree } from "./kill-tree.js"
 const MAX_OUTPUT_CHARS = 12000
 
 export class AgentPowerShell {
-  constructor({ shell, cwd, env, onStateLost, onBackgroundOutput }) {
+  constructor({ shell, cwd, env, onStateLost, onBackgroundOutput, onLanguageMode }) {
     this.shell = shell
     this.cwd = cwd
     this.env = env
     this.onStateLost = onStateLost
     this.onBackgroundOutput = onBackgroundOutput
+    this.onLanguageMode = onLanguageMode
+    this.languageMode = null
     this.proc = null
     this.pending = null
     this.closed = false
@@ -30,18 +32,32 @@ export class AgentPowerShell {
       this.pending = run
       run.abort = () => this.#reset("Command cancelled.", 130)
       signal?.addEventListener("abort", run.abort, { once: true })
-      run.timer = setTimeout(() => this.#reset("Command timed out after 120s.", 1), 120000)
+      run.timer = setTimeout(() => this.#reset("PowerShell language-mode detection timed out after 10s; command was not executed.", 1), 10000)
       try {
+        run.execute = () => {
+          if (this.pending !== run) return
+          clearTimeout(run.timer)
+          run.timer = setTimeout(() => this.#reset("Command timed out after 120s.", 1), 120000)
+          if (this.languageMode !== "FullLanguage") {
+            this.#finish(1, `${this.shell} language mode: ${this.languageMode}. Command was not executed: the persistent shell transport requires FullLanguage. Use an approved compatible harness tool or report the restriction; do not bypass language-mode or application-control policy.`)
+            return
+          }
+          try {
+            const status = `__minicode_${randomUUID().replaceAll("-", "")}`
+            const completed = `${status}_finished`
+            const encoded = Buffer.from(`try {\n${command}\n} finally { $global:${status}=if ($?) { 0 } else { 1 } }`, "utf8").toString("base64")
+            onRequest?.({ shell: this.shell, pid: this.proc.pid })
+            // Dot-sourcing preserves variables, functions and modules. Out-Default
+            // flushes PowerShell's formatter before either completion marker.
+            this.proc.stdin.write(
+              `$${status}=1; $${completed}=$false; try { . ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')))) | Out-Default; $${completed}=$true } catch { $${status}=1; $${completed}=$true; [Console]::Error.WriteLine(($_ | Out-String)) } finally { if ($${completed}) { [Console]::Out.Write('${marker}'+$${status}+':END__'); [Console]::Error.Write('${marker}'+$${status}+':END__') }; Remove-Variable -Name '${status}','${completed}' -ErrorAction SilentlyContinue }\n`,
+            )
+          } catch (error) {
+            this.#reset(`PowerShell command could not start: ${error.message}`, 1)
+          }
+        }
         if (!this.proc) this.#start()
-        const status = `__minicode_${randomUUID().replaceAll("-", "")}`
-        const completed = `${status}_finished`
-        const encoded = Buffer.from(`try {\n${command}\n} finally { $global:${status}=if ($?) { 0 } else { 1 } }`, "utf8").toString("base64")
-        onRequest?.({ shell: this.shell, pid: this.proc.pid })
-        // Dot-sourcing preserves variables, functions and modules. Out-Default
-        // flushes PowerShell's formatter before either completion marker.
-        this.proc.stdin.write(
-          `$${status}=1; $${completed}=$false; try { . ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')))) | Out-Default; $${completed}=$true } catch { $${status}=1; $${completed}=$true; [Console]::Error.WriteLine(($_ | Out-String)) } finally { if ($${completed}) { [Console]::Out.Write('${marker}'+$${status}+':END__'); [Console]::Error.Write('${marker}'+$${status}+':END__') }; Remove-Variable -Name '${status}','${completed}' -ErrorAction SilentlyContinue }\n`,
-        )
+        else run.execute()
       } catch (error) {
         this.#reset(`PowerShell command could not start: ${error.message}`, 1)
       }
@@ -54,6 +70,8 @@ export class AgentPowerShell {
       cwd: this.cwd, env: this.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
     })
     this.proc = proc
+    proc.modeMarker = `__MINICODE_${randomUUID().replaceAll("-", "")}_MODE__:`
+    proc.modeBuffer = ""
     for (const stream of ["stdout", "stderr"]) {
       const decoder = new StringDecoder("utf8")
       proc[stream].on("data", chunk => {
@@ -87,7 +105,7 @@ export class AgentPowerShell {
       clearTimeout(proc.exitTimer)
       if (this.proc === proc) this.#reset(`PowerShell process exited (${signal || code}).`, 1)
     })
-    proc.stdin.write("[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false); $OutputEncoding = [Console]::OutputEncoding\n")
+    proc.stdin.write(`Write-Output ('${proc.modeMarker}' + $ExecutionContext.SessionState.LanguageMode + ':END__')\n`)
   }
 
   #append(text) {
@@ -104,6 +122,34 @@ export class AgentPowerShell {
   }
 
   #read(text, stream) {
+    if (stream === "stdout" && this.languageMode === null) {
+      const proc = this.proc
+      proc.modeBuffer += text
+      if (proc.modeBuffer.length > 4096) {
+        this.#reset("PowerShell language-mode detection returned excessive output; command was not executed.", 1)
+        return
+      }
+      const index = proc.modeBuffer.indexOf(proc.modeMarker)
+      if (index === -1) return
+      const end = proc.modeBuffer.indexOf(":END__", index + proc.modeMarker.length)
+      if (end === -1) return
+      const mode = proc.modeBuffer.slice(index + proc.modeMarker.length, end)
+      if (!["FullLanguage", "ConstrainedLanguage", "RestrictedLanguage", "NoLanguage"].includes(mode)) {
+        this.#reset("PowerShell reported an unrecognized language mode.", 1)
+        return
+      }
+      this.languageMode = mode
+      const remainder = proc.modeBuffer.slice(end + ":END__".length).replace(/^\r?\n/, "")
+      const preceding = proc.modeBuffer.slice(0, index)
+      proc.modeBuffer = ""
+      this.onLanguageMode?.({ shell: this.shell, pid: proc.pid, languageMode: mode })
+      if (mode === "FullLanguage") {
+        proc.stdin.write("[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false); $OutputEncoding = [Console]::OutputEncoding\n")
+      }
+      this.pending?.execute()
+      text = preceding + remainder
+      if (!text) return
+    }
     const run = this.pending
     if (!run) return this.#append(text)
     const state = run.streams[stream]
@@ -148,6 +194,7 @@ export class AgentPowerShell {
   #reset(reason, code) {
     const proc = this.proc
     this.proc = null
+    this.languageMode = null
     if (proc) {
       clearTimeout(proc.exitTimer)
       if (proc.exitCode === null) killTree(proc.pid)
@@ -168,6 +215,7 @@ export class AgentPowerShell {
     this.closed = true
     this.onStateLost = null
     this.onBackgroundOutput = null
+    this.onLanguageMode = null
     this.#reset("Session closed.", 130)
   }
 }

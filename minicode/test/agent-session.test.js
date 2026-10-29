@@ -8,7 +8,7 @@ import { ShellSession } from "../server/shell-session.js"
 
 const originalFetch = globalThis.fetch
 
-function shellProcessFixture() {
+function shellProcessFixture(languageMode = "FullLanguage") {
   const proc = new EventEmitter()
   proc.stdout = new EventEmitter()
   proc.stderr = new EventEmitter()
@@ -16,6 +16,8 @@ function shellProcessFixture() {
   proc.stdin.destroy = () => {}
   proc.stdin.end = () => {}
   proc.stdin.write = script => {
+    const modeMarker = script.match(/__MINICODE_[a-f0-9]+_MODE__:/)?.[0]
+    if (modeMarker) queueMicrotask(() => proc.stdout.emit("data", `${modeMarker}${languageMode}:END__\r\n`))
     const marker = script.match(/__MINICODE_[a-f0-9]+_DONE__:/)?.[0]
     if (marker) queueMicrotask(() => {
       proc.stdout.emit("data", `${marker}0:END__`)
@@ -27,7 +29,7 @@ function shellProcessFixture() {
 }
 
 for (const api of ["responses", "chat-completions"]) {
-  test(`${api} requests include Git-scoped discovery guidance alongside worker instructions`, async t => {
+  test(`${api} requests require one-folder nonrecursive discovery alongside worker instructions`, async t => {
     let request
     globalThis.fetch = async (_url, options) => {
       request = JSON.parse(options.body)
@@ -40,11 +42,17 @@ for (const api of ["responses", "chat-completions"]) {
     t.after(() => session.dispose())
     assert.equal((await session.write("Find the implementation")).exitCode, 0)
     const guidance = api === "responses" ? request.instructions : request.messages[0].content
-    assert.match(guidance, /only Git-managed files with git ls-files -- <task-relevant pathspecs>/)
-    assert.match(guidance, /Search tracked file contents with git grep/)
-    assert.match(guidance, /Do not map a repository with Get-ChildItem/)
-    assert.match(guidance, /If Git is unavailable or the directory is not in a Git worktree/)
+    assert.match(guidance, /immediate children of ONE task-relevant folder per request/)
+    assert.match(guidance, /Never scan the whole workspace or Git tree/)
+    assert.match(guidance, /automatically walk every subfolder through repeated shallow listings/)
+    assert.match(guidance, /git ls-tree --name-only HEAD:<known-folder>.*never add -r/)
+    assert.match(guidance, /Do not use git ls-files for discovery/)
+    assert.match(guidance, /Do not use Get-ChildItem -Recurse/)
+    assert.match(guidance, /Never run unscoped git grep, pass a bare directory pathspec, or use \*\*/)
+    assert.ok(guidance.includes("':(top,glob)src/*.js'"))
+    assert.match(guidance, /If Git is unavailable, HEAD does not exist, or the directory is not in a Git worktree/)
     assert.match(guidance, /do not silently fall back to recursive filesystem scans/)
+    assert.doesNotMatch(guidance, /use git ls-files without pathspecs/)
     assert.ok(guidance.includes(instructions))
   })
 }
@@ -459,10 +467,10 @@ test("Windows agent commands can explicitly use PowerShell 5.1 without changing 
   actions.push({ type: "tool", shell: "powershell-5.1", command: "Write-Output $savedLegacy" }, { type: "final", message: "done" })
   assert.equal((await session.write("Continue in the same legacy shell")).exitCode, 0)
   assert.match(requests.at(-1).messages.at(-1).content, /exitCode: 0[\s\S]*42/)
-  const legacyPids = diagnostics.filter(line => line.includes("powershell-5.1")).map(line => /pid=(\d+)/.exec(line)[1])
+  const legacyPids = diagnostics.filter(line => line.includes("powershell-5.1") && !line.includes("language mode:")).map(line => /pid=(\d+)/.exec(line)[1])
   assert.equal(legacyPids.length, 2)
   assert.equal(legacyPids[0], legacyPids[1])
-  const defaultPids = diagnostics.filter(line => line.includes("powershell-7")).map(line => /pid=(\d+)/.exec(line)[1])
+  const defaultPids = diagnostics.filter(line => line.includes("powershell-7") && !line.includes("language mode:")).map(line => /pid=(\d+)/.exec(line)[1])
   assert.equal(defaultPids[0], defaultPids[1])
   assert.notEqual(defaultPids[0], legacyPids[0])
   assert.ok(diagnostics.every(line => line.includes("worker=worker-fixture")))
@@ -496,10 +504,46 @@ test("PowerShell backend diagnostics summarize commands and script paths without
   t.after(() => session.dispose())
   assert.equal((await session.write("Run commands")).exitCode, 0)
   assert.deepEqual(diagnostics, [
+    "[minicode] [worker=worker-1] powershell-7 pid=321 language mode: FullLanguage.",
     `[minicode] [worker=worker-1 powershell-7 pid=321] ${command.replace("diagnostic-secret", "[redacted]").slice(0, 40)}`,
     `[minicode] [worker=worker-1 powershell-7 pid=321] ${script.slice(-40)}`,
   ])
 })
+
+for (const api of ["responses", "chat-completions"]) {
+  test(`${api} receives detected ConstrainedLanguage and policy guidance`, { skip: process.platform !== "win32" }, async t => {
+    const scripts = []
+    t.mock.method(childProcess, "spawn", () => {
+      const proc = shellProcessFixture("ConstrainedLanguage")
+      const write = proc.stdin.write
+      proc.stdin.write = script => { scripts.push(script); write(script) }
+      return proc
+    })
+    const requests = []
+    const actions = [
+      { type: "tool", shell: "powershell-5.1", command: "Write-Output 'must-not-execute'" },
+      { type: "final", message: "Blocked by the shell transport", error: "Unsupported constrained transport" },
+    ]
+    globalThis.fetch = async (_url, init) => {
+      requests.push(JSON.parse(init.body))
+      const content = JSON.stringify(actions.shift())
+      return Response.json(api === "responses" ? { output_text: content } : { choices: [{ message: { content } }] })
+    }
+    const session = new AgentSession({ id: "constrained", cwd: process.cwd() })
+    session.config = { api, endpoint: "https://provider.test", apiKey: "fixture", model: "fixture" }
+    t.after(() => session.dispose())
+    assert.equal((await session.write("Run a command")).exitCode, 1)
+    const guidance = api === "responses" ? requests[0].instructions : requests[0].messages[0].content
+    assert.match(guidance, /never assume FullLanguage/)
+    assert.match(guidance, /Never change LanguageMode/)
+    assert.match(guidance, /interpreters to evade restrictions/)
+    const messages = api === "responses" ? requests[1].input : requests[1].messages
+    const result = messages.find(message => message.content.startsWith("TOOL_RESULT")).content
+    assert.match(result, /languageMode: ConstrainedLanguage/)
+    assert.match(result, /Command was not executed/)
+    assert.equal(scripts.length, 1)
+  })
+}
 
 test("interrupted PowerShell context loss is reported to the next model turn", { skip: process.platform !== "win32", timeout: 15000 }, async t => {
   const requests = []

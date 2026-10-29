@@ -10,11 +10,18 @@ Both drive the same `AgentSession` class and the same `auth.js`, so there is one
 agent implementation and one credential path to maintain. Nothing here needs
 native modules (no `node-pty`, no platform binaries).
 
-The core agent guidance uses `git ls-files` for repository discovery and
-`git grep` for content searches, scoped to task-relevant paths. It avoids
-untracked/ignored files and generated directories unless the task requires
-them, rather than recursively mapping the filesystem. Outside a Git worktree
-or without Git, it reports the limitation and uses shallow, scoped listings.
+The core agent guidance requires nonrecursive discovery of one task-relevant
+folder's immediate children per request: `git ls-tree --name-only HEAD` or
+`git ls-tree --name-only HEAD:<known-folder>`, never `-r`. These list committed
+entries only. It prohibits whole-workspace/Git-tree scans, `git ls-files`
+discovery, recursive filesystem listings, and walking every subfolder through
+repeated shallow requests. Content searches use `git grep` only for known files
+or direct-child file globs in one folder, never unscoped or recursive pathspecs.
+It avoids untracked/ignored files and generated directories unless required,
+still with nonrecursive listings. Outside a Git worktree, without Git, or
+without a commit, it reports the limitation and lists only one folder's
+immediate children. Commands remain subject to the 120-second timeout;
+the guidance requires narrowing scope rather than retrying broad scans.
 
 On Windows, install **PowerShell 7** and ensure `pwsh.exe` is available on
 `PATH`. Agent commands and web terminal shells run directly in PowerShell 7,
@@ -28,6 +35,17 @@ version, so variables, imported modules, functions, environment changes and
 current directory survive between commands and prompts using that version.
 State is not shared across versions or conversations. Commands run sequentially
 with captured output and completion status; no nested wrapper is needed.
+Before sending the first command to each PowerShell process, Minicode queries
+`$ExecutionContext.SessionState.LanguageMode` using a cmdlet-only probe and
+reports the actual mode to the model, web transcript, and backend console.
+The model must respect ConstrainedLanguage and must not change language mode,
+weaken security policy, or switch hosts/interpreters to bypass restrictions.
+The current persistent shell transport requires FullLanguage; under
+ConstrainedLanguage or another restricted mode it rejects commands explicitly
+without sending them or attempting its unsupported initialization. The model
+must use an approved compatible harness tool or report the blocker.
+If mode detection fails, no user command is sent; it fails after 10 seconds
+rather than assuming FullLanguage.
 The web backend console (not the browser transcript) logs every PowerShell
 request with worker/conversation identity, version and process ID, plus the
 first 40 command characters or the last 40 characters of a directly invoked

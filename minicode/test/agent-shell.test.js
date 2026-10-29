@@ -7,7 +7,7 @@ import path from "node:path"
 import test from "node:test"
 import { AgentPowerShell } from "../server/agent-shell.js"
 
-function fixture(t) {
+function fixture(t, { languageMode = "FullLanguage", autoDetect = true } = {}) {
   const processes = []
   const notices = []
   const kills = []
@@ -22,16 +22,70 @@ function fixture(t) {
     proc.stdout = new EventEmitter()
     proc.stderr = new EventEmitter()
     proc.stdin = new EventEmitter()
-    proc.stdin.write = script => { proc.marker = script.match(/__MINICODE_[a-f0-9]+_DONE__:/)?.[0] }
+    proc.scripts = []
+    proc.stdin.write = script => {
+      proc.scripts.push(script)
+      const modeMarker = script.match(/__MINICODE_[a-f0-9]+_MODE__:/)?.[0]
+      if (modeMarker) {
+        proc.modeMarker = modeMarker
+        if (autoDetect) proc.stdout.emit("data", `${modeMarker}${languageMode}:END__\r\n`)
+      } else {
+        const marker = script.match(/__MINICODE_[a-f0-9]+_DONE__:/)?.[0]
+        if (marker) proc.marker = marker
+      }
+    }
     proc.stdin.destroy = () => { proc.destroyed = true }
     processes.push(proc)
     return proc
   })
-  const shell = new AgentPowerShell({ shell: "powershell-5.1", cwd: process.cwd(), env: {}, onStateLost: notice => notices.push(notice) })
+  const modes = []
+  const shell = new AgentPowerShell({ shell: "powershell-5.1", cwd: process.cwd(), env: {}, onStateLost: notice => notices.push(notice), onLanguageMode: mode => modes.push(mode) })
   t.after(() => shell.dispose())
   const complete = (proc, stream, code = 0) => proc[stream].emit("data", `${proc.marker}${code}:END__`)
-  return { shell, processes, notices, kills, complete }
+  return { shell, processes, notices, kills, complete, modes }
 }
+
+test("language-mode handshake handles split output before sending any command", async t => {
+  const { shell, processes, complete, modes } = fixture(t, { autoDetect: false })
+  const pending = shell.run("Write-Output 'user-command'")
+  const proc = processes[0]
+  assert.equal(proc.scripts.length, 1)
+  proc.stdout.emit("data", `${proc.modeMarker}FullLang`)
+  assert.equal(proc.scripts.length, 1)
+  proc.stdout.emit("data", "uage:END__\r\n")
+  assert.equal(proc.scripts.length, 3)
+  assert.deepEqual(modes, [{ shell: "powershell-5.1", pid: proc.pid, languageMode: "FullLanguage" }])
+  complete(proc, "stdout")
+  complete(proc, "stderr")
+  assert.deepEqual(await pending, { code: 0, output: "" })
+})
+
+for (const languageMode of ["ConstrainedLanguage", "RestrictedLanguage", "NoLanguage"]) {
+  test(`${languageMode} is reported without sending commands or FullLanguage initialization`, async t => {
+    const { shell, processes, modes } = fixture(t, { languageMode })
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await shell.run("Write-Output 'must-not-execute'")
+      assert.equal(result.code, 1)
+      assert.ok(result.output.includes(`language mode: ${languageMode}`))
+      assert.match(result.output, /Command was not executed/)
+    }
+    assert.equal(processes.length, 1)
+    assert.equal(processes[0].scripts.length, 1)
+    assert.equal(modes[0].languageMode, languageMode)
+  })
+}
+
+test("unreadable language mode fails explicitly without executing the command", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  const { shell, processes } = fixture(t, { autoDetect: false })
+  const pending = shell.run("must-not-execute")
+  processes[0].stderr.emit("data", "Language mode query denied")
+  t.mock.timers.tick(10000)
+  const result = await pending
+  assert.equal(result.code, 1)
+  assert.match(result.output, /Language mode query denied[\s\S]*language-mode detection timed out.*command was not executed/)
+  assert.equal(processes[0].scripts.length, 1)
+})
 
 test("completion waits for both output streams and parses split markers without leaking them", async t => {
   const { shell, processes, complete } = fixture(t)
@@ -91,6 +145,7 @@ test("cancelled commands discard only their process, reject late output and allo
   complete(fresh, "stderr")
   assert.deepEqual(await next, { code: 0, output: "" })
   assert.equal(notices.length, 1)
+  assert.equal(shell.languageMode, "FullLanguage")
 })
 
 test("timeouts and unexpected process exit report lost state rather than successful completion", async t => {
@@ -122,6 +177,26 @@ test("disposal kills the persistent process and settles a pending command withou
 })
 
 for (const version of ["powershell-7", "powershell-5.1"]) {
+  test(`${version} detects real ConstrainedLanguage without attempting its unsupported transport`, {
+    skip: process.platform !== "win32", timeout: 15000,
+  }, async t => {
+    const spawn = childProcess.spawn
+    t.mock.method(childProcess, "spawn", (file, args, options) => {
+      const proc = spawn(file, args, options)
+      if (file === "pwsh.exe" || file === "powershell.exe") {
+        proc.stdin.write("$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n")
+      }
+      return proc
+    })
+    const shell = new AgentPowerShell({ shell: version, cwd: process.cwd(), env: process.env })
+    t.after(() => shell.dispose())
+    const result = await shell.run("throw 'User command must not execute'")
+    assert.equal(shell.languageMode, "ConstrainedLanguage")
+    assert.equal(result.code, 1)
+    assert.match(result.output, /Command was not executed/)
+    assert.doesNotMatch(result.output, /User command must not execute|MethodInvocationNotSupported/)
+  })
+
   test(`${version} retains variables, modules, functions, environment and cwd while capturing command errors`, {
     skip: process.platform !== "win32", timeout: 15000,
   }, async t => {
