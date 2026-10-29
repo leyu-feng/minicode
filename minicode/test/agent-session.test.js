@@ -540,7 +540,7 @@ test("PowerShell backend diagnostics summarize commands and script paths without
   t.after(() => session.dispose())
   assert.equal((await session.write("Run commands")).exitCode, 0)
   assert.deepEqual(diagnostics, [
-    "[minicode] [worker=worker-1] powershell-7 pid=321 language mode: FullLanguage.",
+    "[minicode] [worker=worker-1 powershell-7 pid=321] language mode: FullLanguage.",
     `[minicode] [worker=worker-1 powershell-7 pid=321] ${command.replace("diagnostic-secret", "[redacted]").slice(0, 40)}`,
     `[minicode] [worker=worker-1 powershell-7 pid=321] ${script.slice(-40)}`,
   ])

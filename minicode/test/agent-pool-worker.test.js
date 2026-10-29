@@ -190,7 +190,7 @@ $ExecutionContext.SessionState.LanguageMode
       assert.equal(shells.get(version).languageMode, languageMode)
       const result = sessions[1].messages.find(message => message.content.startsWith("TOOL_RESULT") && message.content.includes(`shell: ${version}`)).content
       assert.ok(result.includes(`current-directory=${sessions[1].cwd}`), result)
-      const requests = logs.filter(line => line.includes(` ${version} pid=${processes[index].pid}]`))
+      const requests = logs.filter(line => line.includes(` ${version} pid=${processes[index].pid}]`) && !line.includes("language mode:"))
       assert.equal(requests.length, 2, "Both assignments must log the same worker PID")
       assert.ok(!sessions[1].messages.some(message => message.content.includes("first-completed")))
     }

@@ -722,10 +722,9 @@ export class AgentSession extends EventEmitter {
           const callbacks = {
             onLanguageMode: ({ shell, pid, languageMode }) => {
               if (this.closed) return
-              const notice = `${shell} pid=${pid ?? "unavailable"} language mode: ${languageMode}.`
               this.#emitOutput(`${shell} language mode: ${languageMode}.\r\n`, "stderr")
               const worker = stripVTControlCharacters(String(this.workerLabel)).replace(/\s+/g, " ")
-              this.shellLog?.(`[minicode] [worker=${worker}] ${notice}`)
+              this.shellLog?.(`[minicode] [worker=${worker} ${shell} pid=${pid ?? "unavailable"}] language mode: ${languageMode}.`)
             },
             onStateLost: notice => {
               if (this.closed) return
