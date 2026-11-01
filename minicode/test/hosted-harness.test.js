@@ -195,9 +195,12 @@ test(`installed ${harness} completes a trusted tool call through the private mod
       execute: async input => { assert.deepEqual(input, { route: "approved" }); toolCalled = true; return "read result" } }],
     modelConfig: { endpoint, model: "deployment", getAccessToken: async () => "smoke-only-token" },
     prepare: async () => ({ harness, command: "trusted" }),
-    spawnProcess: (_command, args, options) => harness === "pi" ?
-      spawn(process.execPath, [process.env.HOSTED_PI_TEST_EXECUTABLE, ...args.slice(3)], options) :
-      spawn(process.env.HOSTED_OPENCODE_TEST_EXECUTABLE, args.slice(3), options),
+    spawnProcess: (_command, args, options) => {
+      const executable = process.env[`HOSTED_${harness.toUpperCase()}_TEST_EXECUTABLE`]
+      if (executable.endsWith(".dll")) return spawn("dotnet", [executable, ...args.slice(3)], options)
+      return harness === "pi" ? spawn(process.execPath, [executable, ...args.slice(3)], options) :
+        spawn(executable, args.slice(3), options)
+    },
   })
   const timeout = setTimeout(() => session.interrupt(), 35_000)
   t.after(async () => { clearTimeout(timeout); await session.dispose() })
