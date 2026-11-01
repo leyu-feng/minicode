@@ -69,6 +69,10 @@ export async function readWorkerGuidance({ workspace, workerShared, bundle, repo
   }))
   for (const skill of [...bundleSkills, ...workspaceSkills, ...repositorySkills.flatMap(group => group.skills)]) {
     skill.sha256 = await skillDigest(path.dirname(skill.file))
+    // Reserve the automatically inlined operational skill for trusted sources.
+    if (skill.source !== "bundle" && skill.name.toLowerCase() === "paperclip") {
+      skill.name = `${skill.source}/${skill.name}`
+    }
   }
 
   const grouped = new Map()

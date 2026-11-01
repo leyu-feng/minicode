@@ -44,6 +44,13 @@ the harness refreshes run credentials/task environment and resets the current
 directory to that assignment's workspace. Use current environment credentials,
 not cached run tokens/headers. Retained state never grants task authorization;
 conversation history and harness tools remain assignment-specific.
+This sharing is intentional, not a security boundary: retained functions can
+intercept later credential refreshes, and retained variables or connections can
+expose earlier credentials. Devbox workers require close human supervision and
+private assignments only, with all agents and assignments in the same trust
+context. Do not mix untrusted agents or separate authorization contexts on one
+worker. A stronger orchestrator-layer security model is planned, not implemented;
+the current harness does not enforce this separation.
 Before sending the first command to each PowerShell process, Minicode queries
 `$ExecutionContext.SessionState.LanguageMode` using a cmdlet-only probe and
 reports the actual mode to the model, web transcript, and backend console.
@@ -747,8 +754,12 @@ and references, and the assigned checkout, plus skills in the verified downloade
 bundle. For each name it selects **worker_shared > repositories > worktree > bundle**,
 case-insensitively. It supplies the selected names and exact paths to the model, which
 reads the relevant/requested skill (including `/first-task` for onboarding) and resolves
-references relative to that selected skill. The selected `paperclip` operational skill
-is injected automatically. Shared overrides do not overwrite lower-priority skills.
+references relative to that selected skill. The `paperclip` operational skill is
+reserved for **worker_shared > verified bundle** and is injected automatically only
+from those trusted sources. Repository, reference, and worktree copies are cataloged
+as `<source>/paperclip` (case preserved), remain untrusted reference material, and
+cannot replace the trusted operational instructions. Without a trusted copy, no
+Paperclip skill is injected. Shared overrides do not overwrite lower-priority skills.
 Whole skill directories are selected, not merged. A directory without `SKILL.md` is not
 a skill; an unreadable entry fails preparation. Missing companion files in a selected
 override are blockers, not permission to mix lower-priority files.

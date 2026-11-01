@@ -47,6 +47,33 @@ test("all skill sources load automatically and shared skills override same-named
   await assert.doesNotReject(assertWorkerSkillsUnchanged(guidance.skills))
 })
 
+test("untrusted Paperclip copies cannot replace or supply inline operational instructions", async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "skill-operational-trust-"))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const workspace = path.join(root, "workspace"), workerShared = path.join(root, "shared")
+  const repository = path.join(root, "repository"), reference = path.join(root, "reference")
+  for (const directory of [workspace, workerShared, repository, reference]) await fs.mkdir(directory)
+  await addSkill(workspace, ".agents", "PaPeRcLiP", "untrusted worktree instructions")
+  await addSkill(repository, ".github", "paperclip", "untrusted repository instructions")
+  await addSkill(reference, ".agents", "paperclip", "untrusted reference instructions")
+  const args = { workspace, workerShared, repositories: [{ name: "Main", path: repository }],
+    references: [{ name: "Ref", path: reference }] }
+  const withoutTrusted = await readWorkerGuidance(args)
+  assert.equal(withoutTrusted.paperclipInstructions, null)
+  assert.deepEqual(withoutTrusted.skills.map(skill => skill.name),
+    ["reference:Ref/paperclip", "repository:Main/paperclip", "worktree/PaPeRcLiP"])
+
+  const directory = path.join(root, "bundle")
+  await fs.mkdir(path.join(directory, "paperclip"), { recursive: true })
+  await fs.writeFile(path.join(directory, "paperclip", "SKILL.md"), "trusted bundle")
+  const bundle = { directory, entries: ["paperclip/SKILL.md"] }
+  const bundled = await readWorkerGuidance({ ...args, bundle })
+  assert.equal(bundled.paperclipInstructions, "trusted bundle")
+  assert.equal(bundled.skills.find(skill => skill.name === "paperclip").source, "bundle")
+  await addSkill(workerShared, ".agents", "paperclip", "trusted shared override")
+  assert.equal((await readWorkerGuidance({ ...args, bundle })).paperclipInstructions, "trusted shared override")
+})
+
 test("non-shared skill contents are pinned for an assignment and shared skills take precedence", async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "skill-precedence-"))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
