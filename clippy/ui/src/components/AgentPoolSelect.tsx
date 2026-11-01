@@ -6,6 +6,7 @@ import { ApiError } from "../api/client";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { HostedRepositorySelect } from "./HostedRepositorySelect";
+import { HostedHarnessSelect } from "./HostedHarnessSelect";
 
 type PoolMode = "existing" | "new";
 
@@ -26,7 +27,8 @@ export function useAgentPoolSelection({
   const [modeChoice, setModeChoice] = useState(initialMode);
   const [primaryRepositoryId, setPrimaryRepositoryId] = useState<string>();
   const [referenceRepositoryIds, setReferenceRepositoryIds] = useState<string[]>([]);
-  const resetRepositories = () => { setPrimaryRepositoryId(undefined); setReferenceRepositoryIds([]); };
+  const [harness, setHarness] = useState("default");
+  const resetRepositories = () => { setPrimaryRepositoryId(undefined); setReferenceRepositoryIds([]); setHarness("default"); };
   const key = ["agent-pools", companyId];
   const pools = useQuery({
     queryKey: key,
@@ -38,11 +40,12 @@ export function useAgentPoolSelection({
   const mode = modeChoice ?? (existing ? "existing" : "new");
   const duplicate = mode === "new" && Boolean(existing);
   const validName = agentPoolNameSchema.safeParse(name).success;
-  const repositoryConfig: { primaryRepositoryId?: string; referenceRepositoryIds?: string[] } = existing?.type === "hosted"
-    ? { ...(primaryRepositoryId ? { primaryRepositoryId } : {}), referenceRepositoryIds } : {};
+  const repositoryConfig: { primaryRepositoryId?: string; referenceRepositoryIds?: string[]; harness?: string } = existing?.type === "hosted"
+    ? { ...(primaryRepositoryId ? { primaryRepositoryId } : {}), referenceRepositoryIds, harness } : {};
   return {
     pools, name, mode, modeChoice, duplicate, companyId,
     repositoryConfig,
+    harness, setHarness,
     setRepositories: (primaryId: string, referenceIds: string[]) => {
       setPrimaryRepositoryId(primaryId); setReferenceRepositoryIds(referenceIds);
     },
@@ -147,6 +150,8 @@ export function AgentPoolSelect({
         Devbox pools need a paired Minicode worker. The default Hosted pool uses the built-in agent host, requests capacity and waits up to two minutes
         for a real worker; mock provider counts do not make a worker available.
       </p>
+      {mode === "existing" && <HostedHarnessSelect companyId={selection.companyId} poolName={name}
+        value={selection.harness} onChange={selection.setHarness} />}
       {mode === "existing" && <HostedRepositorySelect companyId={selection.companyId} poolName={name}
         primaryId={selection.repositoryConfig.primaryRepositoryId} referenceIds={selection.repositoryConfig.referenceRepositoryIds ?? []}
         onChange={selection.setRepositories} />}

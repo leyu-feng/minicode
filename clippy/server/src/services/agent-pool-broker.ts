@@ -6,6 +6,7 @@ import {
   AGENT_POOL_HOSTED_REPOSITORIES,
   AGENT_POOL_HOSTED_WORKSPACE,
   agentPoolHelloSchema, agentPoolInstructionsSchema, agentPoolNameSchema, agentPoolTaskSchema,
+  agentPoolHarnessIdSchema,
 } from "@paperclipai/shared";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../adapters/types.js";
 import { readAgentPoolSkills } from "./agent-pool-skills.js";
@@ -77,7 +78,9 @@ export class AgentPoolBroker {
     const selection = ctx.context.paperclipHostedRepositories;
     const allRepositories = selection !== null && typeof selection === "object"
       && "mode" in selection && selection.mode === "all_repositories";
+    const harness = agentPoolHarnessIdSchema.parse(ctx.config.harness ?? "default");
     return [AGENT_POOL_SKILL_BUNDLE,
+      ...(harness === "default" ? [] : [`harness_${harness}_v1`]),
       ...(ctx.context.paperclipAgentInstructions ? [AGENT_POOL_INLINE_INSTRUCTIONS] : []),
       ...(selection ? [allRepositories ? AGENT_POOL_HOSTED_WORKSPACE : AGENT_POOL_HOSTED_REPOSITORIES] : [])];
   }
@@ -332,6 +335,7 @@ export class AgentPoolBroker {
     const { paperclipAgentInstructions: _instructions, paperclipHostedRepositories: repositories, ...context } = ctx.context;
     const task = JSON.stringify(agentPoolTaskSchema.parse({
       type: "task", protocolVersion: AGENT_POOL_PROTOCOL_VERSION, runId: ctx.runId,
+      harness: ctx.config.harness ?? "default",
       agent: { id: ctx.agent.id, name: ctx.agent.name, companyId: ctx.agent.companyId },
       instructions, skills,
       context,

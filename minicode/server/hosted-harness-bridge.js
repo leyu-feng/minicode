@@ -1,0 +1,108 @@
+import { createServer } from "node:http"
+import { once } from "node:events"
+import { randomBytes } from "node:crypto"
+import { Readable } from "node:stream"
+import { pipeline } from "node:stream/promises"
+
+const MAX_BODY = 4 * 1024 * 1024
+
+async function body(request) {
+  const chunks = []
+  let bytes = 0
+  for await (const chunk of request) {
+    bytes += chunk.length
+    if (bytes > MAX_BODY) throw new Error("Hosted harness request exceeded its limit")
+    chunks.push(chunk)
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"))
+}
+
+export async function startHostedHarnessBridge({ endpoint, model, getAccessToken, tools, signal, onError }) {
+  const upstream = new URL(endpoint)
+  if (upstream.protocol !== "https:" || upstream.username || upstream.password
+    || !upstream.pathname.endsWith("/responses")) throw new Error("Invalid Hosted model endpoint")
+  const secret = randomBytes(32).toString("hex")
+  const toolMap = new Map(tools.map(tool => [tool.name, tool]))
+  const server = createServer((request, response) => {
+    const json = (status, value) => {
+      response.writeHead(status, { "Content-Type": "application/json" })
+      response.end(JSON.stringify(value))
+    }
+    void (async () => {
+      if (request.headers.authorization !== `Bearer ${secret}`) {
+        json(401, { error: "Hosted harness authentication required" })
+        return
+      }
+      if (request.method !== "POST") {
+        json(405, { error: "Only POST is supported" })
+        return
+      }
+      const input = await body(request)
+      if (request.url === "/mcp") {
+        const result = value => json(200, { jsonrpc: "2.0", id: input.id, result: value })
+        if (input.method === "initialize") {
+          result({ protocolVersion: input.params?.protocolVersion ?? "2025-03-26",
+            capabilities: { tools: {} }, serverInfo: { name: "hosted-worker", version: "1" } })
+        } else if (input.method === "notifications/initialized") {
+          response.writeHead(202).end()
+        } else if (input.method === "tools/list") {
+          result({ tools: tools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.parameters })) })
+        } else if (input.method === "tools/call") {
+          const tool = toolMap.get(input.params?.name)
+          if (!tool) throw new Error("Unknown Hosted harness tool")
+          try {
+            signal.throwIfAborted()
+            const output = await tool.execute(input.params.arguments, { signal })
+            result({ content: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output) }] })
+          } catch (error) {
+            result({ isError: true, content: [{ type: "text", text: error.message }] })
+          }
+        } else if (input.method === "ping") {
+          result({})
+        } else {
+          json(200, { jsonrpc: "2.0", id: input.id, error: { code: -32601, message: "Unsupported Hosted method" } })
+        }
+        return
+      }
+      if (!["/openai/v1/responses", "/openai/v1/chat/completions"].includes(request.url)) {
+        json(404, { error: "Unknown Hosted model operation" })
+        return
+      }
+      signal.throwIfAborted()
+      const target = new URL(upstream)
+      if (request.url.endsWith("/chat/completions")) target.pathname = target.pathname.replace(/responses$/, "chat/completions")
+      input.model = model
+      const token = await getAccessToken({ signal })
+      signal.throwIfAborted()
+      const remote = await fetch(target, {
+        method: "POST", redirect: "error", signal,
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      })
+      if (!remote.ok) {
+        onError(`Hosted model request failed (HTTP ${remote.status})`)
+        await remote.body?.cancel()
+        json(remote.status, { error: { message: `Hosted model request failed (HTTP ${remote.status})`, type: "hosted_model_error" } })
+        return
+      }
+      response.writeHead(remote.status, { "Content-Type": remote.headers.get("content-type") ?? "application/json" })
+      if (remote.body) await pipeline(Readable.fromWeb(remote.body), response, { signal })
+      else response.end()
+    })().catch(error => {
+      onError(signal.aborted ? "Hosted harness cancelled" : error.message)
+      if (response.headersSent) response.destroy()
+      else json(500, { error: { message: "Hosted harness request failed", type: "hosted_bridge_error" } })
+    })
+  })
+  server.listen(0, "127.0.0.1")
+  await once(server, "listening")
+  const baseUrl = `http://127.0.0.1:${server.address().port}`
+  return {
+    baseUrl, secret,
+    async close() {
+      const closed = new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+      server.closeAllConnections()
+      await closed
+    },
+  }
+}

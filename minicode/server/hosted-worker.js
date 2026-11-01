@@ -1,6 +1,7 @@
 import readline from "node:readline"
 import { randomBytes, randomUUID } from "node:crypto"
 import { AgentSession } from "./agent-session.js"
+import { HostedHarnessSession } from "./hosted-harness-session.js"
 import { startAgentPoolWorker } from "./agent-pool-worker.js"
 import { hostedBindingToken, startHostedFleet } from "./hosted-fleet.js"
 import { createHostedPublicationTool } from "./hosted-publication.js"
@@ -81,6 +82,7 @@ export async function runHostedWorkerCli() {
       cwd: configuration.cwd, sourceBranch: configuration.branch, entraSession,
       workerShared: configuration.workerShared,
       hostedWorkspaceMode: configuration.workspaceMode,
+      harnesses: configuration.harnesses?.map(entry => entry.id) ?? ["default"],
       hostedPublicationTool: options => createHostedPublicationTool({
         ...options, request,
       }),
@@ -112,12 +114,19 @@ export async function runHostedWorkerCli() {
       onModelFailure: configuration.academyEnabled === true
         ? evidence => request("learning_failure", { ...evidence, bindingId: binding?.workerId })
         : undefined,
-      sessionFactory: options => new AgentSession({
+      sessionFactory: options => options.harness === "default" ? new AgentSession({
         ...options,
         modelConfigProvider: async () => ({
           api: "responses", endpoint: configuration.modelEndpoint, model: configuration.model,
           getAccessToken: async () => (await request("model")).token,
         }),
+      }) : new HostedHarnessSession({
+        ...options,
+        prepare: (harness, runId, options) => request("harness", { harness, runId, bindingId: binding?.workerId }, options),
+        modelConfig: {
+          endpoint: configuration.modelEndpoint, model: configuration.model,
+          getAccessToken: options => request("model", {}, options).then(result => result.token),
+        },
       }),
     })
     worker = Array.isArray(configuration.bindings)

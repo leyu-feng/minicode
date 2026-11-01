@@ -3,10 +3,12 @@ import { configFieldsForSection } from "../config-sections";
 import { Field, DraftInput } from "../../components/agent-config-primitives";
 import { processUIAdapter } from "../process";
 import { HostedRepositorySelect } from "../../components/HostedRepositorySelect";
+import { HostedHarnessSelect } from "../../components/HostedHarnessSelect";
 
 function AgentPoolConfigFields({ section, isCreate, values, set, config, eff, mark, companyId }: AdapterConfigFieldsProps) {
   const current = isCreate ? values?.adapterSchemaValues ?? {} : config;
   const name = isCreate ? String(current.name ?? "default") : eff("adapterConfig", "name", String(config.name ?? "default"));
+  const harness = isCreate ? String(current.harness ?? "default") : eff("adapterConfig", "harness", String(config.harness ?? "default"));
   const rawPrimary = isCreate ? current.primaryRepositoryId : eff("adapterConfig", "primaryRepositoryId", config.primaryRepositoryId);
   const rawReferences = isCreate ? current.referenceRepositoryIds : eff("adapterConfig", "referenceRepositoryIds", config.referenceRepositoryIds);
   const primaryId = typeof rawPrimary === "string" ? rawPrimary : undefined;
@@ -18,11 +20,12 @@ function AgentPoolConfigFields({ section, isCreate, values, set, config, eff, ma
         value={name}
         onCommit={(nextName) => {
           if (isCreate) set!({ adapterSchemaValues: { ...values?.adapterSchemaValues, name: nextName,
-            primaryRepositoryId: undefined, referenceRepositoryIds: [] } });
+            primaryRepositoryId: undefined, referenceRepositoryIds: [], harness: "default" } });
           else {
             mark("adapterConfig", "name", nextName);
             mark("adapterConfig", "primaryRepositoryId", undefined);
             mark("adapterConfig", "referenceRepositoryIds", []);
+            mark("adapterConfig", "harness", "default");
           }
         }}
         immediate
@@ -30,6 +33,11 @@ function AgentPoolConfigFields({ section, isCreate, values, set, config, eff, ma
         placeholder="default"
       />
     </Field>
+    <HostedHarnessSelect companyId={companyId ?? null} poolName={name} value={harness}
+      onChange={next => {
+        if (isCreate) set!({ adapterSchemaValues: { ...values?.adapterSchemaValues, harness: next } });
+        else mark("adapterConfig", "harness", next);
+      }} />
     <HostedRepositorySelect companyId={companyId ?? null} poolName={name} primaryId={primaryId} referenceIds={referenceIds}
       onChange={(primaryRepositoryId, referenceRepositoryIds) => {
         if (isCreate) set!({ adapterSchemaValues: { ...values?.adapterSchemaValues, primaryRepositoryId, referenceRepositoryIds } });
@@ -47,6 +55,7 @@ export const agentPoolUIAdapter: UIAdapterModule = {
   ConfigFields: AgentPoolConfigFields,
   buildAdapterConfig: (values) => ({
     name: values.adapterSchemaValues?.name ?? "default",
+    ...(values.adapterSchemaValues?.harness ? { harness: values.adapterSchemaValues.harness } : {}),
     ...(values.adapterSchemaValues?.primaryRepositoryId ? { primaryRepositoryId: values.adapterSchemaValues.primaryRepositoryId } : {}),
     ...(values.adapterSchemaValues?.referenceRepositoryIds ? { referenceRepositoryIds: values.adapterSchemaValues.referenceRepositoryIds } : {}),
   }),

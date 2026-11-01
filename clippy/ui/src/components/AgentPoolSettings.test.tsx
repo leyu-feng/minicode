@@ -9,6 +9,8 @@ import { agentPoolUIAdapter } from "../adapters/agent-pool";
 import { defaultCreateValues } from "./agent-config-defaults";
 import { HostedRepositorySelect } from "./HostedRepositorySelect";
 import { CompanyAgentPools } from "../pages/CompanyAgentPools";
+import { HostedHarnessSelect } from "./HostedHarnessSelect";
+import { AgentPoolSelect, useAgentPoolSelection } from "./AgentPoolSelect";
 
 let root: Root | undefined;
 let client: QueryClient | undefined;
@@ -62,6 +64,46 @@ async function click(text: string) {
 }
 
 describe("AgentPool settings", () => {
+  it("uses provider labels and persists the harness in new agent setup without adding pools", async () => {
+    vi.spyOn(agentPoolsApi, "list").mockResolvedValue([hosted]);
+    const catalog = vi.spyOn(agentPoolsApi, "harnesses").mockResolvedValue([
+      { id: "default", name: "default" }, { id: "provider-custom", name: "Provider supplied harness" },
+    ]);
+    let config: Record<string, unknown> = {};
+    function Setup() {
+      const selection = useAgentPoolSelection({
+        companyId: "company", name: "default", onNameChange: vi.fn(), enabled: true,
+      });
+      config = selection.repositoryConfig;
+      return <AgentPoolSelect selection={selection} />;
+    }
+    await mount(<Setup />);
+    expect(catalog).toHaveBeenCalledWith("company", "default-pool");
+    const field = container.querySelector<HTMLSelectElement>('[aria-label="Harness"]')!;
+    expect([...field.options].map(option => option.text)).toEqual(["default", "Provider supplied harness"]);
+    await act(async () => {
+      field.value = "provider-custom";
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(config.harness).toBe("provider-custom");
+    expect(agentPoolUIAdapter.buildAdapterConfig({
+      ...defaultCreateValues, adapterSchemaValues: { name: "default", harness: "provider-custom" },
+    })).toMatchObject({ name: "default", harness: "provider-custom" });
+  });
+
+  it("keeps an unavailable saved harness visible and surfaces provider failures", async () => {
+    vi.spyOn(agentPoolsApi, "list").mockResolvedValue([hosted]);
+    vi.spyOn(agentPoolsApi, "harnesses").mockResolvedValue([{ id: "default", name: "default" }]);
+    const change = vi.fn();
+    await mount(<HostedHarnessSelect companyId="company" poolName="default" value="removed" onChange={change} />);
+    expect(container.querySelector<HTMLSelectElement>('[aria-label="Harness"]')?.value).toBe("removed");
+    expect(container.textContent).toContain("no longer available");
+    expect(change).not.toHaveBeenCalled();
+    vi.mocked(agentPoolsApi.harnesses).mockRejectedValue(new Error("Provider unavailable"));
+    await act(async () => { await client!.invalidateQueries({ queryKey: ["agent-pools", "company", hosted.id, "harnesses"] }); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(container.textContent).toContain("Provider unavailable");
+  });
   it("opens pool management on its own page and clears drafts when switching organizations", async () => {
     const list = vi.spyOn(agentPoolsApi, "list").mockResolvedValue([]);
     await mount(<CompanyAgentPools />);

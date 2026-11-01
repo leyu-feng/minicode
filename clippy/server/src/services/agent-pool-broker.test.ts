@@ -66,6 +66,25 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("carries the agent harness only to a worker advertising support for it", async () => {
+    const { broker, worker } = await harness();
+    const legacy = await worker();
+    const supported = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1", "harness_pi_v1"]);
+    const ctx = context();
+    ctx.config.harness = "pi";
+    const result = broker.execute(ctx);
+    expect((await supported.take("task")).harness).toBe("pi");
+    expect(legacy.messages).toEqual([]);
+    supported.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await supported.take("ack");
+    supported.send({ type: "ready" });
+    await expect(result).resolves.toMatchObject({ exitCode: 0 });
+    ctx.config.harness = "opencode";
+    await expect(broker.execute({ ...ctx, runId: randomUUID() })).resolves.toMatchObject({
+      errorCode: "agent_pool_worker_unavailable",
+    });
+    expect(legacy.messages).toEqual([]);
+  });
   it("reserves only one pool binding of a shared execution and releases it after failed admission", async () => {
     const { broker, worker } = await harness();
     const executionId = randomUUID();

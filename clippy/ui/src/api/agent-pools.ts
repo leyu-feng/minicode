@@ -1,5 +1,5 @@
 import type { AgentPool, AgentPoolWorker, AgentPoolPairing, HostedWorkerRepository,
-  HostedWorkerStatus } from "@paperclipai/shared";
+  HostedWorkerStatus, HostedWorkerHarness } from "@paperclipai/shared";
 import { api } from "./client";
 
 const base = (companyId: string) => `/companies/${companyId}/agent-pools`;
@@ -10,6 +10,8 @@ export const agentPoolsApi = {
     api.get<HostedWorkerStatus>(`${base(companyId)}/${poolId}/status`),
   repositories: (companyId: string, poolId: string) =>
     api.get<HostedWorkerRepository[]>(`${base(companyId)}/${poolId}/repos`),
+  harnesses: (companyId: string, poolId: string) =>
+    api.get<HostedWorkerHarness[]>(`${base(companyId)}/${poolId}/harnesses`),
   workers: (companyId: string, poolId: string) =>
     api.get<AgentPoolWorker[]>(`${base(companyId)}/${poolId}/workers`),
   pair: (companyId: string, poolId: string, name: string) =>

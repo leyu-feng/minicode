@@ -112,6 +112,8 @@ export function agentPoolRoutes(db: Db) {
     res.json(await svc.status(company(req.params.companyId), id(req.params.poolId))));
   router.get(`${base}/:poolId/repos`, async (req, res) =>
     res.json(await svc.repositories(company(req.params.companyId), id(req.params.poolId))));
+  router.get(`${base}/:poolId/harnesses`, async (req, res) =>
+    res.json(await svc.harnesses(company(req.params.companyId), id(req.params.poolId))));
   router.post(`${base}/:poolId`, validate(hostedWorkerDemandSchema), async (req, res) => {
     const companyId = company(req.params.companyId);
     const poolId = id(req.params.poolId);

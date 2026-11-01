@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import { agentPools, agentPoolWorkers, companies, type Db } from "@paperclipai/db";
-import { agentPoolNameSchema, hostedAgentRepositoriesSchema, type AgentPool, type HostedWorkerRepository,
+import { agentPoolNameSchema, agentPoolHarnessIdSchema, hostedAgentRepositoriesSchema, type AgentPool, type HostedWorkerRepository,
   type hostedAgentPoolWorkerSchema, type hostedAgentPoolSlotsSchema } from "@paperclipai/shared";
 import type { z } from "zod";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "../errors.js";
@@ -224,23 +224,35 @@ export function agentPoolService(db: Db) {
       const { client, poolId: remoteId } = provider(await provision(companyId, poolId));
       return client.repositories(remoteId);
     },
+    async harnesses(companyId: string, poolId: string) {
+      const { client, poolId: remoteId } = provider(await provision(companyId, poolId));
+      return client.harnesses(remoteId);
+    },
     async report(companyId: string, poolId: string, itemsWaiting: number) {
       const { client, poolId: remoteId } = provider(await provision(companyId, poolId));
       await client.report(remoteId, itemsWaiting);
     },
     async validateAgentRepositories(companyId: string, config: Record<string, unknown>, signal?: AbortSignal) {
       const name = agentPoolNameSchema.parse(config.name ?? "default");
+      const harness = agentPoolHarnessIdSchema.parse(config.harness ?? "default");
       const [pool] = await db.select().from(agentPools)
         .where(and(eq(agentPools.companyId, companyId), eq(agentPools.name, name)));
       if (!pool) {
+        if (harness !== "default") throw badRequest("Select the Hosted pool before choosing a harness.");
         const selections = hostedAgentRepositoriesSchema.parse(config);
         if (selections.primaryRepositoryId !== undefined || selections.referenceRepositoryIds.length > 0) {
           throw badRequest("Select an existing agent pool before choosing repositories.");
         }
         return config;
       }
-      if (pool.type !== "hosted") return config;
+      if (pool.type !== "hosted") {
+        if (harness !== "default") throw badRequest("Harness selection is available only in the default Hosted pool.");
+        return config;
+      }
       const { client, poolId: remoteId } = provider(await provision(companyId, pool.id, signal));
+      if (harness !== "default" && !(await client.harnesses(remoteId, signal)).some(entry => entry.id === harness)) {
+        throw badRequest("The selected harness is not available from this Hosted provider.");
+      }
       const repos = await client.repositories(remoteId, signal);
       return resolveRepositories(config, repos).config;
     },
@@ -256,12 +268,19 @@ export function agentPoolService(db: Db) {
     },
     async prepareExecution(ctx: AdapterExecutionContext) {
       const name = agentPoolNameSchema.parse(ctx.config.name ?? "default");
+      const harness = agentPoolHarnessIdSchema.parse(ctx.config.harness ?? "default");
       const [pool] = await db.select().from(agentPools)
         .where(and(eq(agentPools.companyId, ctx.agent.companyId), eq(agentPools.name, name)));
-      if (!pool || pool.type !== "hosted") return;
+      if (!pool || pool.type !== "hosted") {
+        if (harness !== "default") throw badRequest("Harness selection requires the default Hosted pool.");
+        return;
+      }
       const deadline = AbortSignal.timeout(118_000);
       const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline;
       const { client, poolId: remoteId } = provider(await provision(ctx.agent.companyId, pool.id, signal));
+      if (harness !== "default" && !(await client.harnesses(remoteId, signal)).some(entry => entry.id === harness)) {
+        throw badRequest("The selected harness is no longer available from this Hosted provider.");
+      }
       const repos = await client.repositories(remoteId, signal);
       const resolved = resolveRepositories(ctx.config, repos);
       Object.assign(ctx.config, resolved.config);

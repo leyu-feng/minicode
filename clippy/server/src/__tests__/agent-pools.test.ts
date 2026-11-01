@@ -57,6 +57,7 @@ const execFileAsync = promisify(execFile);
       create: vi.fn(async () => poolId), delete: vi.fn(async () => {}),
       status: vi.fn(async () => ({ activeWorkers: 1, provisioningWorkers: 1, isMock: true })),
       repositories: vi.fn(async () => repos), report: vi.fn(async () => {}),
+      harnesses: vi.fn(async () => [{ id: "default", name: "default" }, { id: "pi", name: "pi" }]),
       claim: vi.fn(async () => {}),
     };
     vi.spyOn(hostedWorkers, "hostedWorkerClient").mockReturnValue(client);
@@ -93,6 +94,22 @@ const execFileAsync = promisify(execFile);
     await expect(svc.status(otherCompanyId, pool.id)).rejects.toThrow("not found");
     await expect(svc.issuePairing(companyId, pool.id, "manual-worker")).rejects.toThrow("Only Devbox pools");
     expect(provider.client.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("discovers provider harnesses only for the owning company and validates agent choices", async () => {
+    const provider = hostedProvider();
+    const svc = agentPoolService(db);
+    const pool = await svc.ensureDefault(companyId);
+    expect(await svc.harnesses(companyId, pool.id)).toEqual(await provider.client.harnesses());
+    await expect(svc.harnesses(otherCompanyId, pool.id)).rejects.toThrow("not found");
+    await expect(svc.validateAgentRepositories(companyId, { name: "default", harness: "pi" }))
+      .resolves.toMatchObject({ harness: "pi" });
+    await expect(svc.validateAgentRepositories(companyId, { name: "default", harness: "missing" }))
+      .rejects.toThrow("not available");
+    const devbox = await svc.create(companyId, "local");
+    await expect(svc.validateAgentRepositories(companyId, { name: devbox.name, harness: "pi" }))
+      .rejects.toThrow("default Hosted pool");
+    await expect(svc.harnesses(companyId, devbox.id)).rejects.toThrow("Only the default pool");
   });
 
   it("rejects board revocation of Hosted workers without changing their credentials", async () => {

@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   hostedWorkerConfigSchema, hostedWorkerRepositoriesSchema, hostedWorkerStatusSchema,
   hostedWorkerDemandSchema,
+  hostedWorkerHarnessesSchema,
   type HostedWorkerConfig,
 } from "@paperclipai/shared";
 import { guardedRemoteHttpFetch } from "./remote-http-fetch.js";
@@ -53,6 +54,9 @@ export function hostedWorkerClient(config: HostedWorkerConfig) {
     },
     async repositories(poolId: string, signal?: AbortSignal) {
       return hostedWorkerRepositoriesSchema.parse(await (await request("GET", `${path(poolId)}/repos`, 200, undefined, signal)).json());
+    },
+    async harnesses(poolId: string, signal?: AbortSignal) {
+      return hostedWorkerHarnessesSchema.parse(await (await request("GET", `${path(poolId)}/harnesses`, 200, undefined, signal)).json());
     },
     async report(poolId: string, itemsWaiting: number, signal?: AbortSignal) {
       await request("POST", path(poolId), 202, hostedWorkerDemandSchema.parse({ itemsWaiting }), signal);

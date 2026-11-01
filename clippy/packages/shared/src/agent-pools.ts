@@ -5,6 +5,15 @@ export const AGENT_POOL_INLINE_INSTRUCTIONS = "inline_instructions_v1";
 export const AGENT_POOL_SKILL_BUNDLE = "skill_bundle_v1";
 export const AGENT_POOL_HOSTED_REPOSITORIES = "hosted_repositories_v1";
 export const AGENT_POOL_HOSTED_WORKSPACE = "hosted_workspace_v2";
+export const agentPoolHarnessIdSchema = z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9_-]*$/);
+export const hostedWorkerHarnessesSchema = z.array(z.object({
+  id: agentPoolHarnessIdSchema,
+  name: z.string().min(1).max(100),
+})).min(1).max(24).refine(harnesses =>
+  new Set(harnesses.map(harness => harness.id)).size === harnesses.length
+  && harnesses.some(harness => harness.id === "default"),
+  "The provider must supply unique harness IDs including default.");
+export type HostedWorkerHarness = z.infer<typeof hostedWorkerHarnessesSchema>[number];
 
 export const agentPoolHelloSchema = z.object({
   type: z.literal("hello"),
@@ -41,6 +50,7 @@ export const agentPoolTaskSchema = z.object({
   type: z.literal("task"),
   protocolVersion: z.literal(AGENT_POOL_PROTOCOL_VERSION),
   runId: z.string(),
+  harness: agentPoolHarnessIdSchema.default("default"),
   agent: z.object({ id: z.string(), name: z.string(), companyId: z.string().min(1) }),
   instructions: agentPoolInstructionsSchema.nullable(),
   skills: agentPoolSkillsSchema,

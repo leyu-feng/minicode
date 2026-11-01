@@ -246,6 +246,7 @@ export async function startAgentPoolWorker({
   publisherFactory = createGitHubPublisher,
   azureDevOpsPublisherFactory = createAzureDevOpsPublisher,
   sessionFactory = (options) => new AgentSession(options),
+  harnesses = ["default"],
   prepareHostedRepositories, hostedWorkspaceMode, hostedPublicationTool, hostedProviderTool, hostedProviderPostTool, gitEnvironment, onStateChange = async () => {},
   onActivity, onModelFailure,
   assignmentTimeoutMs, idleTimeoutMs,
@@ -255,6 +256,9 @@ export async function startAgentPoolWorker({
 }) {
   const azurePublication = [azureDevOpsOrg, azureDevOpsProject, azureDevOpsRepo, azureDevOpsUser, azureDevOpsAlias]
     .some(value => value !== undefined)
+  if (!Array.isArray(harnesses) || !harnesses.includes("default")
+    || harnesses.some(id => typeof id !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id))
+    || new Set(harnesses).size !== harnesses.length) throw new Error("Invalid worker harness catalog")
   if (azurePublication && (githubRepo || githubUser)) throw new Error("Select either GitHub or Azure DevOps publication, not both")
   if (!["normal", "verbose"].includes(outputMode)) throw new Error("Worker --output-mode must be normal or verbose")
   if (toolAzureConfigDir !== undefined && (typeof toolAzureConfigDir !== "string" || !path.isAbsolute(toolAzureConfigDir))) {
@@ -353,7 +357,7 @@ export async function startAgentPoolWorker({
     // write() settles only after its active model/tool operation unwinds.
     await active?.execution
     await diskCheck
-    active?.session?.dispose()
+    await active?.session?.dispose()
     await Promise.all([...powerShells.values()].map(shell => shell.dispose()))
     powerShells.clear()
     worktree?.release()
@@ -389,7 +393,7 @@ export async function startAgentPoolWorker({
       await active.execution
       if (stopped) return
       clearTimeout(active.deadline)
-      active.session?.dispose()
+      await active.session?.dispose()
       // Idle shells must not hold an assignment worktree open on Windows.
       for (const [name, shell] of powerShells) {
         if (!shell.proc) continue
@@ -446,6 +450,8 @@ export async function startAgentPoolWorker({
     }
     run.execution = Promise.resolve().then(async () => {
       if (stopped || run.cancelled) return { exitCode: 130 }
+      const harness = task.harness ?? "default"
+      if (!harnesses.includes(harness)) throw new Error(`This worker does not support harness ${harness}`)
       await onStateChange({ state: "busy", runId: task.runId, agentId: task.agent?.id })
       if (stopped || run.cancelled) return { exitCode: 130 }
       run.controller.signal.throwIfAborted()
@@ -535,7 +541,7 @@ export async function startAgentPoolWorker({
       await assertWorkerSkillsUnchanged(guidance.skills)
       if (stopped || run.cancelled) return { exitCode: 130 }
       const session = sessionFactory({
-        id: task.runId, cwd: workspace, toolAzureConfigDir,
+        id: task.runId, harness, cwd: workspace, toolAzureConfigDir,
         workerLabel: workerName ?? workerId,
         shellLog: log,
         powerShells,
@@ -760,7 +766,8 @@ export async function startAgentPoolWorker({
         capabilities: [INLINE_INSTRUCTIONS, SKILL_BUNDLE, ...(prepareHostedRepositories
           ? [hostedRoot ? "hosted_workspace_v2" : "hosted_repositories_v1", "retiring_ready_v1"] : []),
           ...(hostedRoot && hostedProviderTool ? ["provider_read_v1"] : []),
-          ...(hostedRoot && hostedProviderPostTool ? ["provider_post_v1"] : [])],
+          ...(hostedRoot && hostedProviderPostTool ? ["provider_post_v1"] : []),
+          ...harnesses.filter(id => id !== "default").map(id => `harness_${id}_v1`)],
         instanceId, runId: active?.id ?? null })
     })
     current.on("ping", heartbeat)
