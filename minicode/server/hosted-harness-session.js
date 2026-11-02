@@ -285,7 +285,7 @@ export class HostedHarnessSession extends EventEmitter {
           ...server, ...(this.harness === "copilotcli" ? { tools: this.tools.map(tool => tool.name) } : {}),
         } } }), { mode: 0o600 })
         if (this.harness === "claudecode") {
-          childEnv.ANTHROPIC_MODEL = this.harnessModel ?? this.modelConfig.model
+          childEnv.ANTHROPIC_MODEL = this.harnessModel ?? "claude-sonnet-5"
           if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/.test(childEnv.ANTHROPIC_MODEL ?? "")) throw new Error("Claude requires an explicit native model ID")
           const instructions = path.join(temporary, "instructions.md")
           await fs.writeFile(instructions, this.instructions, { mode: 0o600 })

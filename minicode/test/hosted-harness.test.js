@@ -174,6 +174,7 @@ for (const harness of ["claudecode", "copilotcli"]) {
       assert.ok(!invocation.args.includes(flag))
     }
     assert.equal(invocation.options.env.HOME, invocation.options.env.USERPROFILE)
+    if (harness === "claudecode") assert.equal(invocation.options.env.ANTHROPIC_MODEL, "gpt-4.1")
     await assert.rejects(fs.stat(mcpPath), { code: "ENOENT" })
   })
 
@@ -188,6 +189,24 @@ for (const harness of ["claudecode", "copilotcli"]) {
     })
   })
 }
+
+test("Claude defaults to Sonnet 5 rather than inheriting the worker's unrelated model", async t => {
+  const session = new HostedHarnessSession({
+    harness: "claudecode", id: "run", cwd: process.cwd(), env: {}, instructions: "Policy", tools: [],
+    githubCredential: { accessToken: "private-agent-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), runId: "run" },
+    modelConfig: { endpoint, model: "gpt-5.6-sol" },
+    prepare: async () => ({ harness: "claudecode", command: "trusted-shim", version: "2.1.0" }),
+    spawnProcess: (_command, args, options) => {
+      assert.equal(options.env.ANTHROPIC_MODEL, "claude-sonnet-5")
+      assert.equal(args[args.indexOf("--model") + 1], "claude-sonnet-5")
+      return spawn(process.execPath, ["--input-type=module", "-e",
+        'for await (const chunk of process.stdin) {} console.log(JSON.stringify({ type: "result", subtype: "success", result: "Done" }))'],
+      options)
+    },
+  })
+  t.after(() => session.dispose())
+  assert.deepEqual(await session.write("Task"), { exitCode: 0 })
+})
 
 test("Hosted model bridge authenticates, pins the deployment and never exposes upstream credentials", async t => {
   const controller = new AbortController()

@@ -8,6 +8,7 @@ import {
   AGENT_POOL_GITHUB_CREDENTIAL, agentPoolGitHubCredentialSchema, agentPoolRequiresGitHubLogin, type AgentPoolGitHubCredential,
   agentPoolHelloSchema, agentPoolInstructionsSchema, agentPoolNameSchema, agentPoolTaskSchema,
   agentPoolHarnessIdSchema,
+  AGENT_POOL_CLAUDECODE_DEFAULT_MODEL,
 } from "@paperclipai/shared";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../adapters/types.js";
 import { readAgentPoolSkills } from "./agent-pool-skills.js";
@@ -345,6 +346,8 @@ export class AgentPoolBroker {
     const peer = eligible.find(candidate => required.every(capability => candidate.capabilities.includes(capability)));
     if (!peer) return unavailable(`AgentPool '${name}' has no available worker supporting ${required.join(", ")}; upgrade or connect a compatible worker and retry`);
     const { paperclipAgentInstructions: _instructions, paperclipHostedRepositories: repositories, ...context } = ctx.context;
+    const harnessModel = ctx.config.harnessModel
+      ?? (ctx.config.harness === "claudecode" ? AGENT_POOL_CLAUDECODE_DEFAULT_MODEL : undefined);
     const task = JSON.stringify(agentPoolTaskSchema.parse({
       type: "task", protocolVersion: AGENT_POOL_PROTOCOL_VERSION, runId: ctx.runId,
       harness: ctx.config.harness ?? "default",
@@ -355,7 +358,7 @@ export class AgentPoolBroker {
       runtimeTools: ctx.runtimeTools ?? null,
       authToken: ctx.authToken ?? null,
       ...(githubCredential ? { githubCredential } : {}),
-      ...(ctx.config.harnessModel ? { harnessModel: ctx.config.harnessModel } : {}),
+      ...(harnessModel ? { harnessModel } : {}),
       ...(repositories ? { repositories } : {}),
     }));
     if (Buffer.byteLength(task) > AGENT_POOL_MAX_FRAME) throw new Error("AgentPool task exceeds the 256 KiB frame limit; reduce instructions or task context");

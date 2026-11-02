@@ -2,6 +2,10 @@ import { z } from "zod";
 import type { AgentGitHubLoginStatus } from "@paperclipai/shared";
 
 const MIN_ASSIGNMENT_VALIDITY_MS = 48 * 60_000;
+const accountSchema = z.object({
+  id: z.number().int().positive(),
+  login: z.string().min(1).max(100),
+});
 const tokenSchema = z.object({
   access_token: z.string().min(1).max(8192),
   expires_in: z.number().int().positive().max(86_400),
@@ -16,6 +20,8 @@ const credentialSchema = z.object({
   expiresAt: z.number().int().positive(),
   refreshToken: z.string().min(1).max(8192),
   refreshExpiresAt: z.number().int().positive(),
+  account: accountSchema.optional(),
+  signedInAt: z.number().int().positive().optional(),
 });
 const pendingSchema = z.object({
   state: z.literal("pending"),
@@ -86,6 +92,26 @@ export class GitHubDeviceLogin {
       ? credential : null;
   }
 
+  private async account(accessToken: string) {
+    const response = await (this.options.fetcher ?? fetch)("https://api.github.com/user", {
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "Paperclip-Agent-GitHub-Login",
+      },
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`GitHub account lookup returned HTTP ${response.status}.`);
+    }
+    const account = accountSchema.safeParse(await response.json());
+    if (!account.success) throw new Error("GitHub did not return valid account information.");
+    return account.data;
+  }
+
   private async device() {
     const value = await this.options.store.get("device");
     return value === null ? null : storedDeviceSchema.parse(value);
@@ -103,12 +129,25 @@ export class GitHubDeviceLogin {
   }
 
   async status(): Promise<GitHubLoginStatus> {
-    const credential = await this.credentials();
-    if (credential && credential.refreshExpiresAt > this.now()) {
+    let credential = await this.credentials();
+    if (credential) {
+      if (!credential.account && credential.expiresAt > this.now() && credential.refreshExpiresAt > this.now()) {
+        credential = { ...credential, account: await this.account(credential.accessToken) };
+        await this.options.store.set("credentials", credential);
+      }
+      const details = {
+        account: credential.account,
+        signedInAt: credential.signedInAt === undefined ? undefined : new Date(credential.signedInAt).toISOString(),
+        expiresAt: new Date(credential.expiresAt).toISOString(),
+        refreshExpiresAt: new Date(credential.refreshExpiresAt).toISOString(),
+      };
+      if (credential.refreshExpiresAt <= this.now()) {
+        return { state: "expired", message: "GitHub sign-in expired. Sign in again to run this agent.", ...details };
+      }
       return {
         state: "connected",
         message: "GitHub sign-in is complete.",
-        expiresAt: new Date(credential.expiresAt).toISOString(),
+        ...details,
       };
     }
     const device = await this.device();
@@ -152,7 +191,7 @@ export class GitHubDeviceLogin {
     return this.pendingStatus(pending);
   }
 
-  private async saveTokens(response: unknown) {
+  private async saveTokens(response: unknown, previous?: z.infer<typeof credentialSchema>) {
     const parsed = tokenSchema.safeParse(response);
     if (!parsed.success || parsed.data.expires_in * 1000 <= MIN_ASSIGNMENT_VALIDITY_MS) {
       throw new Error("GitHub must issue an expiring access token and a refresh token before this agent can run.");
@@ -165,6 +204,8 @@ export class GitHubDeviceLogin {
       expiresAt: now + parsed.data.expires_in * 1000,
       refreshToken: parsed.data.refresh_token,
       refreshExpiresAt: now + parsed.data.refresh_token_expires_in * 1000,
+      account: previous?.account,
+      signedInAt: previous ? previous.signedInAt : now,
     };
     await this.options.store.set("credentials", credential);
     return credential;
@@ -231,7 +272,7 @@ export class GitHubDeviceLogin {
         }
         throw new Error("GitHub could not refresh this agent's access token.");
       }
-      credential = await this.saveTokens(response);
+      credential = await this.saveTokens(response, credential);
     }
     return { accessToken: credential.accessToken, expiresAt: new Date(credential.expiresAt).toISOString() };
   }

@@ -6,6 +6,7 @@ export const AGENT_POOL_SKILL_BUNDLE = "skill_bundle_v1";
 export const AGENT_POOL_HOSTED_REPOSITORIES = "hosted_repositories_v1";
 export const AGENT_POOL_HOSTED_WORKSPACE = "hosted_workspace_v2";
 export const AGENT_POOL_GITHUB_CREDENTIAL = "github_credential_v1";
+export const AGENT_POOL_CLAUDECODE_DEFAULT_MODEL = "claude-sonnet-5";
 export const agentPoolRequiresGitHubLogin = (harness: unknown) =>
   harness === "claudecode" || harness === "copilotcli";
 export const agentPoolHarnessModelSchema = z.string().trim().min(1).max(100).regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/);
@@ -23,6 +24,9 @@ export interface AgentGitHubLoginStatus {
   userCode?: string;
   verificationUri?: string;
   expiresAt?: string;
+  account?: { id: number; login: string };
+  signedInAt?: string;
+  refreshExpiresAt?: string;
   pollAfterSeconds?: number;
 }
 export const agentPoolHarnessIdSchema = z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9_-]*$/);

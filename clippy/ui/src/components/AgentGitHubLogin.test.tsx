@@ -57,3 +57,31 @@ it("shows storage and authorization errors without claiming login success", asyn
   expect(container.querySelector("[role=alert]")?.textContent).toBe("Credential vault unavailable");
   expect(container.textContent).not.toContain("complete.");
 });
+
+it.each(["connected", "expired"] as const)("shows verified sign-in details and reauthorization for %s credentials", async state => {
+  vi.spyOn(agentPoolsApi, "pollGitHubLogin").mockResolvedValue({
+    state, message: state === "connected" ? "GitHub sign-in is complete." : "GitHub sign-in expired. Sign in again.",
+    account: { id: 12345, login: "agent-user" }, signedInAt: "2026-11-02T18:00:00.000Z",
+    expiresAt: "2026-11-03T02:00:00.000Z", refreshExpiresAt: "2027-05-01T18:00:00.000Z",
+  });
+  await render("agent");
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+  expect(container.textContent).toContain("@agent-user");
+  expect(container.querySelector('time[datetime="2026-11-02T18:00:00.000Z"]')).not.toBeNull();
+  expect(container.querySelector('time[datetime="2027-05-01T18:00:00.000Z"]')).not.toBeNull();
+  expect(container.querySelector('time[datetime="2026-11-03T02:00:00.000Z"]')).toBeNull();
+  expect(container.textContent).toContain("Access tokens refresh automatically");
+  expect(container.textContent).toContain("Sign in again if the refresh token expires");
+  expect(container.querySelector("button")?.textContent).toBe("Sign in again");
+});
+
+it("labels an older sign-in timestamp as unrecorded rather than displaying token expiry as the sign-in time", async () => {
+  vi.spyOn(agentPoolsApi, "pollGitHubLogin").mockResolvedValue({
+    state: "connected", message: "GitHub sign-in is complete.", account: { id: 12345, login: "agent-user" },
+    expiresAt: "2026-11-03T02:00:00.000Z", refreshExpiresAt: "2027-05-01T18:00:00.000Z",
+  });
+  await render("agent");
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+  expect(container.textContent).toContain("Signed inNot recorded for this sign-in");
+  expect(container.querySelectorAll("time")).toHaveLength(1);
+});

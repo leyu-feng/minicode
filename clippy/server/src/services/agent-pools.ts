@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import { agentPools, agentPoolWorkers, companies, type Db } from "@paperclipai/db";
-import { agentPoolNameSchema, agentPoolHarnessIdSchema, agentPoolHarnessModelSchema,
+import { AGENT_POOL_CLAUDECODE_DEFAULT_MODEL, agentPoolNameSchema, agentPoolHarnessIdSchema, agentPoolHarnessModelSchema,
   agentPoolRequiresGitHubLogin, hostedAgentRepositoriesSchema, type AgentPool, type HostedWorkerRepository,
   type hostedAgentPoolWorkerSchema, type hostedAgentPoolSlotsSchema } from "@paperclipai/shared";
 import type { z } from "zod";
@@ -257,7 +257,9 @@ export function agentPoolService(db: Db) {
         throw badRequest("The selected harness is not available from this Hosted provider.");
       }
       const repos = await client.repositories(remoteId, signal);
-      return resolveRepositories(config, repos).config;
+      const resolved = resolveRepositories(config, repos).config;
+      return harness === "claudecode" && config.harnessModel === undefined
+        ? { ...resolved, harnessModel: AGENT_POOL_CLAUDECODE_DEFAULT_MODEL } : resolved;
     },
     async deleteHostedPools(companyId: string) {
       const pools = await db.select().from(agentPools).where(eq(agentPools.companyId, companyId));

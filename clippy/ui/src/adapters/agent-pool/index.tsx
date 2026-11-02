@@ -5,13 +5,14 @@ import { processUIAdapter } from "../process";
 import { HostedRepositorySelect } from "../../components/HostedRepositorySelect";
 import { HostedHarnessSelect } from "../../components/HostedHarnessSelect";
 import { AgentGitHubLogin } from "../../components/AgentGitHubLogin";
-import { agentPoolRequiresGitHubLogin } from "@paperclipai/shared";
+import { AGENT_POOL_CLAUDECODE_DEFAULT_MODEL, agentPoolRequiresGitHubLogin } from "@paperclipai/shared";
 
 function AgentPoolConfigFields({ section, isCreate, values, set, config, eff, mark, companyId, agentId }: AdapterConfigFieldsProps) {
   const current = isCreate ? values?.adapterSchemaValues ?? {} : config;
   const name = isCreate ? String(current.name ?? "default") : eff("adapterConfig", "name", String(config.name ?? "default"));
   const harness = isCreate ? String(current.harness ?? "default") : eff("adapterConfig", "harness", String(config.harness ?? "default"));
-  const model = isCreate ? String(current.harnessModel ?? "") : eff("adapterConfig", "harnessModel", String(config.harnessModel ?? ""));
+  const defaultModel = harness === "claudecode" ? AGENT_POOL_CLAUDECODE_DEFAULT_MODEL : "";
+  const model = String((isCreate ? current.harnessModel : eff("adapterConfig", "harnessModel", config.harnessModel)) ?? defaultModel);
   const rawPrimary = isCreate ? current.primaryRepositoryId : eff("adapterConfig", "primaryRepositoryId", config.primaryRepositoryId);
   const rawReferences = isCreate ? current.referenceRepositoryIds : eff("adapterConfig", "referenceRepositoryIds", config.referenceRepositoryIds);
   const primaryId = typeof rawPrimary === "string" ? rawPrimary : undefined;
@@ -23,12 +24,13 @@ function AgentPoolConfigFields({ section, isCreate, values, set, config, eff, ma
         value={name}
         onCommit={(nextName) => {
           if (isCreate) set!({ adapterSchemaValues: { ...values?.adapterSchemaValues, name: nextName,
-            primaryRepositoryId: undefined, referenceRepositoryIds: [], harness: "default" } });
+            primaryRepositoryId: undefined, referenceRepositoryIds: [], harness: "default", harnessModel: undefined } });
           else {
             mark("adapterConfig", "name", nextName);
             mark("adapterConfig", "primaryRepositoryId", undefined);
             mark("adapterConfig", "referenceRepositoryIds", []);
             mark("adapterConfig", "harness", "default");
+            mark("adapterConfig", "harnessModel", undefined);
           }
         }}
         immediate
@@ -38,12 +40,17 @@ function AgentPoolConfigFields({ section, isCreate, values, set, config, eff, ma
     </Field>
     <HostedHarnessSelect companyId={companyId ?? null} poolName={name} value={harness}
       onChange={next => {
-        if (isCreate) set!({ adapterSchemaValues: { ...values?.adapterSchemaValues, harness: next } });
-        else mark("adapterConfig", "harness", next);
+        if (next === harness) return;
+        const harnessModel = next === "claudecode" ? AGENT_POOL_CLAUDECODE_DEFAULT_MODEL : undefined;
+        if (isCreate) set!({ adapterSchemaValues: { ...values?.adapterSchemaValues, harness: next, harnessModel } });
+        else {
+          mark("adapterConfig", "harness", next);
+          mark("adapterConfig", "harnessModel", harnessModel);
+        }
       }} />
     {agentPoolRequiresGitHubLogin(harness) && <>
-      <Field label="Model" hint="Optional native CLI model ID. Copilot defaults to auto; Claude uses the worker's configured model.">
-        <DraftInput value={model} placeholder={harness === "copilotcli" ? "auto" : "Worker model"} immediate
+      <Field label="Model" hint="Native CLI model ID. Claude Code defaults to claude-sonnet-5 after sign-in; Copilot defaults to auto.">
+        <DraftInput value={model} placeholder={harness === "copilotcli" ? "auto" : AGENT_POOL_CLAUDECODE_DEFAULT_MODEL} immediate
           className="w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent text-sm"
           onCommit={value => {
             if (isCreate) set!({ adapterSchemaValues: { ...values?.adapterSchemaValues, harnessModel: value || undefined } });
@@ -67,12 +74,16 @@ function AgentPoolConfigFields({ section, isCreate, values, set, config, eff, ma
 export const agentPoolUIAdapter: UIAdapterModule = {
   type: "agent_pool", label: "AgentPool",
   ConfigFields: AgentPoolConfigFields,
-  buildAdapterConfig: (values) => ({
-    name: values.adapterSchemaValues?.name ?? "default",
-    ...(values.adapterSchemaValues?.harness ? { harness: values.adapterSchemaValues.harness } : {}),
-    ...(values.adapterSchemaValues?.harnessModel ? { harnessModel: values.adapterSchemaValues.harnessModel } : {}),
-    ...(values.adapterSchemaValues?.primaryRepositoryId ? { primaryRepositoryId: values.adapterSchemaValues.primaryRepositoryId } : {}),
-    ...(values.adapterSchemaValues?.referenceRepositoryIds ? { referenceRepositoryIds: values.adapterSchemaValues.referenceRepositoryIds } : {}),
-  }),
+  buildAdapterConfig: (values) => {
+    const config = values.adapterSchemaValues ?? {};
+    const harnessModel = config.harnessModel ?? (config.harness === "claudecode" ? AGENT_POOL_CLAUDECODE_DEFAULT_MODEL : undefined);
+    return {
+      name: config.name ?? "default",
+      ...(config.harness ? { harness: config.harness } : {}),
+      ...(harnessModel ? { harnessModel } : {}),
+      ...(config.primaryRepositoryId ? { primaryRepositoryId: config.primaryRepositoryId } : {}),
+      ...(config.referenceRepositoryIds ? { referenceRepositoryIds: config.referenceRepositoryIds } : {}),
+    };
+  },
   parseStdoutLine: processUIAdapter.parseStdoutLine,
 };

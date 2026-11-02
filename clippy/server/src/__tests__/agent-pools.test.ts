@@ -98,6 +98,18 @@ const execFileAsync = promisify(execFile);
     expect(provider.client.create).toHaveBeenCalledTimes(1);
   });
 
+  it("persists the Claude default for API-selected harnesses without replacing an explicit model", async () => {
+    const provider = hostedProvider();
+    provider.client.harnesses.mockResolvedValue([{ id: "claudecode", name: "Claude Code" }]);
+    const svc = agentPoolService(db);
+    await svc.ensureDefault(companyId);
+    expect(await svc.validateAgentRepositories(companyId, { name: "default", harness: "claudecode" }))
+      .toMatchObject({ harness: "claudecode", harnessModel: "claude-sonnet-5" });
+    expect(await svc.validateAgentRepositories(companyId, { name: "default", harness: "claudecode", harnessModel: "claude-opus-4.6" }))
+      .toMatchObject({ harnessModel: "claude-opus-4.6" });
+    expect(await svc.validateAgentRepositories(companyId, { name: "default" })).not.toHaveProperty("harnessModel");
+  });
+
   it("discovers provider harnesses only for the owning company and validates agent choices", async () => {
     const provider = hostedProvider();
     const svc = agentPoolService(db);

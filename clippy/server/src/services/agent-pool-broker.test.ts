@@ -102,6 +102,27 @@ describe("AgentPool execution channel", () => {
     await expect(result).resolves.toMatchObject({ exitCode: 0 });
   });
 
+  it.each([undefined, "claude-opus-4.6"])("uses the Claude default without overriding an explicit model (%s)", async harnessModel => {
+    const { broker, worker } = await harness();
+    const client = await worker(randomUUID(), randomUUID(), null, true,
+      ["skill_bundle_v1", "harness_claudecode_v1", "github_credential_v1"]);
+    const ctx = context();
+    ctx.config.harness = "claudecode";
+    if (harnessModel) ctx.config.harnessModel = harnessModel;
+    broker.prepareExecution = async () => ({
+      githubCredential: {
+        accessToken: "private-agent-token", expiresAt: new Date(Date.now() + 8 * 60 * 60_000).toISOString(),
+        agentId: ctx.agent.id, companyId: ctx.agent.companyId, runId: ctx.runId,
+      },
+    });
+    const result = broker.execute(ctx);
+    expect(await client.take("task")).toMatchObject({ harness: "claudecode", harnessModel: harnessModel ?? "claude-sonnet-5" });
+    client.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await client.take("ack");
+    client.send({ type: "ready" });
+    await expect(result).resolves.toMatchObject({ exitCode: 0 });
+  });
+
   it.each(["agentId", "companyId", "runId", "expiresAt"] as const)(
     "rejects a native credential with an invalid %s binding before dispatch", async field => {
       const { broker, worker } = await harness();

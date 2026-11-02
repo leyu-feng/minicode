@@ -58,6 +58,13 @@ operations are serialized across replicas, cannot rotate credentials while anoth
 assignment for that agent is running, and persist replacement refresh credentials
 before handing out the new access token.
 
+Sanitized sign-in status includes the verified GitHub account, original sign-in
+time, and current refresh-token expiry. Token rotation preserves the original
+sign-in time; the refresh-token deadline can move when GitHub issues a replacement.
+Older stored logins can resolve their account using an unexpired access token,
+but an unrecorded original sign-in time is never inferred from token expiry.
+An expired refresh token requires another device sign-in.
+
 Only workers advertising both their native harness capability and
 `github_credential_v1` can receive `githubCredential`:
 `{accessToken, expiresAt, agentId, companyId, runId}`. This strict private field
@@ -65,6 +72,8 @@ contains no refresh token or username/password fields. Both broker and worker
 validate its expiry and assignment binding. It must not be copied into generic
 tool environments, context, or logs. Optional `harnessModel` selects a native model;
 it does not change the worker host's pinned CLI version.
+Claude Code defaults to `claude-sonnet-5` once the agent has signed in, unless an
+explicit native model is selected. Copilot CLI retains its `auto` default.
 
 Workers send WebSocket pings every 15 seconds and accept either pings or pongs as
 liveness, closing after 45 seconds without either. Client-initiated probes keep
