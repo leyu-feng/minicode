@@ -26,6 +26,7 @@ const eventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("result"), runId: z.string(), seq: z.number().int().positive(),
     exitCode: z.number().int().min(0).max(255), error: z.string().max(2000).optional(),
+    summary: z.string().max(24000).optional(),
   }),
 ]);
 
@@ -260,7 +261,7 @@ export class AgentPoolBroker {
           run.result = {
             exitCode: run.cancelled ? 130 : event.exitCode, signal: null, timedOut: false,
             ...(event.error ? { errorMessage: event.error, errorCode: "agent_pool_worker_error" } : {}),
-            summary: run.cancelled ? "AgentPool run cancelled" : `AgentPool worker ${identity.id} finished`,
+            summary: run.cancelled ? "AgentPool run cancelled" : event.summary?.trim() || `AgentPool worker ${identity.id} finished`,
           };
           run.completionTimer = setTimeout(() => this.disconnect(identity.id,
             "AgentPool completion was not followed by ready; worker quarantined"), this.reconnectMs);

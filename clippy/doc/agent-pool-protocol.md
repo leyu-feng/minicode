@@ -354,18 +354,32 @@ discoverable and provide the skill's standard run-scoped `PAPERCLIP_*` environme
 Skills do not grant new permissions. Task progress/completion uses the existing
 comments/issue APIs, not interpretation of a successful run or final prose.
 
+Minicode supplies `paperclip_get_issue`, `paperclip_add_comment` and
+`paperclip_update_issue` when an assignment includes an issue, company, agent
+and run-scoped API credentials. These tools bind the target to the assignment,
+keep authentication in the harness, attach `X-Paperclip-Run-Id`, and use the
+existing authorized issue/comment routes. They cannot select another issue or
+supply alternate credentials. Reads include the latest 20 comments so uncertain
+writes can be inspected without blindly replaying a mutation. Status updates
+require an explanatory comment and a confirmed returned status; checkout,
+pause, approval and permission gates remain unchanged. Other workflows continue
+using the operational skill's documented APIs.
+
 ## Output, completion, and cancellation
 
 Send events with strictly increasing `seq` values starting at 1:
 
 ```json
 {"type":"log","runId":"run-id","seq":1,"stream":"stdout","data":"Meaningful progress\n"}
-{"type":"result","runId":"run-id","seq":2,"exitCode":0}
+{"type":"result","runId":"run-id","seq":2,"exitCode":0,"summary":"Actual final response"}
 ```
 
 Logs allow `stdout` or `stderr` and at most 16,384 characters per event. A failed
 result uses a nonzero exit code and optional sanitized `error` (up to 2,000
-characters). The server acknowledges events with `ack`, `runId`, `seq`, and
+characters). An optional sanitized `summary` (up to 24,000 characters) carries
+the actual final response into the existing run presentation pipeline; older
+workers may omit it. A summary or successful exit is not a task-status write.
+The server acknowledges events with `ack`, `runId`, `seq`, and
 `completed`. Retain unacknowledged events and the final result until acknowledged.
 Send `ready` only after completion is acknowledged and tool work has stopped.
 The broker settles the assignment only after this final `ready`, and records a

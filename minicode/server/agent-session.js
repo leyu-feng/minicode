@@ -641,6 +641,7 @@ export class AgentSession extends EventEmitter {
             continue
           }
           const message = action?.type === "final" && typeof action.message === "string" ? action.message : raw
+          result.summary = message
           if (action?.type === "final" && typeof action.error === "string" && action.error.trim()) {
             result.exitCode = 1
             result.error = action.error.trim()

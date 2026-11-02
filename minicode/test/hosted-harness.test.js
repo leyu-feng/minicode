@@ -9,6 +9,7 @@ import { once } from "node:events"
 import { HostedHarnessSession } from "../server/hosted-harness-session.js"
 import { startHostedHarnessBridge } from "../server/hosted-harness-bridge.js"
 import { createHostedHarnessWorkspaceTools } from "../server/agent-session.js"
+import { createPaperclipTaskTools } from "../server/paperclip-task-tools.js"
 
 const endpoint = "https://model.example/openai/v1/responses"
 
@@ -36,6 +37,19 @@ for (const harness of ["claudecode", "copilotcli"]) {
   const command = process.env[`MINICODE_${harness.toUpperCase()}_COMMAND`]
   test(`installed ${harness} completes an explicitly permitted MCP tool call with an offline model`, { skip: !command }, async t => {
     let toolCalled = false
+    const issue = { id: "assigned", companyId: "company", assigneeAgentId: "agent", status: "in_progress" }
+    const originalFetch = globalThis.fetch
+    t.mock.method(globalThis, "fetch", async (url, options) => {
+      if (!String(url).startsWith("https://paperclip.example/api/")) return originalFetch(url, options)
+      assert.equal(options.headers.Authorization, "Bearer private-paperclip-token")
+      assert.equal(options.headers["X-Paperclip-Run-Id"], "native-run")
+      if (options.method === "PATCH") {
+        assert.deepEqual(JSON.parse(options.body), { status: "done", comment: "NATIVE_SAVED" })
+        issue.status = "done"
+        toolCalled = true
+      }
+      return Response.json(issue)
+    })
     let sawAssignment = false
     let requestCount = 0
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), `native-${harness}-`))
@@ -54,13 +68,13 @@ for (const harness of ["claudecode", "copilotcli"]) {
           response.writeHead(200, { "Content-Type": "application/json" }).end('{"input_tokens":100}')
           return
         }
-        const tool = input.tools?.find(tool => /provider_read/.test(tool.name ?? tool.function?.name))
+        const tool = input.tools?.find(tool => /paperclip_update_issue/.test(tool.name ?? tool.function?.name))
         if (!tool && !toolCalled && input.tools?.length) throw new Error(`Missing approved tool: ${JSON.stringify(requests.at(-1))}`)
         const name = tool?.name ?? tool?.function?.name
         const call = Boolean(name && !toolCalled)
         if (harness === "copilotcli") {
           const message = call ? { role: "assistant", content: null,
-            tool_calls: [{ id: "approved-call", type: "function", function: { name, arguments: '{"route":"approved"}' } }] }
+            tool_calls: [{ id: "approved-call", type: "function", function: { name, arguments: '{"status":"done","comment":"NATIVE_SAVED"}' } }] }
             : { role: "assistant", content: "NATIVE_DONE" }
           const chunk = { id: "offline", object: input.stream ? "chat.completion.chunk" : "chat.completion",
             created: 1, model: input.model, choices: [{ index: 0,
@@ -71,7 +85,7 @@ for (const harness of ["claudecode", "copilotcli"]) {
           response.writeHead(200, { "Content-Type": input.stream ? "text/event-stream" : "application/json" })
           response.end(input.stream ? `data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n` : JSON.stringify(chunk))
         } else {
-          const content = call ? { type: "tool_use", id: "approved-call", name, input: { route: "approved" } }
+          const content = call ? { type: "tool_use", id: "approved-call", name, input: { status: "done", comment: "NATIVE_SAVED" } }
             : { type: "text", text: "NATIVE_DONE" }
           const message = { id: "offline", type: "message", role: "assistant", model: input.model,
             content: [content], stop_reason: call ? "tool_use" : "end_turn", stop_sequence: null,
@@ -82,7 +96,7 @@ for (const harness of ["claudecode", "copilotcli"]) {
           event("message_start", { message: { ...message, content: [], stop_reason: null } })
           event("content_block_start", { index: 0, content_block: call ? { ...content, input: {} } : { type: "text", text: "" } })
           event("content_block_delta", { index: 0, delta: call
-            ? { type: "input_json_delta", partial_json: '{"route":"approved"}' }
+            ? { type: "input_json_delta", partial_json: '{"status":"done","comment":"NATIVE_SAVED"}' }
             : { type: "text_delta", text: "NATIVE_DONE" } })
           event("content_block_stop", { index: 0 })
           event("message_delta", { delta: { stop_reason: message.stop_reason, stop_sequence: null }, usage: { output_tokens: 10 } })
@@ -99,12 +113,11 @@ for (const harness of ["claudecode", "copilotcli"]) {
     t.after(async () => { const closed = new Promise(resolve => server.close(resolve)); server.closeAllConnections(); await closed })
     const baseUrl = `http://127.0.0.1:${server.address().port}`
     const session = new HostedHarnessSession({
-      harness, id: "native-run", cwd, env: {}, instructions: "Use the supplied hosted provider_read tool, then report NATIVE_DONE.",
+      harness, id: "native-run", cwd, env: {}, instructions: "Use the supplied paperclip_update_issue tool to save completion with comment NATIVE_SAVED, then report NATIVE_DONE.",
       harnessModel: harness === "copilotcli" ? "gpt-4.1" : "claude-sonnet-4-20250514",
       githubCredential: { accessToken: "offline-fixture-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), runId: "native-run" },
-      tools: [{ name: "provider_read", description: "Read approved data", parameters: {
-        type: "object", properties: { route: { type: "string" } }, required: ["route"], additionalProperties: false,
-      }, execute: async input => { assert.deepEqual(input, { route: "approved" }); toolCalled = true; return "Approved data" } }],
+      tools: createPaperclipTaskTools({ apiUrl: "https://paperclip.example", authToken: "private-paperclip-token",
+        runId: "native-run", issueId: issue.id, agentId: issue.assigneeAgentId, companyId: issue.companyId }),
       modelConfig: { endpoint, model: "unused" },
       prepare: async () => ({ harness, command, version: "offline-fixture" }),
       spawnProcess: (file, args, options) => spawn(file, args, { ...options, env: { ...options.env,
@@ -117,11 +130,14 @@ for (const harness of ["claudecode", "copilotcli"]) {
     const timeout = setTimeout(() => session.interrupt(), 45_000)
     t.after(async () => { clearTimeout(timeout); await session.dispose() })
     session.on("output", event => output.push(event.data))
-    const result = await session.write("NATIVE_ASSIGNMENT: Read approved data using provider_read, then reply NATIVE_DONE.")
+    const result = await session.write("NATIVE_ASSIGNMENT: Save completion using paperclip_update_issue, then reply NATIVE_DONE.")
     assert.equal(result.exitCode, 0, `${result.error ?? ""}\n${output.join("")}\n${JSON.stringify(requests)}`)
     assert.ok(sawAssignment, `The real CLI must receive the assignment over stdin\n${output.join("")}\n${JSON.stringify(requests)}`)
     assert.ok(toolCalled, `The real CLI must invoke the permitted MCP tool: ${output.join("")}`)
     assert.ok(output.join("").includes("NATIVE_DONE"))
+    assert.equal(result.summary, "NATIVE_DONE")
+    assert.equal(issue.status, "done")
+    assert.ok(!output.join("").includes("private-paperclip-token"))
   })
 }
 
@@ -166,7 +182,7 @@ for (const harness of ["claudecode", "copilotcli"]) {
     t.after(() => session.dispose())
     session.on("output", event => logs.push(event.data))
     session.on("activity", event => logs.push(JSON.stringify(event)))
-    assert.deepEqual(await session.write("Assigned task"), { exitCode: 0 })
+    assert.deepEqual(await session.write("Assigned task"), { exitCode: 0, summary: "Finished [redacted]" })
     assert.deepEqual(calls, [{ route: "approved" }])
     assert.ok(!JSON.stringify(invocation.args).includes("private-github-token"))
     assert.ok(!logs.join("").includes("private-github-token"))
@@ -205,7 +221,7 @@ test("Claude defaults to Sonnet 5 rather than inheriting the worker's unrelated 
     },
   })
   t.after(() => session.dispose())
-  assert.deepEqual(await session.write("Task"), { exitCode: 0 })
+  assert.deepEqual(await session.write("Task"), { exitCode: 0, summary: "Done" })
 })
 
 test("Hosted model bridge authenticates, pins the deployment and never exposes upstream credentials", async t => {
@@ -343,7 +359,7 @@ for (const harness of ["opencode", "pi"]) {
     t.after(() => session.dispose())
     session.on("output", event => { output.push(event.data); events.push(event) })
     session.on("activity", event => activities.push(event))
-    assert.deepEqual(await session.write("Assigned task\n"), { exitCode: 0 })
+    assert.deepEqual(await session.write("Assigned task\n"), { exitCode: 0, summary: "Finished" })
     assert.deepEqual(calls, [{ route: "approved" }])
     assert.equal(invocation.args.some(arg => arg.includes("Assigned task") || arg.includes("run-secret")), false)
     assert.ok(output.join("").includes("Finished"))

@@ -457,6 +457,7 @@ export class HostedHarnessSession extends EventEmitter {
       try {
         const final = JSON.parse(finalText.trim())
         if (final?.type === "final" && typeof final.error === "string" && final.error.trim()) fail(final.error)
+        if (final?.type === "final" && typeof final.message === "string") finalText = final.message
       } catch (error) {
         if (!(error instanceof SyntaxError)) throw error
       }
@@ -464,7 +465,7 @@ export class HostedHarnessSession extends EventEmitter {
       if (!completed || this.harness !== "pi" && exit.code !== 0) {
         return { exitCode: 1, error: `Hosted ${this.harness} did not complete successfully (exit ${exit.code ?? exit.terminationSignal})` }
       }
-      return { exitCode: 0 }
+      return { exitCode: 0, ...(finalText.trim() ? { summary: safe(finalText) } : {}) }
     } catch (error) {
       return { exitCode: signal.aborted ? 130 : 1, error: signal.aborted ? "Hosted harness cancelled" : safe(error.message) }
     } finally {

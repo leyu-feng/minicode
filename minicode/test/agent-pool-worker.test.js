@@ -830,6 +830,10 @@ test("bundled skills download once, repair extracted files each assignment, and 
   assert.equal(sessions[0].env.PAPERCLIP_TASK_ID, "task-a")
   assert.equal(sessions[0].env.PAPERCLIP_WAKE_REASON, "issue_assigned")
   assert.equal(sessions[0].env.PAPERCLIP_WAKE_COMMENT_ID, "comment-a")
+  for (const name of ["paperclip_get_issue", "paperclip_add_comment", "paperclip_update_issue"]) {
+    assert.ok(sessions[0].tools.some(tool => tool.name === name))
+    assert.ok(sessions[0].instructions.includes(name))
+  }
   assert.ok(!sessions[0].instructions.includes("run-credential"))
   await fs.writeFile(path.join(root, "paperclip", "references", "api-reference.md"), "tampered")
   await fs.writeFile(path.join(root, "unexpected.md"), "unexpected instructions")
@@ -1184,14 +1188,14 @@ for (const outputMode of ["normal", "verbose"]) {
         this.emit("output", { stream: "command", data: `\u001b[32m${raw}\u001b[0m` })
         this.emit("output", { stream: "stderr", data: "\u001b[31mA useful error\u001b[0m\n" })
         this.emit("output", { stream: "stdout", data: "\u001b[36mModel summary of results\u001b[0m\n" })
-        return { exitCode: 0 }
+        return { exitCode: 0, summary: "Actual final response with summary-secret. " + "x".repeat(30000) }
       }
       interrupt() {}
       dispose() {}
     }
     const fixture = await harness(t, () => new Session(), { outputMode })
     const peer = await fixture.welcome(0)
-    peer.send({ type: "task", runId: "output-mode", agent, context: {} })
+    peer.send({ type: "task", runId: "output-mode", agent, context: {}, authToken: "summary-secret" })
     await waitUntil(() => peer.messages.some(message => message.type === "result"))
     const output = peer.messages.filter(message => message.type === "log").map(message => message.data).join("")
     assert.equal(output.includes("raw tool output"), outputMode === "verbose")
@@ -1199,6 +1203,10 @@ for (const outputMode of ["normal", "verbose"]) {
     assert.ok(output.includes("Model summary of results"))
     assert.ok(!output.includes("\u001b"))
     assert.equal(peer.messages.find(message => message.type === "result").exitCode, 0)
+    const summary = peer.messages.find(message => message.type === "result").summary
+    assert.equal(summary.length, 24000)
+    assert.ok(summary.startsWith("Actual final response with [redacted]."))
+    assert.ok(!summary.includes("summary-secret"))
   })
 }
 

@@ -66,6 +66,19 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("preserves the actual final response without inferring task completion from exit zero", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker();
+    const ctx = context();
+    const result = broker.execute(ctx);
+    await client.take("task");
+    const summary = "Findings saved. Task remains blocked pending approval.";
+    client.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0, summary });
+    await client.take("ack");
+    client.send({ type: "ready" });
+    await expect(result).resolves.toMatchObject({ exitCode: 0, summary });
+  });
+
   it("blocks native harness dispatch when GitHub login is missing without reserving a worker", async () => {
     const { broker, worker } = await harness();
     const client = await worker(randomUUID(), randomUUID(), null, true,
@@ -99,7 +112,9 @@ describe("AgentPool execution channel", () => {
     client.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
     await client.take("ack");
     client.send({ type: "ready" });
-    await expect(result).resolves.toMatchObject({ exitCode: 0 });
+    await expect(result).resolves.toMatchObject({
+      exitCode: 0, summary: expect.stringMatching(/^AgentPool worker .+ finished$/),
+    });
   });
 
   it.each([undefined, "claude-opus-4.6"])("uses the Claude default without overriding an explicit model (%s)", async harnessModel => {
@@ -502,11 +517,11 @@ describe("AgentPool execution channel", () => {
     controller.abort();
     expect(await client.take("cancel")).toMatchObject({ runId: ctx.runId });
     expect(settled).toBe(false);
-    client.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 130 });
+    client.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 130, summary: "Task completed" });
     await client.take("ack");
     expect(settled).toBe(false);
     client.send({ type: "ready" });
-    await expect(result).resolves.toMatchObject({ exitCode: 130 });
+    await expect(result).resolves.toMatchObject({ exitCode: 130, summary: "AgentPool run cancelled" });
     expect(ctx.onCancellationReady).toHaveBeenCalledOnce();
   });
 
