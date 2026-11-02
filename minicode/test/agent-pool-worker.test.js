@@ -1165,6 +1165,8 @@ for (const harnessName of ["default", "pi", "opencode"]) {
   test(`${harnessName} logs separate preparation, framework, turns and real rounds`, async t => {
     const source = harnessName === "default" ? "minicode" : harnessName
     const activities = []
+    const earlyActivities = []
+    let admitted = false
     class Session extends EventEmitter {
       async write() {
         this.emit("activity", { kind: "model_action", action: "round_start", turn: 1, summary: "Round 1 start" })
@@ -1181,7 +1183,16 @@ for (const harnessName of ["default", "pi", "opencode"]) {
       dispose() {}
     }
     const fixture = await harness(t, () => new Session(), {
-      harnesses: ["default", "pi", "opencode"], onActivity: value => activities.push(value),
+      harnesses: ["default", "pi", "opencode"],
+      onStateChange: async ({ state }) => {
+        if (state !== "busy") return
+        await Promise.resolve()
+        admitted = true
+      },
+      onActivity: value => {
+        if (!admitted) earlyActivities.push(value)
+        activities.push(value)
+      },
     })
     const peer = await fixture.welcome(0)
     await executeTask(peer, { runId: "readable-run", agent, harness: harnessName })
@@ -1205,6 +1216,7 @@ for (const harnessName of ["default", "pi", "opencode"]) {
     assert.deepEqual(logs.filter(message => message.stream === "stderr").map(message => message.data),
       [`!! [${source}] Model rate limited; trying fallback.\n`])
     assert.deepEqual(activities.map(value => value.sequence), activities.map((_, index) => index + 1))
+    assert.deepEqual(earlyActivities, [])
     assert.ok(activities.every(value => value.runId === "readable-run" && value.agentName === agent.name))
     assert.deepEqual(activities.filter(value => value.action.startsWith("round_")).map(value => [value.action, value.turn]),
       [["round_start", 1], ["round_end", 1], ["round_start", 2], ["round_end", 2]])

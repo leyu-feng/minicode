@@ -486,11 +486,11 @@ export async function startAgentPoolWorker({
       if (stopped || run.cancelled) return { exitCode: 130 }
       const harness = task.harness ?? "default"
       if (!harnesses.includes(harness)) throw new Error(`This worker does not support harness ${harness}`)
+      await onStateChange({ state: "busy", runId: task.runId, agentId: task.agent?.id })
+      if (stopped || run.cancelled) return { exitCode: 130 }
       marker("framework", `Assignment start | harness=${harnessName}`)
       preparing = true
       marker("prep", "Preparation start")
-      await onStateChange({ state: "busy", runId: task.runId, agentId: task.agent?.id })
-      if (stopped || run.cancelled) return { exitCode: 130 }
       run.controller.signal.throwIfAborted()
       const agentInstructions = readTaskInstructions(task)
       let hostedRepositories = null
