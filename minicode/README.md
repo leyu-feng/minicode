@@ -114,6 +114,23 @@ AgentPool provider's live worker view. Prompts, model actions, tool results and 
 the current run and binding identity; monitoring failures are reported without
 blocking task execution.
 
+Pi and OpenCode assignments print `using <harness>.contained.<version> harness`
+before launching the restored CLI. Their assignment input, model-request summaries,
+native tool calls, and trusted MCP tool calls/results use the same run log and live
+activity paths as Minicode. Tool records include call identifiers and available
+durations; MCP records remain visible when OpenCode invokes them inside `execute`.
+Known mirrored native tool events are suppressed.
+
+Normal run logs contain bounded input/tool previews and outcomes.
+`--output-mode verbose` also includes supplied instructions, effective model
+request bodies, and tool details. Each diagnostic entry is capped at 24,000
+characters; diagnostic output stops explicitly after 512 KiB per assignment,
+without stopping the task. Credentials, authentication fields, hidden reasoning,
+and inline image/audio data are redacted or omitted before logging. Model inputs
+and tool results sent to the harness are unchanged. When Academy failed-prompt
+capture is enabled, external model failures use its existing protected evidence
+path and 1 MiB limit; prompt evidence is not included in ordinary result JSON.
+
 An AgentPool provider's interactive session can also launch `Minicode.Contained`
 as a regular terminal REPL, without `hosted-worker`. Set
 `MINICODE_AUTH_MODE=managed-identity`, `AZURE_OPENAI_ENDPOINT` to the Azure account

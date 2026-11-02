@@ -17,13 +17,16 @@ async function body(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"))
 }
 
-export async function startHostedHarnessBridge({ endpoint, model, getAccessToken, tools, signal, onError }) {
+export async function startHostedHarnessBridge({ endpoint, model, getAccessToken, tools, signal, onError, onModelRequest, onToolEvent }) {
   const upstream = new URL(endpoint)
   if (upstream.protocol !== "https:" || upstream.username || upstream.password
     || !upstream.pathname.endsWith("/responses")) throw new Error("Invalid Hosted model endpoint")
   const secret = randomBytes(32).toString("hex")
   const toolMap = new Map(tools.map(tool => [tool.name, tool]))
+  let modelRequests = 0
+  let toolCalls = 0
   const server = createServer((request, response) => {
+    let modelRequest
     const json = (status, value) => {
       response.writeHead(status, { "Content-Type": "application/json" })
       response.end(JSON.stringify(value))
@@ -50,11 +53,16 @@ export async function startHostedHarnessBridge({ endpoint, model, getAccessToken
         } else if (input.method === "tools/call") {
           const tool = toolMap.get(input.params?.name)
           if (!tool) throw new Error("Unknown Hosted harness tool")
+          const call = { id: input.id ?? `mcp-${++toolCalls}`, name: tool.name, input: input.params.arguments }
+          const started = Date.now()
           try {
             signal.throwIfAborted()
+            onToolEvent?.({ ...call, phase: "start" })
             const output = await tool.execute(input.params.arguments, { signal })
+            onToolEvent?.({ ...call, phase: "end", output, durationMs: Date.now() - started })
             result({ content: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output) }] })
           } catch (error) {
+            onToolEvent?.({ ...call, phase: "end", error: error.message, durationMs: Date.now() - started })
             result({ isError: true, content: [{ type: "text", text: error.message }] })
           }
         } else if (input.method === "ping") {
@@ -72,15 +80,20 @@ export async function startHostedHarnessBridge({ endpoint, model, getAccessToken
       const target = new URL(upstream)
       if (request.url.endsWith("/chat/completions")) target.pathname = target.pathname.replace(/responses$/, "chat/completions")
       input.model = model
+      modelRequest = { turn: ++modelRequests, requestBody: JSON.stringify(input) }
       const token = await getAccessToken({ signal })
       signal.throwIfAborted()
+      onModelRequest?.(modelRequest, token)
       const remote = await fetch(target, {
         method: "POST", redirect: "error", signal,
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify(input),
+        body: modelRequest.requestBody,
       })
       if (!remote.ok) {
-        onError(`Hosted model request failed (HTTP ${remote.status})`)
+        onError(`Hosted model request failed (HTTP ${remote.status})`, {
+          ...modelRequest, code: `http_${remote.status}`, httpStatus: remote.status,
+          requestId: remote.headers.get("x-request-id") ?? remote.headers.get("apim-request-id"),
+        })
         await remote.body?.cancel()
         json(remote.status, { error: { message: `Hosted model request failed (HTTP ${remote.status})`, type: "hosted_model_error" } })
         return
@@ -89,7 +102,8 @@ export async function startHostedHarnessBridge({ endpoint, model, getAccessToken
       if (remote.body) await pipeline(Readable.fromWeb(remote.body), response, { signal })
       else response.end()
     })().catch(error => {
-      onError(signal.aborted ? "Hosted harness cancelled" : error.message)
+      onError(signal.aborted ? "Hosted harness cancelled" : error.message,
+        modelRequest ? { ...modelRequest, code: error.cause?.code ?? error.code } : undefined)
       if (response.headersSent) response.destroy()
       else json(500, { error: { message: "Hosted harness request failed", type: "hosted_bridge_error" } })
     })
