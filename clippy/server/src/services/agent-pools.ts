@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import { agentPools, agentPoolWorkers, companies, type Db } from "@paperclipai/db";
-import { agentPoolNameSchema, agentPoolHarnessIdSchema, hostedAgentRepositoriesSchema, type AgentPool, type HostedWorkerRepository,
+import { agentPoolNameSchema, agentPoolHarnessIdSchema, agentPoolHarnessModelSchema,
+  agentPoolRequiresGitHubLogin, hostedAgentRepositoriesSchema, type AgentPool, type HostedWorkerRepository,
   type hostedAgentPoolWorkerSchema, type hostedAgentPoolSlotsSchema } from "@paperclipai/shared";
 import type { z } from "zod";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "../errors.js";
@@ -11,6 +12,7 @@ import { agentPoolBroker } from "./agent-pool-broker.js";
 import type { AdapterExecutionContext } from "../adapters/types.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { logger } from "../middleware/logger.js";
+import { agentGitHubAuthService } from "./agent-github-auth.js";
 
 type Pool = typeof agentPools.$inferSelect;
 
@@ -235,6 +237,7 @@ export function agentPoolService(db: Db) {
     async validateAgentRepositories(companyId: string, config: Record<string, unknown>, signal?: AbortSignal) {
       const name = agentPoolNameSchema.parse(config.name ?? "default");
       const harness = agentPoolHarnessIdSchema.parse(config.harness ?? "default");
+      if (config.harnessModel !== undefined) agentPoolHarnessModelSchema.parse(config.harnessModel);
       const [pool] = await db.select().from(agentPools)
         .where(and(eq(agentPools.companyId, companyId), eq(agentPools.name, name)));
       if (!pool) {
@@ -277,6 +280,11 @@ export function agentPoolService(db: Db) {
       }
       const deadline = AbortSignal.timeout(118_000);
       const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline;
+      const githubCredential = agentPoolRequiresGitHubLogin(harness) ? {
+        ...await agentGitHubAuthService(db).assignmentToken(ctx.agent.companyId, ctx.agent.id, ctx.runId),
+        companyId: ctx.agent.companyId, agentId: ctx.agent.id, runId: ctx.runId,
+      } : undefined;
+      signal.throwIfAborted();
       const { client, poolId: remoteId } = provider(await provision(ctx.agent.companyId, pool.id, signal));
       if (harness !== "default" && !(await client.harnesses(remoteId, signal)).some(entry => entry.id === harness)) {
         throw badRequest("The selected harness is no longer available from this Hosted provider.");
@@ -293,7 +301,7 @@ export function agentPoolService(db: Db) {
         }, signal);
         return true;
       };
-      if (await reserve()) return;
+      if (await reserve()) return { githubCredential };
       const pending = waiting.get(pool.id) ?? { runs: new Set<string>(), tail: Promise.resolve() };
       waiting.set(pool.id, pending);
       pending.runs.add(ctx.runId);
@@ -336,6 +344,7 @@ export function agentPoolService(db: Db) {
         }
         if (pending.runs.size === 0 && waiting.get(pool.id) === pending) waiting.delete(pool.id);
       }
+      return { githubCredential };
     },
     async create(companyId: string, name: string) {
       await list(companyId);

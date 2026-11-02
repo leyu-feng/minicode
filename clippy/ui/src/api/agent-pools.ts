@@ -1,9 +1,15 @@
 import type { AgentPool, AgentPoolWorker, AgentPoolPairing, HostedWorkerRepository,
-  HostedWorkerStatus, HostedWorkerHarness } from "@paperclipai/shared";
+  HostedWorkerStatus, HostedWorkerHarness, AgentGitHubLoginStatus } from "@paperclipai/shared";
 import { api } from "./client";
 
 const base = (companyId: string) => `/companies/${companyId}/agent-pools`;
 export const agentPoolsApi = {
+  githubLogin: (companyId: string, agentId: string) =>
+    api.get<AgentGitHubLoginStatus>(`/companies/${companyId}/agents/${agentId}/github-login`),
+  startGitHubLogin: (companyId: string, agentId: string) =>
+    api.post<AgentGitHubLoginStatus>(`/companies/${companyId}/agents/${agentId}/github-login`, {}),
+  pollGitHubLogin: (companyId: string, agentId: string) =>
+    api.post<AgentGitHubLoginStatus>(`/companies/${companyId}/agents/${agentId}/github-login/poll`, {}),
   list: (companyId: string) => api.get<AgentPool[]>(base(companyId)),
   create: (companyId: string, name: string) => api.post<AgentPool>(base(companyId), { name }),
   status: (companyId: string, poolId: string) =>

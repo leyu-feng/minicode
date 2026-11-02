@@ -423,6 +423,8 @@ export async function startAgentPoolWorker({
     if (active || retiring || typeof task.runId !== "string" || !task.context || typeof task.context !== "object") {
       throw new Error("AgentPool task received while busy or invalid")
     }
+    const githubCredential = task.githubCredential
+    delete task.githubCredential
     const reachableUrl = (value) => {
       if (proxy) return proxy.rewrite(value)
       const target = new URL(value)
@@ -486,6 +488,16 @@ export async function startAgentPoolWorker({
       if (stopped || run.cancelled) return { exitCode: 130 }
       const harness = task.harness ?? "default"
       if (!harnesses.includes(harness)) throw new Error(`This worker does not support harness ${harness}`)
+      if (harness === "claudecode" || harness === "copilotcli") {
+        if (!githubCredential || githubCredential.agentId !== task.agent?.id
+          || githubCredential.companyId !== task.agent?.companyId || githubCredential.runId !== task.runId
+          || typeof githubCredential.accessToken !== "string" || !githubCredential.accessToken
+          || !Number.isFinite(Date.parse(githubCredential.expiresAt))
+          || Date.parse(githubCredential.expiresAt) <= Date.now() + (assignmentTimeoutMs ?? 45 * 60_000)
+          || Object.keys(githubCredential).some(key => !["accessToken", "expiresAt", "agentId", "companyId", "runId"].includes(key))) {
+          throw new Error("This native harness requires a valid agent/company/run-scoped GitHub assignment token")
+        }
+      } else if (githubCredential) throw new Error("GitHub assignment credentials are not allowed for this harness")
       await onStateChange({ state: "busy", runId: task.runId, agentId: task.agent?.id })
       if (stopped || run.cancelled) return { exitCode: 130 }
       marker("framework", `Assignment start | harness=${harnessName}`)
@@ -579,6 +591,7 @@ export async function startAgentPoolWorker({
       if (stopped || run.cancelled) return { exitCode: 130 }
       const session = sessionFactory({
         id: task.runId, harness, cwd: workspace, toolAzureConfigDir,
+        githubCredential, harnessModel: task.harnessModel,
         workerLabel: workerName ?? workerId,
         shellLog: log,
         powerShells,
@@ -807,6 +820,7 @@ export async function startAgentPoolWorker({
           ? [hostedRoot ? "hosted_workspace_v2" : "hosted_repositories_v1", "retiring_ready_v1"] : []),
           ...(hostedRoot && hostedProviderTool ? ["provider_read_v1"] : []),
           ...(hostedRoot && hostedProviderPostTool ? ["provider_post_v1"] : []),
+          ...(harnesses.some(id => id === "claudecode" || id === "copilotcli") ? ["github_credential_v1"] : []),
           ...harnesses.filter(id => id !== "default").map(id => `harness_${id}_v1`)],
         instanceId, runId: active?.id ?? null })
     })

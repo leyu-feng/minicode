@@ -66,6 +66,81 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("blocks native harness dispatch when GitHub login is missing without reserving a worker", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker(randomUUID(), randomUUID(), null, true,
+      ["skill_bundle_v1", "harness_copilotcli_v1", "github_credential_v1"]);
+    const ctx = context();
+    ctx.config.harness = "copilotcli";
+    await expect(broker.execute(ctx)).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
+    expect(client.messages).toEqual([]);
+    expect(broker.status(client.id)).toBe("idle");
+    expect(ctx.onDispatch).not.toHaveBeenCalled();
+  });
+
+  it("delivers an access token privately only to the compatible assigned native harness", async () => {
+    const { broker, worker } = await harness();
+    const legacy = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1", "harness_copilotcli_v1"]);
+    const client = await worker(randomUUID(), randomUUID(), null, true,
+      ["skill_bundle_v1", "harness_copilotcli_v1", "github_credential_v1"]);
+    const ctx = context();
+    ctx.config.harness = "copilotcli";
+    const githubCredential = {
+      accessToken: "private-agent-token", expiresAt: new Date(Date.now() + 8 * 60 * 60_000).toISOString(),
+      agentId: ctx.agent.id, companyId: ctx.agent.companyId, runId: ctx.runId,
+    };
+    broker.prepareExecution = async () => ({ githubCredential });
+    const result = broker.execute(ctx);
+    const task = await client.take("task");
+    expect(task.githubCredential).toEqual(githubCredential);
+    expect(JSON.stringify(task.context)).not.toContain("private-agent-token");
+    expect(JSON.stringify(ctx)).not.toContain("private-agent-token");
+    expect(legacy.messages).toEqual([]);
+    client.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await client.take("ack");
+    client.send({ type: "ready" });
+    await expect(result).resolves.toMatchObject({ exitCode: 0 });
+  });
+
+  it.each(["agentId", "companyId", "runId", "expiresAt"] as const)(
+    "rejects a native credential with an invalid %s binding before dispatch", async field => {
+      const { broker, worker } = await harness();
+      const client = await worker(randomUUID(), randomUUID(), null, true,
+        ["skill_bundle_v1", "harness_claudecode_v1", "github_credential_v1"]);
+      const ctx = context();
+      ctx.config.harness = "claudecode";
+      broker.prepareExecution = async () => ({
+        githubCredential: {
+          accessToken: "private-token", expiresAt: new Date(Date.now() + 8 * 60 * 60_000).toISOString(),
+          agentId: ctx.agent.id, companyId: ctx.agent.companyId, runId: ctx.runId,
+          [field]: field === "expiresAt" ? new Date().toISOString() : "other",
+        },
+      });
+      await expect(broker.execute(ctx)).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
+      expect(client.messages).toEqual([]);
+    },
+  );
+
+  it.each([
+    { expiresAt: undefined }, { expiresAt: "not-a-date" }, { username: "not-supported" },
+    { password: "not-supported" }, { refreshToken: "not-for-workers" },
+  ])("rejects malformed or non-token assignment credential fields: %j", async invalid => {
+    const { broker, worker } = await harness();
+    const client = await worker(randomUUID(), randomUUID(), null, true,
+      ["skill_bundle_v1", "harness_copilotcli_v1", "github_credential_v1"]);
+    const ctx = context();
+    ctx.config.harness = "copilotcli";
+    const githubCredential = {
+      accessToken: "private-token", expiresAt: new Date(Date.now() + 8 * 60 * 60_000).toISOString(),
+      agentId: ctx.agent.id, companyId: ctx.agent.companyId, runId: ctx.runId,
+    };
+    Object.assign(githubCredential, invalid);
+    broker.prepareExecution = async () => ({ githubCredential });
+    await expect(broker.execute(ctx)).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
+    expect(client.messages).toEqual([]);
+    expect(ctx.onDispatch).not.toHaveBeenCalled();
+  });
+
   it("carries the agent harness only to a worker advertising support for it", async () => {
     const { broker, worker } = await harness();
     const legacy = await worker();

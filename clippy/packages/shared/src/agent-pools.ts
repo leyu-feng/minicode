@@ -5,6 +5,26 @@ export const AGENT_POOL_INLINE_INSTRUCTIONS = "inline_instructions_v1";
 export const AGENT_POOL_SKILL_BUNDLE = "skill_bundle_v1";
 export const AGENT_POOL_HOSTED_REPOSITORIES = "hosted_repositories_v1";
 export const AGENT_POOL_HOSTED_WORKSPACE = "hosted_workspace_v2";
+export const AGENT_POOL_GITHUB_CREDENTIAL = "github_credential_v1";
+export const agentPoolRequiresGitHubLogin = (harness: unknown) =>
+  harness === "claudecode" || harness === "copilotcli";
+export const agentPoolHarnessModelSchema = z.string().trim().min(1).max(100).regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/);
+export const agentPoolGitHubCredentialSchema = z.object({
+  accessToken: z.string().min(1).max(8192),
+  expiresAt: z.string().datetime(),
+  agentId: z.string().min(1),
+  companyId: z.string().min(1),
+  runId: z.string().min(1),
+}).strict();
+export type AgentPoolGitHubCredential = z.infer<typeof agentPoolGitHubCredentialSchema>;
+export interface AgentGitHubLoginStatus {
+  state: "required" | "pending" | "connected" | "expired" | "denied" | "failed";
+  message: string;
+  userCode?: string;
+  verificationUri?: string;
+  expiresAt?: string;
+  pollAfterSeconds?: number;
+}
 export const agentPoolHarnessIdSchema = z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9_-]*$/);
 export const hostedWorkerHarnessesSchema = z.array(z.object({
   id: agentPoolHarnessIdSchema,
@@ -58,6 +78,8 @@ export const agentPoolTaskSchema = z.object({
   continuation: z.unknown().nullable(),
   runtimeTools: z.unknown().nullable(),
   authToken: z.string().nullable(),
+  githubCredential: agentPoolGitHubCredentialSchema.optional(),
+  harnessModel: agentPoolHarnessModelSchema.optional(),
   repositories: z.union([z.object({
     primary: z.object({ id: z.string(), name: z.string(), branch: z.string() }),
     references: z.array(z.object({ id: z.string(), name: z.string(), branch: z.string() })),

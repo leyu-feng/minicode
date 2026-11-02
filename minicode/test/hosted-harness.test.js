@@ -1,10 +1,193 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { spawn } from "node:child_process"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { createServer } from "node:http"
+import { once } from "node:events"
 import { HostedHarnessSession } from "../server/hosted-harness-session.js"
 import { startHostedHarnessBridge } from "../server/hosted-harness-bridge.js"
+import { createHostedHarnessWorkspaceTools } from "../server/agent-session.js"
 
 const endpoint = "https://model.example/openai/v1/responses"
+
+test("native workspace tools edit files explicitly and strip inherited credentials from shell execution", async t => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "native-tools-"))
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }))
+  const tools = Object.fromEntries(createHostedHarnessWorkspaceTools({ cwd, env: {
+    ...process.env, GH_TOKEN: "private-token", GITHUB_TOKEN: "private-token", COPILOT_GITHUB_TOKEN: "private-token",
+    ANTHROPIC_AUTH_TOKEN: "private-token", AZURE_CLIENT_SECRET: "private-token", IDENTITY_HEADER: "private-token",
+    WORKSPACE_TEST_FLAG: "retained",
+  } }).map(tool => [tool.name, tool]))
+  const context = { signal: new AbortController().signal }
+  await tools.write_file.execute({ path: "created.txt", content: "original" }, context)
+  await tools.edit_file.execute({ path: "created.txt", find: "original", replace: "updated" }, context)
+  assert.equal(await fs.readFile(path.join(cwd, "created.txt"), "utf8"), "updated")
+  await assert.rejects(tools.write_file.execute({ path: "created.txt" }, context), /content must be a string/)
+  await assert.rejects(tools.edit_file.execute({ path: "created.txt", find: "updated" }, context), /content must be a string/)
+  assert.equal(await fs.readFile(path.join(cwd, "created.txt"), "utf8"), "updated")
+  const result = await tools.run_shell.execute({ command: `"${process.execPath}" -e "console.log(process.env.WORKSPACE_TEST_FLAG, Boolean(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || process.env.COPILOT_GITHUB_TOKEN || process.env.ANTHROPIC_AUTH_TOKEN || process.env.AZURE_CLIENT_SECRET || process.env.IDENTITY_HEADER))"` }, context)
+  assert.ok(result.includes("retained false"), result)
+  assert.ok(!result.includes("private-token"))
+})
+
+for (const harness of ["claudecode", "copilotcli"]) {
+  const command = process.env[`MINICODE_${harness.toUpperCase()}_COMMAND`]
+  test(`installed ${harness} completes an explicitly permitted MCP tool call with an offline model`, { skip: !command }, async t => {
+    let toolCalled = false
+    let sawAssignment = false
+    let requestCount = 0
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), `native-${harness}-`))
+    t.after(() => fs.rm(cwd, { recursive: true, force: true }))
+    const output = []
+    const requests = []
+    const server = createServer((request, response) => {
+      void (async () => {
+        let body = ""
+        for await (const chunk of request) body += chunk
+        const input = JSON.parse(body)
+        if (++requestCount > 12) throw new Error("Unexpected native model retry loop")
+        requests.push({ path: request.url, tools: (input.tools ?? []).map(tool => tool.name ?? tool.function?.name) })
+        if (JSON.stringify(input.messages).includes("NATIVE_ASSIGNMENT")) sawAssignment = true
+        if (request.url.endsWith("/count_tokens")) {
+          response.writeHead(200, { "Content-Type": "application/json" }).end('{"input_tokens":100}')
+          return
+        }
+        const tool = input.tools?.find(tool => /provider_read/.test(tool.name ?? tool.function?.name))
+        if (!tool && !toolCalled && input.tools?.length) throw new Error(`Missing approved tool: ${JSON.stringify(requests.at(-1))}`)
+        const name = tool?.name ?? tool?.function?.name
+        const call = Boolean(name && !toolCalled)
+        if (harness === "copilotcli") {
+          const message = call ? { role: "assistant", content: null,
+            tool_calls: [{ id: "approved-call", type: "function", function: { name, arguments: '{"route":"approved"}' } }] }
+            : { role: "assistant", content: "NATIVE_DONE" }
+          const chunk = { id: "offline", object: input.stream ? "chat.completion.chunk" : "chat.completion",
+            created: 1, model: input.model, choices: [{ index: 0,
+              ...(input.stream ? { delta: { ...message, ...(call ? { tool_calls: message.tool_calls.map(item => ({ index: 0, ...item })) } : {}) } }
+                : { message }),
+              finish_reason: call ? "tool_calls" : "stop" }],
+            usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } }
+          response.writeHead(200, { "Content-Type": input.stream ? "text/event-stream" : "application/json" })
+          response.end(input.stream ? `data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n` : JSON.stringify(chunk))
+        } else {
+          const content = call ? { type: "tool_use", id: "approved-call", name, input: { route: "approved" } }
+            : { type: "text", text: "NATIVE_DONE" }
+          const message = { id: "offline", type: "message", role: "assistant", model: input.model,
+            content: [content], stop_reason: call ? "tool_use" : "end_turn", stop_sequence: null,
+            usage: { input_tokens: 100, output_tokens: 10 } }
+          response.writeHead(200, { "Content-Type": input.stream ? "text/event-stream" : "application/json" })
+          if (!input.stream) { response.end(JSON.stringify(message)); return }
+          const event = (type, data) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`)
+          event("message_start", { message: { ...message, content: [], stop_reason: null } })
+          event("content_block_start", { index: 0, content_block: call ? { ...content, input: {} } : { type: "text", text: "" } })
+          event("content_block_delta", { index: 0, delta: call
+            ? { type: "input_json_delta", partial_json: '{"route":"approved"}' }
+            : { type: "text_delta", text: "NATIVE_DONE" } })
+          event("content_block_stop", { index: 0 })
+          event("message_delta", { delta: { stop_reason: message.stop_reason, stop_sequence: null }, usage: { output_tokens: 10 } })
+          event("message_stop", {})
+          response.end()
+        }
+      })().catch(error => {
+        output.push(error.message)
+        response.writeHead(500, { "Content-Type": "application/json" }).end('{"error":{"message":"Offline fixture failed","type":"api_error"}}')
+      })
+    })
+    server.listen(0, "127.0.0.1")
+    await once(server, "listening")
+    t.after(async () => { const closed = new Promise(resolve => server.close(resolve)); server.closeAllConnections(); await closed })
+    const baseUrl = `http://127.0.0.1:${server.address().port}`
+    const session = new HostedHarnessSession({
+      harness, id: "native-run", cwd, env: {}, instructions: "Use the supplied hosted provider_read tool, then report NATIVE_DONE.",
+      harnessModel: harness === "copilotcli" ? "gpt-4.1" : "claude-sonnet-4-20250514",
+      githubCredential: { accessToken: "offline-fixture-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), runId: "native-run" },
+      tools: [{ name: "provider_read", description: "Read approved data", parameters: {
+        type: "object", properties: { route: { type: "string" } }, required: ["route"], additionalProperties: false,
+      }, execute: async input => { assert.deepEqual(input, { route: "approved" }); toolCalled = true; return "Approved data" } }],
+      modelConfig: { endpoint, model: "unused" },
+      prepare: async () => ({ harness, command, version: "offline-fixture" }),
+      spawnProcess: (file, args, options) => spawn(file, args, { ...options, env: { ...options.env,
+        ...(harness === "copilotcli" ? {
+          COPILOT_PROVIDER_BASE_URL: `${baseUrl}/v1`, COPILOT_PROVIDER_TYPE: "openai", COPILOT_PROVIDER_WIRE_API: "completions",
+          COPILOT_PROVIDER_API_KEY: "offline-key",
+        } : { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: "offline-key", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" }),
+      } }),
+    })
+    const timeout = setTimeout(() => session.interrupt(), 45_000)
+    t.after(async () => { clearTimeout(timeout); await session.dispose() })
+    session.on("output", event => output.push(event.data))
+    const result = await session.write("NATIVE_ASSIGNMENT: Read approved data using provider_read, then reply NATIVE_DONE.")
+    assert.equal(result.exitCode, 0, `${result.error ?? ""}\n${output.join("")}\n${JSON.stringify(requests)}`)
+    assert.ok(sawAssignment, `The real CLI must receive the assignment over stdin\n${output.join("")}\n${JSON.stringify(requests)}`)
+    assert.ok(toolCalled, `The real CLI must invoke the permitted MCP tool: ${output.join("")}`)
+    assert.ok(output.join("").includes("NATIVE_DONE"))
+  })
+}
+
+for (const harness of ["claudecode", "copilotcli"]) {
+  test(`${harness} isolates assignment authentication and uses only explicitly provided tools`, async t => {
+    let invocation
+    let mcpPath
+    const logs = []
+    const calls = []
+    const script = `
+      import fs from "node:fs/promises";
+      let input = "";
+      for await (const chunk of process.stdin) input += chunk;
+      if (!input.includes("Assigned task")) throw new Error("Missing assignment");
+      if (process.env.COPILOT_GITHUB_TOKEN !== "private-github-token") throw new Error("Missing assignment token");
+      if (process.env.GH_TOKEN || process.env.IDENTITY_ENDPOINT) throw new Error("Leaked inherited credential");
+      const config = JSON.parse(await fs.readFile(process.env.TEST_MCP_PATH, "utf8")).mcpServers.hosted;
+      const response = await fetch(config.url, {
+        method: "POST", headers: { ...config.headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
+          params: { name: "provider_read", arguments: { route: "approved" } } })
+      });
+      if (!response.ok || (await response.json()).result.isError) throw new Error("Trusted MCP call failed");
+      console.log(JSON.stringify({ type: "result", subtype: "success", result: "Finished private-github-token" }));
+    `
+    const session = new HostedHarnessSession({
+      harness, id: "run", cwd: process.cwd(), instructions: "Trusted instructions", harnessModel: "gpt-4.1",
+      env: { GH_TOKEN: "inherited-user-token", IDENTITY_ENDPOINT: "private" },
+      githubCredential: { accessToken: "private-github-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), runId: "run" },
+      tools: [{ name: "provider_read", description: "Trusted read", parameters: { type: "object" },
+        execute: async input => { calls.push(input); return "result" } }],
+      modelConfig: { endpoint, model: "deployment", getAccessToken: async () => { throw new Error("Azure model auth must not run") } },
+      prepare: async () => ({ harness, command: "trusted-shim", version: "2.1.0" }),
+      spawnProcess: (command, args, options) => {
+        invocation = { command, args, options }
+        const index = args.indexOf(harness === "claudecode" ? "--mcp-config" : "--additional-mcp-config")
+        mcpPath = args[index + 1].replace(/^@/, "")
+        return spawn(process.execPath, ["--input-type=module", "-e", script],
+          { ...options, env: { ...options.env, TEST_MCP_PATH: mcpPath } })
+      },
+    })
+    t.after(() => session.dispose())
+    session.on("output", event => logs.push(event.data))
+    session.on("activity", event => logs.push(JSON.stringify(event)))
+    assert.deepEqual(await session.write("Assigned task"), { exitCode: 0 })
+    assert.deepEqual(calls, [{ route: "approved" }])
+    assert.ok(!JSON.stringify(invocation.args).includes("private-github-token"))
+    assert.ok(!logs.join("").includes("private-github-token"))
+    for (const flag of ["--allow-all", "--allow-all-tools", "--yolo", "--dangerously-skip-permissions", "--trust-folder"]) {
+      assert.ok(!invocation.args.includes(flag))
+    }
+    assert.equal(invocation.options.env.HOME, invocation.options.env.USERPROFILE)
+    await assert.rejects(fs.stat(mcpPath), { code: "ENOENT" })
+  })
+
+  test(`${harness} fails before preparation when assignment GitHub login is missing`, async () => {
+    const session = new HostedHarnessSession({
+      harness, id: "run", cwd: process.cwd(), env: {}, instructions: "Policy", tools: [],
+      modelConfig: { endpoint, model: "deployment" },
+      prepare: () => { throw new Error("Preparation must not run") },
+    })
+    assert.deepEqual(await session.write("Task"), {
+      exitCode: 1, error: "The native harness requires a valid assignment-scoped GitHub access token",
+    })
+  })
+}
 
 test("Hosted model bridge authenticates, pins the deployment and never exposes upstream credentials", async t => {
   const controller = new AbortController()

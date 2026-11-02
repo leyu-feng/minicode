@@ -17,10 +17,10 @@ async function body(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"))
 }
 
-export async function startHostedHarnessBridge({ endpoint, model, getAccessToken, tools, signal, onError, onModelRequest, onToolEvent }) {
-  const upstream = new URL(endpoint)
-  if (upstream.protocol !== "https:" || upstream.username || upstream.password
-    || !upstream.pathname.endsWith("/responses")) throw new Error("Invalid Hosted model endpoint")
+export async function startHostedHarnessBridge({ endpoint, model, getAccessToken, tools, signal, onError, onModelRequest, onToolEvent, modelEnabled = true }) {
+  const upstream = modelEnabled ? new URL(endpoint) : null
+  if (upstream && (upstream.protocol !== "https:" || upstream.username || upstream.password
+    || !upstream.pathname.endsWith("/responses"))) throw new Error("Invalid Hosted model endpoint")
   const secret = randomBytes(32).toString("hex")
   const toolMap = new Map(tools.map(tool => [tool.name, tool]))
   let modelRequests = 0
@@ -72,7 +72,7 @@ export async function startHostedHarnessBridge({ endpoint, model, getAccessToken
         }
         return
       }
-      if (!["/openai/v1/responses", "/openai/v1/chat/completions"].includes(request.url)) {
+      if (!modelEnabled || !["/openai/v1/responses", "/openai/v1/chat/completions"].includes(request.url)) {
         json(404, { error: "Unknown Hosted model operation" })
         return
       }

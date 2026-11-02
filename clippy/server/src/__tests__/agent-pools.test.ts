@@ -10,9 +10,10 @@ import { promisify } from "node:util";
 import express from "express";
 import request from "supertest";
 import { WebSocket } from "ws";
+import { ManagedIdentityCredential } from "@azure/identity";
 import { and, eq } from "drizzle-orm";
 import { beforeAll, beforeEach, afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createDb, companies, agentPools, agentPoolWorkers, activityLog } from "@paperclipai/db";
+import { createDb, companies, agents, heartbeatRuns, agentPools, agentPoolWorkers, activityLog } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentPoolService, hashAgentPoolToken } from "../services/agent-pools.js";
 import { agentPoolPairingRoutes, agentPoolRoutes } from "../routes/agent-pools.js";
@@ -21,6 +22,7 @@ import { setupAgentPoolWebSocketServer } from "../realtime/agent-pool-ws.js";
 import { agentPoolBroker } from "../services/agent-pool-broker.js";
 import { deleteCompany } from "../services/company-deletion.js";
 import * as hostedWorkers from "../services/hosted-worker-client.js";
+import * as remoteHttp from "../services/remote-http-fetch.js";
 import type { AdapterExecutionContext } from "../adapters/types.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -44,7 +46,7 @@ const execFileAsync = promisify(execFile);
     vi.spyOn(hostedWorkers, "defaultHostedWorkerConfig").mockReturnValue(null);
   });
   afterAll(async () => { agentPoolBroker.close(); await cleanup?.(); });
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
   function hostedProvider() {
     const poolId = randomUUID();
@@ -410,6 +412,60 @@ const execFileAsync = promisify(execFile);
     result.use(errorHandler);
     return result;
   }
+
+  it("isolates GitHub login APIs by company, agent and board access", async () => {
+    const foreignAgent = randomUUID();
+    await db.insert(agents).values({ id: foreignAgent, companyId: otherCompanyId, name: "Foreign", adapterType: "agent_pool" });
+    const url = `/api/companies/${companyId}/agents/${foreignAgent}/github-login`;
+    const agentApp = app({ type: "agent", agentId: foreignAgent, companyId, source: "api_key" });
+    await request(agentApp).get(url).expect(403);
+    await request(agentApp).post(url).expect(403);
+    await request(agentApp).post(`${url}/poll`).expect(403);
+    await request(app()).get(`/api/companies/${otherCompanyId}/agents/${foreignAgent}/github-login`).expect(403);
+    await request(app()).get(url).expect(404);
+    await request(app()).post(url).expect(404);
+    await request(app()).post(`${url}/poll`).expect(404);
+  });
+
+  it("stores GitHub device secrets using managed identity and blocks sign-in restart during an active assignment", async () => {
+    const agentId = randomUUID();
+    await db.insert(agents).values({ id: agentId, companyId, name: "Native", adapterType: "agent_pool" });
+    vi.stubEnv("PAPERCLIP_AGENT_CREDENTIAL_VAULT_URL", "https://agent-credentials.vault.azure.net/");
+    const identity = vi.spyOn(ManagedIdentityCredential.prototype, "getToken").mockResolvedValue({
+      token: "private-vault-token", expiresOnTimestamp: Date.now() + 3_600_000,
+    });
+    const stored = new Map<string, string>();
+    vi.spyOn(remoteHttp, "guardedRemoteHttpFetch").mockImplementation(async (input, init) => {
+      const url = new URL(input);
+      expect(url.origin).toBe("https://agent-credentials.vault.azure.net");
+      expect(url.pathname).toContain(`${companyId.replaceAll("-", "")}-${agentId.replaceAll("-", "")}-`);
+      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer private-vault-token");
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        stored.set(url.pathname, body.value);
+        return new Response("{}", { status: 200 });
+      }
+      const value = stored.get(url.pathname);
+      return value ? Response.json({ value }) : new Response(null, { status: 404 });
+    });
+    const oauth = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      expect(String(input)).toBe("https://github.com/login/device/code");
+      return Response.json({
+        device_code: "private-device-code", user_code: "ABCD-1234", verification_uri: "https://github.com/login/device",
+        expires_in: 900, interval: 5,
+      });
+    });
+    const url = `/api/companies/${companyId}/agents/${agentId}/github-login`;
+    const response = await request(app()).post(url).expect(200);
+    expect(response.body).toMatchObject({ state: "pending", userCode: "ABCD-1234" });
+    expect(JSON.stringify(response.body)).not.toMatch(/private-device-code|private-vault-token/);
+    expect([...stored.values()].some(value => value.includes("private-device-code"))).toBe(true);
+    expect(identity).toHaveBeenCalledWith("https://vault.azure.net/.default", expect.objectContaining({ abortSignal: expect.any(AbortSignal) }));
+    await request(app()).post(`${url}/poll`).expect(200);
+    await db.insert(heartbeatRuns).values({ companyId, agentId, status: "running" });
+    await request(app()).post(url).expect(409);
+    expect(oauth).toHaveBeenCalledTimes(1);
+  });
 
   it("creates the default once, enforces unique company names, and isolates worker management", async () => {
     const svc = agentPoolService(db);

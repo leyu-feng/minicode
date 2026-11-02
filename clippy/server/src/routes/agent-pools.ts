@@ -11,6 +11,7 @@ import { agentPoolBroker } from "../services/agent-pool-broker.js";
 import { unauthorized, notFound } from "../errors.js";
 import { agentPoolSkillsArchive } from "../services/agent-pool-skills.js";
 import { authenticateHostedWorkerProvider } from "../services/entra-hosted-workers.js";
+import { agentGitHubAuthService } from "../services/agent-github-auth.js";
 
 export function agentPoolPairingRoutes(db: Db) {
   const router = Router();
@@ -89,7 +90,38 @@ export function agentPoolSkillsRoutes() {
 export function agentPoolRoutes(db: Db) {
   const router = Router();
   const svc = agentPoolService(db);
+  const github = agentGitHubAuthService(db);
   router.use(agentPoolSkillsRoutes());
+  const login = "/companies/:companyId/agents/:agentId/github-login";
+  router.use(login, (req, res, next) => {
+    assertBoard(req);
+    assertCompanyAccess(req, z.string().uuid().parse(req.params.companyId));
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
+  router.get(login, async (req, res) => res.json(await github.status(
+    z.string().uuid().parse(req.params.companyId), z.string().uuid().parse(req.params.agentId),
+  )));
+  router.post(login, async (req, res) => {
+    const companyId = z.string().uuid().parse(req.params.companyId);
+    const agentId = z.string().uuid().parse(req.params.agentId);
+    const status = await github.start(companyId, agentId);
+    await logActivity(db, {
+      companyId, actorType: "user", actorId: req.actor.userId ?? "local-board",
+      action: "agent.github_login_started", entityType: "agent", entityId: agentId,
+    });
+    res.json(status);
+  });
+  router.post(`${login}/poll`, async (req, res) => {
+    const companyId = z.string().uuid().parse(req.params.companyId);
+    const agentId = z.string().uuid().parse(req.params.agentId);
+    const { status, completed } = await github.poll(companyId, agentId);
+    if (completed) await logActivity(db, {
+      companyId, actorType: "user", actorId: req.actor.userId ?? "local-board",
+      action: "agent.github_login_completed", entityType: "agent", entityId: agentId,
+    });
+    res.json(status);
+  });
   const base = "/companies/:companyId/agent-pools";
   router.use(base, (req, _res, next) => {
     assertBoard(req);

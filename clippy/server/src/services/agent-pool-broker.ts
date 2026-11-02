@@ -5,6 +5,7 @@ import {
   AGENT_POOL_INLINE_INSTRUCTIONS, AGENT_POOL_PROTOCOL_VERSION, AGENT_POOL_SKILL_BUNDLE,
   AGENT_POOL_HOSTED_REPOSITORIES,
   AGENT_POOL_HOSTED_WORKSPACE,
+  AGENT_POOL_GITHUB_CREDENTIAL, agentPoolGitHubCredentialSchema, agentPoolRequiresGitHubLogin, type AgentPoolGitHubCredential,
   agentPoolHelloSchema, agentPoolInstructionsSchema, agentPoolNameSchema, agentPoolTaskSchema,
   agentPoolHarnessIdSchema,
 } from "@paperclipai/shared";
@@ -57,7 +58,7 @@ export class AgentPoolBroker {
   private peers = new Map<string, Peer>();
   private deliveries = new Map<string, Promise<void>>();
   private revokedWorkers = new Set<string>();
-  prepareExecution?: (ctx: AdapterExecutionContext) => Promise<void>;
+  prepareExecution?: (ctx: AdapterExecutionContext) => Promise<void | { githubCredential?: AgentPoolGitHubCredential }>;
 
   constructor(private reconnectMs = AGENT_POOL_RECONNECT_MS) {}
 
@@ -81,6 +82,7 @@ export class AgentPoolBroker {
     const harness = agentPoolHarnessIdSchema.parse(ctx.config.harness ?? "default");
     return [AGENT_POOL_SKILL_BUNDLE,
       ...(harness === "default" ? [] : [`harness_${harness}_v1`]),
+      ...(agentPoolRequiresGitHubLogin(harness) ? [AGENT_POOL_GITHUB_CREDENTIAL] : []),
       ...(ctx.context.paperclipAgentInstructions ? [AGENT_POOL_INLINE_INSTRUCTIONS] : []),
       ...(selection ? [allRepositories ? AGENT_POOL_HOSTED_WORKSPACE : AGENT_POOL_HOSTED_REPOSITORIES] : [])];
   }
@@ -317,8 +319,18 @@ export class AgentPoolBroker {
       exitCode: 1, signal: null, timedOut: false, errorCode: "agent_pool_worker_unavailable", errorMessage,
       executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
     });
+    let githubCredential: AgentPoolGitHubCredential | undefined;
     try {
-      await this.prepareExecution?.(ctx);
+      githubCredential = (await this.prepareExecution?.(ctx))?.githubCredential;
+      if (agentPoolRequiresGitHubLogin(ctx.config.harness)) {
+        const parsed = agentPoolGitHubCredentialSchema.safeParse(githubCredential);
+        if (!parsed.success || parsed.data.agentId !== ctx.agent.id
+          || parsed.data.companyId !== ctx.agent.companyId || parsed.data.runId !== ctx.runId
+          || Date.parse(parsed.data.expiresAt) <= Date.now() + 45 * 60_000) {
+          return unavailable("This agent requires completed GitHub sign-in and a valid assignment access token.");
+        }
+        githubCredential = parsed.data;
+      } else githubCredential = undefined;
     } catch (error) {
       if (ctx.signal?.aborted) throw error;
       return unavailable(error instanceof Error ? error.message : "Hosted worker preparation failed");
@@ -342,6 +354,8 @@ export class AgentPoolBroker {
       continuation: ctx.executionContinuation ?? null,
       runtimeTools: ctx.runtimeTools ?? null,
       authToken: ctx.authToken ?? null,
+      ...(githubCredential ? { githubCredential } : {}),
+      ...(ctx.config.harnessModel ? { harnessModel: ctx.config.harnessModel } : {}),
       ...(repositories ? { repositories } : {}),
     }));
     if (Buffer.byteLength(task) > AGENT_POOL_MAX_FRAME) throw new Error("AgentPool task exceeds the 256 KiB frame limit; reduce instructions or task context");

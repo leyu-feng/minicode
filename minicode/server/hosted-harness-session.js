@@ -7,6 +7,7 @@ import path from "node:path"
 import { startHostedHarnessBridge } from "./hosted-harness-bridge.js"
 import { redactSecrets } from "./http-error.js"
 import { stripVTControlCharacters } from "node:util"
+import { createHostedHarnessWorkspaceTools } from "./agent-session.js"
 
 const MAX_LOG_CHARS = 24000
 const MAX_DIAGNOSTIC_BYTES = 512 * 1024
@@ -78,10 +79,12 @@ export default function(pi) {
 `
 
 export class HostedHarnessSession extends EventEmitter {
-  constructor({ harness, id, cwd, env, instructions, tools, prepare, modelConfig, captureFailedPrompt = false, spawnProcess = spawn }) {
+  constructor({ harness, id, cwd, env, instructions, tools, prepare, modelConfig, githubCredential, harnessModel, captureFailedPrompt = false, spawnProcess = spawn }) {
     super()
-    if (!["opencode", "pi"].includes(harness)) throw new Error("Unsupported external Hosted harness")
-    Object.assign(this, { harness, id, cwd, env, instructions, tools, prepare, modelConfig, captureFailedPrompt, spawnProcess })
+    if (!["opencode", "pi", "claudecode", "copilotcli"].includes(harness)) throw new Error("Unsupported external Hosted harness")
+    this.github = harness === "claudecode" || harness === "copilotcli"
+    Object.assign(this, { harness, id, cwd, env, instructions, prepare, modelConfig, githubCredential, harnessModel, captureFailedPrompt, spawnProcess })
+    this.tools = this.github ? [...createHostedHarnessWorkspaceTools({ cwd, env }), ...tools] : tools
     this.controller = new AbortController()
   }
 
@@ -134,6 +137,7 @@ export class HostedHarnessSession extends EventEmitter {
     const trustedTools = new Set(this.tools.flatMap(tool => [tool.name, `hosted_${tool.name}`]))
     const secrets = Object.entries({ ...process.env, ...this.env }).filter(([key, value]) =>
       /token|secret|password|api_key/i.test(key) && typeof value === "string").map(([, value]) => value)
+    if (this.githubCredential?.accessToken) secrets.push(this.githubCredential.accessToken)
     const safe = value => logValue(value, secrets)
     const activity = value => this.emit("activity", {
       ...value, ...(turn ? { turn } : {}),
@@ -209,6 +213,14 @@ export class HostedHarnessSession extends EventEmitter {
     }
     try {
       signal.throwIfAborted()
+      if (this.harnessModel !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/.test(this.harnessModel)) {
+        throw new Error("Invalid native harness model ID")
+      }
+      if (this.github && (!this.githubCredential?.accessToken || this.githubCredential.runId !== this.id
+        || !Number.isFinite(Date.parse(this.githubCredential.expiresAt))
+        || Date.parse(this.githubCredential.expiresAt) <= Date.now())) {
+        throw new Error("The native harness requires a valid assignment-scoped GitHub access token")
+      }
       const launch = await this.prepare(this.harness, this.id, { signal })
       signal.throwIfAborted()
       if (launch.harness !== this.harness || typeof launch.command !== "string" || !launch.command.trim()
@@ -216,7 +228,7 @@ export class HostedHarnessSession extends EventEmitter {
         throw new Error("Hosted parent returned an invalid harness launch descriptor")
       }
       bridge = await startHostedHarnessBridge({
-        ...this.modelConfig, tools: this.tools, signal,
+        ...this.modelConfig, tools: this.tools, signal, modelEnabled: !this.github,
         onError: (message, request) => request ? failModel(message, request) : fail(message),
         onModelRequest: (request, token) => {
           if (token && !secrets.includes(token)) secrets.push(token)
@@ -240,7 +252,7 @@ export class HostedHarnessSession extends EventEmitter {
         XDG_CONFIG_HOME: path.join(temporary, "config"), XDG_CACHE_HOME: path.join(temporary, "cache"),
         XDG_STATE_HOME: path.join(temporary, "state"), XDG_DATA_HOME: path.join(temporary, "data") }
       for (const key of Object.keys(childEnv)) {
-        if (/^(OPENCODE_|PI_|HOSTED_HARNESS_|OPENAI_|ANTHROPIC_|AZURE_|IDENTITY_|MSI_|MINION_|GIT_CONFIG_)/i.test(key)) delete childEnv[key]
+        if (/^(OPENCODE_|PI_|COPILOT_|GITHUB_TOKEN$|GH_TOKEN$|CLAUDE_CODE_|HOSTED_HARNESS_|OPENAI_|ANTHROPIC_|AZURE_|IDENTITY_|MSI_|MINION_|GIT_CONFIG_)/i.test(key)) delete childEnv[key]
       }
       let args
       if (this.harness === "opencode") {
@@ -253,7 +265,7 @@ export class HostedHarnessSession extends EventEmitter {
             headers: { Authorization: `Bearer ${bridge.secret}` } } },
         })
         args = ["run", "--format", "json", "--agent", "hosted", "--model", `hosted/${this.modelConfig.model}`, "--dir", this.cwd]
-      } else {
+      } else if (this.harness === "pi") {
         const extension = path.join(temporary, "hosted-extension.ts")
         const instructions = path.join(temporary, "instructions.md")
         await fs.writeFile(extension, PI_EXTENSION)
@@ -265,6 +277,30 @@ export class HostedHarnessSession extends EventEmitter {
         childEnv.PI_CODING_AGENT_DIR = path.join(temporary, "pi")
         args = ["--mode", "rpc", "--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates",
           "--extension", extension, "--append-system-prompt", instructions, "--provider", "hosted", "--model", this.modelConfig.model]
+      } else {
+        childEnv.COPILOT_GITHUB_TOKEN = this.githubCredential.accessToken
+        const mcp = path.join(temporary, "mcp.json")
+        const server = { type: "http", url: `${bridge.baseUrl}/mcp`, headers: { Authorization: `Bearer ${bridge.secret}` } }
+        await fs.writeFile(mcp, JSON.stringify({ mcpServers: { hosted: {
+          ...server, ...(this.harness === "copilotcli" ? { tools: this.tools.map(tool => tool.name) } : {}),
+        } } }), { mode: 0o600 })
+        if (this.harness === "claudecode") {
+          childEnv.ANTHROPIC_MODEL = this.harnessModel ?? this.modelConfig.model
+          if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/.test(childEnv.ANTHROPIC_MODEL ?? "")) throw new Error("Claude requires an explicit native model ID")
+          const instructions = path.join(temporary, "instructions.md")
+          await fs.writeFile(instructions, this.instructions, { mode: 0o600 })
+          args = ["--print", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
+            "--setting-sources", "", "--strict-mcp-config", "--mcp-config", mcp, "--tools", "",
+            "--append-system-prompt-file", instructions, "--model", childEnv.ANTHROPIC_MODEL,
+            "--allowedTools", ...this.tools.map(tool => `mcp__hosted__${tool.name}`)]
+        } else {
+          childEnv.COPILOT_HOME = path.join(temporary, "copilot")
+          args = ["--output-format", "json", "--stream", "on", "--disable-builtin-mcps", "--no-custom-instructions",
+            "--model", this.harnessModel ?? "auto", "--additional-mcp-config", `@${mcp}`,
+            "--secret-env-vars=COPILOT_GITHUB_TOKEN,GH_TOKEN,GITHUB_TOKEN",
+            "--available-tools", ...this.tools.map(tool => `hosted-${tool.name}`),
+            "--allow-tool", ...this.tools.map(tool => `hosted(${tool.name})`)]
+        }
       }
       signal.throwIfAborted()
       this.emit("output", { stream: "stdout", data: `using ${this.harness}.contained.${safe(launch.version)} harness\n` })
@@ -324,7 +360,7 @@ export class HostedHarnessSession extends EventEmitter {
             fail("Pi requested interactive input; this assignment requires operator approval")
             this.kill()
           }
-        } else {
+        } else if (this.harness === "opencode") {
           if (event.type === "step_start") { startRound(); finalText = "" }
           if (event.type === "text") {
             finalText += event.part?.text ?? ""
@@ -332,6 +368,43 @@ export class HostedHarnessSession extends EventEmitter {
           }
           if (event.type === "error") failModel(event.error?.data?.message ?? event.error?.message ?? "OpenCode model failed")
           if (event.type === "step_finish") { endRound(); completed = true }
+        } else if (this.harness === "claudecode") {
+          if (event.type === "assistant") {
+            startRound()
+            for (const content of event.message?.content ?? []) {
+              if (content.type === "text") { finalText = content.text; output("stdout", content.text) }
+              if (content.type === "tool_use") diagnostic(`tool claude:${content.id} ${content.name}`, content.input)
+            }
+          }
+          if (event.type === "result") {
+            completed = true
+            if (event.is_error || event.subtype !== "success") failModel(event.errors?.join("\n") || event.result || "Claude Code failed")
+            if (event.permission_denials?.length) fail("Claude Code requested tools outside this assignment's approved capabilities")
+            if (typeof event.result === "string" && event.result !== finalText) output("stdout", event.result)
+            if (typeof event.result === "string") finalText = event.result
+            endRound()
+          }
+        } else {
+          const data = event.data ?? event
+          if (event.type === "assistant.turn_start") startRound()
+          if (event.type === "assistant.turn_end") endRound()
+          if (event.type === "assistant.message_delta" && typeof data.deltaContent === "string") {
+            finalText += data.deltaContent
+            output("stdout", data.deltaContent)
+          }
+          if (event.type === "assistant.message" && typeof data.content === "string") {
+            if (data.content !== finalText) output("stdout", data.content)
+            finalText = data.content
+          }
+          if (event.type === "session.error" || event.type === "error") failModel(data.message ?? data.error?.message ?? "Copilot CLI failed")
+          if (event.type === "result") {
+            completed = true
+            if (event.is_error || event.subtype && event.subtype !== "success") failModel(event.error ?? event.result ?? "Copilot CLI failed")
+            if (typeof event.result === "string" && event.result !== finalText) output("stdout", event.result)
+            if (typeof event.result === "string") finalText = event.result
+            endRound()
+          }
+          if (event.type === "session.idle") { completed = true; endRound() }
         }
         const isPi = this.harness === "pi"
         const toolStart = isPi ? event.type === "tool_execution_start" : event.type === "tool_start"
@@ -376,7 +449,7 @@ export class HostedHarnessSession extends EventEmitter {
       diagnostic("assignment input", prompt)
       diagnostic("system instructions", this.instructions)
       if (this.harness === "pi") child.stdin.write(`${JSON.stringify({ id: this.id, type: "prompt", message: prompt })}\n`)
-      else child.stdin.end(prompt)
+      else child.stdin.end(this.harness === "copilotcli" ? `${this.instructions}\n\n${prompt}` : prompt)
       if (signal.aborted) this.kill()
       const exit = await result
       lines.close()
@@ -388,7 +461,7 @@ export class HostedHarnessSession extends EventEmitter {
         if (!(error instanceof SyntaxError)) throw error
       }
       if (failure) return failedResult(failure)
-      if (!completed || this.harness === "opencode" && exit.code !== 0) {
+      if (!completed || this.harness !== "pi" && exit.code !== 0) {
         return { exitCode: 1, error: `Hosted ${this.harness} did not complete successfully (exit ${exit.code ?? exit.terminationSignal})` }
       }
       return { exitCode: 0 }
@@ -398,6 +471,7 @@ export class HostedHarnessSession extends EventEmitter {
       endRound()
       this.kill()
       this.child = null
+      this.githubCredential = undefined
       this.controller.abort()
       await bridge?.close()
       if (temporary) await fs.rm(temporary, { recursive: true, force: true })

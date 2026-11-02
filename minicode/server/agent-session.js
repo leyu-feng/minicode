@@ -183,6 +183,48 @@ async function editFileAction(cwd, action) {
   return `edited ${path.relative(cwd, file)} (${applied} replacement${applied === 1 ? "" : "s"})`
 }
 
+export function createHostedHarnessWorkspaceTools({ cwd, env }) {
+  const shellEnv = { ...env }
+  for (const key of Object.keys(shellEnv)) {
+    if (/^(COPILOT_|GITHUB_TOKEN$|GH_TOKEN$|CLAUDE_CODE_|ANTHROPIC_|OPENAI_|AZURE_|IDENTITY_|MSI_|MINION_|HOSTED_HARNESS_)/i.test(key)) delete shellEnv[key]
+  }
+  return [
+    {
+      name: "run_shell",
+      description: "Run an authorized workspace command in Bash on Linux or PowerShell on Windows. Commands have a 120-second limit. Follow the supplied workspace, skill, identity and task-authorization rules.",
+      parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"], additionalProperties: false },
+      async execute({ command }, { signal }) {
+        signal.throwIfAborted()
+        if (typeof command !== "string" || !command.trim()) throw new Error("A shell command is required")
+        const result = await runShellCommand(command, { cwd, env: shellEnv, signal })
+        signal.throwIfAborted()
+        if (result.code !== 0) throw new Error(`Shell command failed (exit ${result.code}): ${truncate(result.output)}`)
+        return truncate(result.output)
+      },
+    },
+    {
+      name: "write_file", description: "Write a UTF-8 file inside the assigned workspace.",
+      parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } },
+        required: ["path", "content"], additionalProperties: false },
+      async execute(input, { signal }) {
+        signal.throwIfAborted()
+        if (typeof input?.content !== "string") throw new Error("File content must be a string")
+        return writeFileAction(cwd, input)
+      },
+    },
+    {
+      name: "edit_file", description: "Replace an exact, unique string in a workspace file. Set all to replace every occurrence.",
+      parameters: { type: "object", properties: { path: { type: "string" }, find: { type: "string" },
+        replace: { type: "string" }, all: { type: "boolean" } }, required: ["path", "find", "replace"], additionalProperties: false },
+      async execute(input, { signal }) {
+        signal.throwIfAborted()
+        if (typeof input?.replace !== "string") throw new Error("Replacement content must be a string")
+        return editFileAction(cwd, input)
+      },
+    },
+  ]
+}
+
 function runShellCommand(command, { cwd, onData, signal, env }) {
   return new Promise((resolve) => {
     const isWindows = process.platform === "win32"

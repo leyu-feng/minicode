@@ -4,11 +4,14 @@ import { Field, DraftInput } from "../../components/agent-config-primitives";
 import { processUIAdapter } from "../process";
 import { HostedRepositorySelect } from "../../components/HostedRepositorySelect";
 import { HostedHarnessSelect } from "../../components/HostedHarnessSelect";
+import { AgentGitHubLogin } from "../../components/AgentGitHubLogin";
+import { agentPoolRequiresGitHubLogin } from "@paperclipai/shared";
 
-function AgentPoolConfigFields({ section, isCreate, values, set, config, eff, mark, companyId }: AdapterConfigFieldsProps) {
+function AgentPoolConfigFields({ section, isCreate, values, set, config, eff, mark, companyId, agentId }: AdapterConfigFieldsProps) {
   const current = isCreate ? values?.adapterSchemaValues ?? {} : config;
   const name = isCreate ? String(current.name ?? "default") : eff("adapterConfig", "name", String(config.name ?? "default"));
   const harness = isCreate ? String(current.harness ?? "default") : eff("adapterConfig", "harness", String(config.harness ?? "default"));
+  const model = isCreate ? String(current.harnessModel ?? "") : eff("adapterConfig", "harnessModel", String(config.harnessModel ?? ""));
   const rawPrimary = isCreate ? current.primaryRepositoryId : eff("adapterConfig", "primaryRepositoryId", config.primaryRepositoryId);
   const rawReferences = isCreate ? current.referenceRepositoryIds : eff("adapterConfig", "referenceRepositoryIds", config.referenceRepositoryIds);
   const primaryId = typeof rawPrimary === "string" ? rawPrimary : undefined;
@@ -38,6 +41,17 @@ function AgentPoolConfigFields({ section, isCreate, values, set, config, eff, ma
         if (isCreate) set!({ adapterSchemaValues: { ...values?.adapterSchemaValues, harness: next } });
         else mark("adapterConfig", "harness", next);
       }} />
+    {agentPoolRequiresGitHubLogin(harness) && <>
+      <Field label="Model" hint="Optional native CLI model ID. Copilot defaults to auto; Claude uses the worker's configured model.">
+        <DraftInput value={model} placeholder={harness === "copilotcli" ? "auto" : "Worker model"} immediate
+          className="w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent text-sm"
+          onCommit={value => {
+            if (isCreate) set!({ adapterSchemaValues: { ...values?.adapterSchemaValues, harnessModel: value || undefined } });
+            else mark("adapterConfig", "harnessModel", value || undefined);
+          }} />
+      </Field>
+      <AgentGitHubLogin companyId={companyId} agentId={isCreate ? undefined : agentId} />
+    </>}
     <HostedRepositorySelect companyId={companyId ?? null} poolName={name} primaryId={primaryId} referenceIds={referenceIds}
       onChange={(primaryRepositoryId, referenceRepositoryIds) => {
         if (isCreate) set!({ adapterSchemaValues: { ...values?.adapterSchemaValues, primaryRepositoryId, referenceRepositoryIds } });
@@ -56,6 +70,7 @@ export const agentPoolUIAdapter: UIAdapterModule = {
   buildAdapterConfig: (values) => ({
     name: values.adapterSchemaValues?.name ?? "default",
     ...(values.adapterSchemaValues?.harness ? { harness: values.adapterSchemaValues.harness } : {}),
+    ...(values.adapterSchemaValues?.harnessModel ? { harnessModel: values.adapterSchemaValues.harnessModel } : {}),
     ...(values.adapterSchemaValues?.primaryRepositoryId ? { primaryRepositoryId: values.adapterSchemaValues.primaryRepositoryId } : {}),
     ...(values.adapterSchemaValues?.referenceRepositoryIds ? { referenceRepositoryIds: values.adapterSchemaValues.referenceRepositoryIds } : {}),
   }),

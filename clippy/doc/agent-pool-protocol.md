@@ -27,6 +27,45 @@ The canonical TypeScript schemas and types are exported from
 `@paperclipai/shared/agent-pools`. Non-TypeScript workers implement the same JSON
 contract. Do not depend on Minicode's internal session or prompt representation.
 
+Authentication is token-only. The AgentPool protocol must never introduce
+username/password credentials, HTTP Basic authentication, or password fallbacks.
+Expiring tokens are the default; native harness assignment credentials require an
+explicit `expiresAt`, and missing, expired, malformed, or insufficiently valid
+credentials fail admission rather than falling back to another identity.
+
+### Per-agent GitHub login
+
+The `claudecode` and `copilotcli` harnesses require a completed GitHub device-code
+login for the assigned agent before provisioning, reservation, or dispatch.
+Board-only, company-scoped endpoints under `/api` are:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/companies/{companyId}/agents/{agentId}/github-login` | Sanitized status |
+| POST | `/companies/{companyId}/agents/{agentId}/github-login` | Start device-code login |
+| POST | `/companies/{companyId}/agents/{agentId}/github-login/poll` | Poll at GitHub's required interval |
+
+Set `PAPERCLIP_AGENT_CREDENTIAL_VAULT_URL` to an Azure Key Vault HTTPS origin.
+Paperclip uses managed identity exclusively (`AZURE_CLIENT_ID` optionally selects
+a user-assigned identity); grant that identity secret GET/SET access. Missing vault
+configuration or storage/authentication failures block execution explicitly.
+`PAPERCLIP_AGENT_GITHUB_CLIENT_ID` optionally selects a different public GitHub App.
+The app must support device flow and expiring access/refresh tokens.
+
+Device codes and refresh credentials are stored in company/agent-scoped Key Vault
+secrets, never agent configuration, task context, prompts, or logs. Refresh
+operations are serialized across replicas, cannot rotate credentials while another
+assignment for that agent is running, and persist replacement refresh credentials
+before handing out the new access token.
+
+Only workers advertising both their native harness capability and
+`github_credential_v1` can receive `githubCredential`:
+`{accessToken, expiresAt, agentId, companyId, runId}`. This strict private field
+contains no refresh token or username/password fields. Both broker and worker
+validate its expiry and assignment binding. It must not be copied into generic
+tool environments, context, or logs. Optional `harnessModel` selects a native model;
+it does not change the worker host's pinned CLI version.
+
 Workers send WebSocket pings every 15 seconds and accept either pings or pongs as
 liveness, closing after 45 seconds without either. Client-initiated probes keep
 proxy hops alive even when server-initiated control frames are not forwarded.

@@ -124,6 +124,47 @@ async function harness(t, factory, workerOptions = {}) {
   }
 }
 
+for (const selectedHarness of ["claudecode", "copilotcli"]) {
+  test(`${selectedHarness} rejects invalid expiring credentials before preparation and keeps valid tokens private`, async t => {
+    const sessions = []
+    let busy = 0
+    const fixture = await harness(t, options => {
+      sessions.push(options)
+      const session = new EventEmitter()
+      session.write = async () => ({ exitCode: 0 })
+      session.dispose = async () => {}
+      session.interrupt = () => {}
+      return session
+    }, { harnesses: ["default", selectedHarness], onStateChange: async state => { if (state.state === "busy") busy++; return true } })
+    const peer = await fixture.welcome(0)
+    assert.ok(peer.messages.find(message => message.type === "hello").capabilities.includes("github_credential_v1"))
+    const assignedAgent = { ...agent, companyId: "company-a" }
+    const credential = runId => ({
+      accessToken: "private-native-token", expiresAt: new Date(Date.now() + 8 * 60 * 60_000).toISOString(),
+      agentId: assignedAgent.id, companyId: assignedAgent.companyId, runId,
+    })
+    for (const [index, invalid] of [
+      { expiresAt: undefined }, { expiresAt: "invalid" }, { expiresAt: new Date().toISOString() },
+      { agentId: "other-agent" }, { companyId: "other-company" }, { runId: "other-run" },
+      { username: "not-supported" }, { password: "not-supported" }, { refreshToken: "not-for-worker" },
+    ].entries()) {
+      const runId = `invalid-native-${index}`
+      await executeTask(peer, { runId, agent: assignedAgent, harness: selectedHarness,
+        githubCredential: { ...credential(runId), ...invalid } }, 1)
+    }
+    assert.equal(busy, 0)
+    assert.equal(sessions.length, 0)
+    const runId = "valid-native"
+    const assignedCredential = credential(runId)
+    await executeTask(peer, { runId, agent: assignedAgent, harness: selectedHarness, githubCredential: assignedCredential })
+    assert.equal(sessions.length, 1)
+    assert.deepEqual(sessions[0].githubCredential, assignedCredential)
+    assert.ok(!JSON.stringify(sessions[0].env).includes("private-native-token"))
+    const messages = peer.messages.filter(message => message.type !== "hello")
+    assert.ok(!JSON.stringify(messages).includes("private-native-token"))
+  })
+}
+
 for (const languageMode of ["FullLanguage", "ConstrainedLanguage"]) {
   test(`worker retains both PowerShell versions across agents/assignments in ${languageMode}`, {
     skip: process.platform !== "win32", timeout: 30000,
