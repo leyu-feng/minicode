@@ -423,6 +423,10 @@ test("live activity labels tools, strips terminal codes and redacts configured s
   assert.ok(activity.some(event => event.target === "shell_read"))
   assert.ok(!JSON.stringify(activity).includes("sensitive-fixture"))
   assert.ok(!activity.some(event => event.summary.includes("\u001b")))
+  assert.deepEqual(activity.filter(event => event.action?.startsWith("round_")).map(event => [event.action, event.turn]),
+    [["round_start", 1], ["round_end", 1], ["round_start", 2], ["round_end", 2]])
+  assert.ok(activity.findIndex(event => event.action === "round_start")
+    < activity.findIndex(event => event.target === "shell_read"))
 })
 
 test("live activity preserves 24000 characters and marks messages exceeding that limit", async t => {
@@ -441,6 +445,40 @@ test("live activity preserves 24000 characters and marks messages exceeding that
   assert.equal(summary.length, 24000)
   assert.ok(summary.endsWith("\n[message truncated]"))
 })
+
+for (const when of ["round start", "between rounds", "final round end"]) {
+  test(`cancellation at ${when} cannot issue a stale request or clear a newer run`, async t => {
+    let requests = 0, release, replacement
+    globalThis.fetch = async () => {
+      requests++
+      if (requests === 1 && when !== "round start") return Response.json({ output_text: JSON.stringify(
+        when === "between rounds" ? { type: "tool", name: "inspect", arguments: {} } : { type: "final", message: "done" },
+      ) })
+      return new Promise(resolve => { release = () => resolve(Response.json({ output_text: '{"type":"final","message":"done"}' })) })
+    }
+    const session = new AgentSession({
+      id: "round-cancellation", cwd: process.cwd(),
+      tools: [{ name: "inspect", description: "Inspect", execute: async () => "receipt" }],
+    })
+    session.config = { api: "responses", endpoint: "https://fixture.test", apiKey: "fixture", model: "fixture" }
+    t.after(() => session.dispose())
+    let replaced = false
+    session.on("activity", event => {
+      if (!replaced && event.action === (when === "round start" ? "round_start" : "round_end")) {
+        replaced = true
+        session.interrupt()
+        replacement = session.write("Replacement task")
+      }
+    })
+    await session.write("Original task")
+    assert.equal(requests, when === "round start" ? 1 : 2)
+    assert.equal(session.busy, true)
+    assert.equal(session.activeRun.id, 2)
+    release()
+    assert.equal((await replacement).exitCode, 0)
+    assert.equal(session.busy, false)
+  })
+}
 
 test("Windows agent commands use PowerShell 7 and serialize file contents as plain strings", { skip: process.platform !== "win32" }, async t => {
   const file = fileURLToPath(new URL("../README.md", import.meta.url)).replaceAll("'", "''")
@@ -1017,6 +1055,8 @@ test("fallback retains the working model for the prompt without replaying comple
   assert.match(requests[4].input.at(-1).content, /receipt-2/)
   assert.ok(output.some(event => event.stream === "stderr" && /rate limited/.test(event.data)))
   assert.ok(activity.some(event => /unavailable/.test(event.summary)))
+  assert.ok(activity.filter(event => /rate limited|unavailable/.test(event.summary)).every(event => event.turn === 2))
+  assert.deepEqual(activity.filter(event => event.action === "round_start").map(event => event.turn), [1, 2, 3, 1])
 })
 
 test("interrupting during a fallback warning prevents further model requests", async t => {

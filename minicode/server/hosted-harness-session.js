@@ -124,6 +124,8 @@ export class HostedHarnessSession extends EventEmitter {
     let finalText = ""
     let diagnosticBytes = 0
     let turn = 0
+    let round = 0
+    let roundOpen = false
     let lastModelRequest
     let modelFailure
     let promptEvidence
@@ -186,6 +188,17 @@ export class HostedHarnessSession extends EventEmitter {
       if (promptEvidence) Object.defineProperty(result, "promptEvidence", { value: promptEvidence, configurable: true })
       return result
     }
+    const endRound = () => {
+      if (!roundOpen) return
+      activity({ kind: "model_action", action: "round_end", summary: `Round ${round} end` })
+      roundOpen = false
+    }
+    const startRound = () => {
+      endRound()
+      turn = ++round
+      roundOpen = true
+      activity({ kind: "model_action", action: "round_start", summary: `Round ${round} start` })
+    }
     const toolEvent = ({ source, id, name, input, phase, output: result, error, durationMs }) => {
       const label = `${safe(source)}:${safe(id)} ${safe(name)}`
       const summary = phase === "start" ? `${label}\n${safe(input)}`
@@ -207,12 +220,12 @@ export class HostedHarnessSession extends EventEmitter {
         onError: (message, request) => request ? failModel(message, request) : fail(message),
         onModelRequest: (request, token) => {
           if (token && !secrets.includes(token)) secrets.push(token)
-          turn = request.turn
+          turn = round || request.turn
           lastModelRequest = request
-          const summary = `Model request ${turn}: ${this.modelConfig.model}, ${Buffer.byteLength(request.requestBody)} bytes`
+          const summary = `Model request ${request.turn}: ${this.modelConfig.model}, ${Buffer.byteLength(request.requestBody)} bytes`
           activity({ kind: "model_action", action: "model_request", summary })
           this.emit("output", { stream: "stdout", data: `# ${safe(summary)}\n` })
-          diagnostic(`model request ${turn}`, JSON.parse(request.requestBody))
+          diagnostic(`model request ${request.turn}`, JSON.parse(request.requestBody))
         },
         onToolEvent: event => {
           bridgedToolIds.add(String(event.id))
@@ -286,6 +299,8 @@ export class HostedHarnessSession extends EventEmitter {
           return
         }
         if (this.harness === "pi") {
+          if (event.type === "turn_start") startRound()
+          if (event.type === "turn_end") endRound()
           if (event.type === "response" && event.success === false || event.type === "extension_error") {
             fail(event.error ?? event.message ?? "Pi command or extension failed")
             this.kill()
@@ -310,13 +325,13 @@ export class HostedHarnessSession extends EventEmitter {
             this.kill()
           }
         } else {
-          if (event.type === "step_start") finalText = ""
+          if (event.type === "step_start") { startRound(); finalText = "" }
           if (event.type === "text") {
             finalText += event.part?.text ?? ""
             output("stdout", event.part?.text ?? "")
           }
           if (event.type === "error") failModel(event.error?.data?.message ?? event.error?.message ?? "OpenCode model failed")
-          if (event.type === "step_finish") completed = true
+          if (event.type === "step_finish") { endRound(); completed = true }
         }
         const isPi = this.harness === "pi"
         const toolStart = isPi ? event.type === "tool_execution_start" : event.type === "tool_start"
@@ -380,6 +395,7 @@ export class HostedHarnessSession extends EventEmitter {
     } catch (error) {
       return { exitCode: signal.aborted ? 130 : 1, error: signal.aborted ? "Hosted harness cancelled" : safe(error.message) }
     } finally {
+      endRound()
       this.kill()
       this.child = null
       this.controller.abort()

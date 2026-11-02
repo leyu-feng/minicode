@@ -74,6 +74,7 @@ for (const harness of ["opencode", "pi"]) {
         if (!line.includes("Assigned task")) throw new Error("No task on stdin");
         if (process.env.PAPERCLIP_API_KEY !== "run-secret") throw new Error("Missing run credentials");
         if (process.env.IDENTITY_ENDPOINT || process.env.OPENAI_API_KEY) throw new Error("Leaked inherited authentication");
+        console.log(JSON.stringify({ type: ${JSON.stringify(harness === "pi" ? "turn_start" : "step_start")} }));
         const model = await fetch(configuration.baseUrl + "/openai/v1/responses", {
           method: "POST", headers: { Authorization: "Bearer " + configuration.secret, "Content-Type": "application/json" },
           body: JSON.stringify({ model: "unapproved", instructions: "Policy run-secret",
@@ -83,6 +84,10 @@ for (const harness of ["opencode", "pi"]) {
         });
         if (!model.ok) throw new Error("Model bridge failed");
         await model.text();
+        await (await fetch(configuration.baseUrl + "/openai/v1/responses", {
+          method: "POST", headers: { Authorization: "Bearer " + configuration.secret, "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "unapproved", input: "Auxiliary model request in the same round" })
+        })).text();
         ${harness === "pi" ? `console.log(JSON.stringify({ type: "tool_execution_start", toolCallId: "1", toolName: "provider_read", args: { route: "approved" } }));` : ""}
         const response = await fetch(configuration.baseUrl + "/mcp", {
           method: "POST", headers: { Authorization: "Bearer " + configuration.secret, "Content-Type": "application/json" },
@@ -98,7 +103,14 @@ for (const harness of ["opencode", "pi"]) {
           console.log(JSON.stringify({ type: "tool_start", part: { id: "native-1", tool: "shell", state: { status: "running", input: { command: "echo run-secret" } } } }));
           console.log(JSON.stringify({ type: "tool_use", part: { id: "native-1", tool: "shell", state: { status: "completed", input: { command: "echo run-secret" }, output: "shell result" } } }));
         `}
+        console.log(JSON.stringify({ type: ${JSON.stringify(harness === "pi" ? "turn_end" : "step_finish")} }));
+        console.log(JSON.stringify({ type: ${JSON.stringify(harness === "pi" ? "turn_start" : "step_start")} }));
+        await (await fetch(configuration.baseUrl + "/openai/v1/responses", {
+          method: "POST", headers: { Authorization: "Bearer " + configuration.secret, "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "unapproved", input: "Second round" })
+        })).text();
         ${harness === "pi" ? `console.log(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Finished" } }));
+          console.log(JSON.stringify({ type: "turn_end" }));
           console.log(JSON.stringify({ type: "agent_end", messages: [] }));` :
         `console.log(JSON.stringify({ type: "text", part: { text: "Finished" } }));
           console.log(JSON.stringify({ type: "step_finish" }));`}
@@ -139,6 +151,9 @@ for (const harness of ["opencode", "pi"]) {
     assert.ok(activities.every(event => ["prompt", "model_action", "tool_result", "error"].includes(event.kind)))
     assert.equal(activities.find(event => event.kind === "prompt").turn, undefined)
     assert.ok(activities.some(event => event.action === "model_request" && event.turn === 1))
+    assert.deepEqual(activities.filter(event => event.action?.startsWith("round_")).map(event => [event.action, event.turn]),
+      [["round_start", 1], ["round_end", 1], ["round_start", 2], ["round_end", 2]])
+    assert.deepEqual(activities.filter(event => event.action === "model_request").map(event => event.turn), [1, 1, 2])
     assert.deepEqual(activities.filter(event => event.action === "provider_read").map(event => event.kind), ["model_action", "tool_result"])
     assert.deepEqual(activities.filter(event => event.target === "native-1").map(event => event.kind), ["model_action", "tool_result"])
     assert.ok(activities.some(event => event.kind === "tool_result" && event.summary.includes("shell result")))
@@ -419,6 +434,9 @@ test(`installed ${harness} completes a trusted tool call through the private mod
   assert.ok(output.join("").includes("READY"))
   assert.deepEqual(activities.filter(event => event.action === "provider_read").map(event => event.kind), ["model_action", "tool_result"])
   assert.ok(activities.some(event => event.action === "model_request"))
+  const starts = activities.filter(event => event.action === "round_start").map(event => event.turn)
+  assert.ok(starts.length >= 2, "The real harness must report both tool and final-response rounds")
+  assert.deepEqual(activities.filter(event => event.action === "round_end").map(event => event.turn), starts)
   if (codeMode) assert.deepEqual(activities.filter(event => event.action === "execute").map(event => event.kind), ["model_action", "tool_result"])
 })
 }

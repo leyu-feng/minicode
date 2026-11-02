@@ -121,6 +121,16 @@ activity paths as Minicode. Tool records include call identifiers and available
 durations; MCP records remain visible when OpenCode invokes them inside `execute`.
 Known mirrored native tool events are suppressed.
 
+Worker run logs label preparation as `[prep]`, orchestration as `[framework]`,
+and harness output as `[minicode]`, `[pi]`, or `[opencode]`. `>>` opens a phase,
+turn, or numbered round; `<<` closes it. One assignment has one harness turn;
+rounds are Minicode model/tool iterations, Pi native turns, or OpenCode native
+steps, not auxiliary model-request counts. Completion lines report success,
+failure, cancellation, or timeout. Warnings/errors retain stderr and an
+`!! [source]` prefix; ordinary boundaries use stdout, not warning styling.
+Phase, turn, and round activity also uses the existing live activity contract.
+Prefixes preserve streamed partial lines and are repeated for multiline output.
+
 Normal run logs contain bounded input/tool previews and outcomes.
 `--output-mode verbose` also includes supplied instructions, effective model
 request bodies, and tool details. Each diagnostic entry is capped at 24,000

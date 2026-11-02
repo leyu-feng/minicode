@@ -2,7 +2,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { createHash, randomBytes, randomUUID } from "node:crypto"
 import { execFile } from "node:child_process"
-import { promisify, stripVTControlCharacters } from "node:util"
+import { promisify } from "node:util"
 import WebSocket from "ws"
 import { AgentSession } from "./agent-session.js"
 import { authFilePath } from "./auth.js"
@@ -15,6 +15,7 @@ import { SKILL_BUNDLE, prepareWorkerSkills } from "./worker-skills.js"
 import { prepareWorkerWorktrees, siblingWorktreePath } from "./worker-worktree.js"
 import { readWorkerGuidance, assertWorkerSkillsUnchanged } from "./worker-guidance.js"
 import { prepareWorkerGitSync } from "./worker-git-sync.js"
+import { createRunLogWriter } from "./run-log.js"
 
 const MAX_FRAME = 256 * 1024
 const PROTOCOL_VERSION = 1
@@ -438,6 +439,39 @@ export async function startAgentPoolWorker({
     } : null
     const run = { id: task.runId, agentId: task.agent?.id, session: null, seq: 0, events: [], bytes: 0, done: false,
       execution: null, overflow: false, cancelled: false, controller: new AbortController() }
+    const harnessName = !task.harness || task.harness === "default" ? "minicode" : task.harness
+    let activitySequence = 0
+    let preparing = false
+    let turnStarted = false
+    let round = 0
+    const activity = value => {
+      if (stopped || run.done) return
+      onActivity?.({ ...value, runId: run.id, sequence: ++activitySequence, agentName: task.agent?.name })
+    }
+    const writer = createRunLogWriter(({ stream, data }) => {
+      if (stopped || run.overflow) return
+      run.bytes += Buffer.byteLength(data)
+      if (run.bytes > MAX_OUTPUT) {
+        run.overflow = true
+        run.controller.abort()
+        run.session?.interrupt()
+        return
+      }
+      for (let start = 0; start < data.length; start += 4096) {
+        enqueue(run, { type: "log", stream, data: data.slice(start, start + 4096) })
+      }
+    })
+    const marker = (source, summary, end = false, action = "phase", turn) => {
+      writer.marker(source, summary, end)
+      activity({ kind: "model_action", action, ...(turn ? { turn } : {}), summary: `[${source}] ${summary}` })
+    }
+    const finishLogs = exitCode => {
+      const outcome = exitCode === 0 ? "succeeded" : exitCode === 130 ? "cancelled" : exitCode === 124 ? "timed out" : "failed"
+      if (round) marker(harnessName, `Round ${round} end | ${outcome}`, true, "round_end", round)
+      if (preparing) marker("prep", `Preparation end | ${outcome}`, true)
+      if (turnStarted) marker(harnessName, `Turn end | ${outcome}`, true, "turn_end")
+      marker("framework", `Assignment end | ${outcome}`, true)
+    }
     active = run
     clearTimeout(idleTimer)
     idleSince = null
@@ -452,6 +486,9 @@ export async function startAgentPoolWorker({
       if (stopped || run.cancelled) return { exitCode: 130 }
       const harness = task.harness ?? "default"
       if (!harnesses.includes(harness)) throw new Error(`This worker does not support harness ${harness}`)
+      marker("framework", `Assignment start | harness=${harnessName}`)
+      preparing = true
+      marker("prep", "Preparation start")
       await onStateChange({ state: "busy", runId: task.runId, agentId: task.agent?.id })
       if (stopped || run.cancelled) return { exitCode: 130 }
       run.controller.signal.throwIfAborted()
@@ -491,7 +528,7 @@ export async function startAgentPoolWorker({
         ? await worktree.assign(task.agent?.id, { commit: primaryCommit })
         : await prepareAgentWorkspace(cwd, workspaceRoot, task.agent?.id)
       if (!hostedRoot && !worktree) await gitSync.resetPrimary(workspace, primaryCommit, { signal: run.controller.signal })
-      if (worktree) enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Clean assignment worktree reset to ${primaryCommit ? `assigned remote commit ${primaryCommit}` : "source HEAD"}: ${workspace}\n` })
+      if (worktree) writer.write("prep", `Clean assignment worktree reset to ${primaryCommit ? `assigned remote commit ${primaryCommit}` : "source HEAD"}: ${workspace}\n`)
       const workspaceLayout = hostedRoot ? [
         "Workspace layout (from the trusted AgentPool/worker repository handshake):",
         `Workspace root (not a Git repository): ${workspace}`,
@@ -503,12 +540,12 @@ export async function startAgentPoolWorker({
         "Use the resolved skill catalog below. Read the selected SKILL.md and resolve its references relative to that skill's directory. Availability is not authorization for external actions.",
         "Supervisory guidance and skills remain subordinate to built-in worker rules and managed agent instructions; helper execution permission is not authorization for task actions or additional identities.",
       ] : []
-      enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Agent workspace: ${workspace}\n` })
-      enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Read-only shared folder (instruction policy): ${workerShared}\n` })
+      writer.write("prep", `Agent workspace: ${workspace}\n`)
+      writer.write("prep", `Read-only shared folder (instruction policy): ${workerShared}\n`)
       for (const reference of referenceManifest) {
-        enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Read-only reference (instruction policy): ${reference.name} = ${reference.path} (HEAD ${reference.commit})\n` })
+        writer.write("prep", `Read-only reference (instruction policy): ${reference.name} = ${reference.path} (HEAD ${reference.commit})\n`)
       }
-      if (workspaceLayout.length) enqueue(run, { type: "log", stream: "stdout", data: `[minicode] ${workspaceLayout.join("\n")}\n` })
+      if (workspaceLayout.length) writer.write("prep", `${workspaceLayout.join("\n")}\n`)
       const skills = await prepareWorkerSkills({
         workspace, skills: task.skills, apiUrl: agentApiUrl, authToken: task.authToken, runId: task.runId,
         signal: run.controller.signal, git: hostedRoot ? null : args => git(workspace, args),
@@ -536,8 +573,8 @@ export async function startAgentPoolWorker({
       })
       const provider = hostedRoot ? hostedProviderTool?.({ task }) : null
       const providerPost = hostedRoot ? hostedProviderPostTool?.({ task }) : null
-      if (provider) enqueue(run, { type: "log", stream: "stdout", data: "[minicode] Harness capability: provider_read (read-only; managed identity; no Azure CLI or user credentials).\n" })
-      if (providerPost) enqueue(run, { type: "log", stream: "stdout", data: "[minicode] Harness capability: provider_post (allowlisted mutations; managed identity; no automatic transport replay).\n" })
+      if (provider) writer.write("framework", "Harness capability: provider_read (read-only; managed identity; no Azure CLI or user credentials).\n")
+      if (providerPost) writer.write("framework", "Harness capability: provider_post (allowlisted mutations; managed identity; no automatic transport replay).\n")
       await assertWorkerSkillsUnchanged(guidance.skills)
       if (stopped || run.cancelled) return { exitCode: 130 }
       const session = sessionFactory({
@@ -650,38 +687,33 @@ export async function startAgentPoolWorker({
         },
       })
       run.session = session
-      if (onActivity) {
-        let sequence = 0
-        session.on("activity", activity => {
-          if (stopped || run.done) return
-          onActivity({ ...activity, runId: run.id, sequence: ++sequence, agentName: task.agent.name })
-        })
-      }
-      session.on("output", ({ stream, data }) => {
-        if (stopped || run.overflow) return
-        if (outputMode === "normal" && stream === "command") return
-        data = stripVTControlCharacters(data)
-        run.bytes += Buffer.byteLength(data)
-        if (run.bytes > MAX_OUTPUT) {
-          run.overflow = true
-          session.interrupt()
-          return
+      session.on("activity", value => {
+        if (stopped || run.done) return
+        if (value.action === "round_start") {
+          round = value.turn
+          writer.marker(harnessName, `Round ${round} start`)
+        } else if (value.action === "round_end" && round === value.turn) {
+          writer.marker(harnessName, `Round ${round} end`, true)
+          round = 0
         }
-        for (let start = 0; start < data.length; start += 4096) {
-          enqueue(run, { type: "log", stream: stream === "stderr" ? "stderr" : "stdout", data: data.slice(start, start + 4096) })
-        }
+        activity(value)
       })
-      if (publisher) enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Harness PR publication enabled for ${publicationRepository}\n` })
-      if (skills) enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Verified Paperclip skills ZIP SHA-256 ${skills.sha256}${skills.downloaded ? " (downloaded)" : " (cached)"}; extracted to .worker\\skills\n` })
+      session.on("output", ({ stream, data }) => {
+        if (stopped || run.done || run.overflow) return
+        if (outputMode === "normal" && stream === "command") return
+        writer.write(harnessName, data, stream === "stderr" ? "stderr" : "stdout")
+      })
+      if (publisher) writer.write("framework", `Harness PR publication enabled for ${publicationRepository}\n`)
+      if (skills) writer.write("prep", `Verified Paperclip skills ZIP SHA-256 ${skills.sha256}${skills.downloaded ? " (downloaded)" : " (cached)"}; extracted to .worker\\skills\n`)
       if (repositoryInstructions !== null) {
-        enqueue(run, { type: "log", stream: "stdout", data: "[minicode] Loaded workspace instructions from AGENTS.md\n" })
+        writer.write("prep", "Loaded workspace instructions from AGENTS.md\n")
       }
       if (guidance.sharedInstructions !== null) {
-        enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Loaded read-only shared instructions from AGENTS.md: ${path.join(workerShared, "AGENTS.md")}\n` })
+        writer.write("prep", `Loaded read-only shared instructions from AGENTS.md: ${path.join(workerShared, "AGENTS.md")}\n`)
       }
-      enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Resolved ${guidance.skills.length} skills (worker_shared > repositories > worktree > bundle)\n` })
+      writer.write("prep", `Resolved ${guidance.skills.length} skills (worker_shared > repositories > worktree > bundle)\n`)
       if (agentInstructions !== null) {
-        enqueue(run, { type: "log", stream: "stdout", data: `[minicode] Loaded inline agent instructions (SHA-256 ${agentInstructions.contentSha256})\n` })
+        writer.write("prep", `Loaded inline agent instructions (SHA-256 ${agentInstructions.contentSha256})\n`)
       }
       const serverContext = Object.fromEntries([
         "task", "issueId", "taskId", "projectId", "conversationMode",
@@ -700,6 +732,10 @@ export async function startAgentPoolWorker({
         task.runtimeTools?.guidance ?? "",
         JSON.stringify({ agent: task.agent, workspace: { cwd: workspace }, serverContext, continuation: task.continuation }),
       ].join("\n\n")
+      marker("prep", "Preparation end", true)
+      preparing = false
+      turnStarted = true
+      marker(harnessName, "Turn start", false, "turn_start")
       const result = await session.write(prompt)
       if (result?.modelFailure && onModelFailure && !stopped && !run.cancelled && !run.timedOut) {
         try {
@@ -710,13 +746,13 @@ export async function startAgentPoolWorker({
           })
           if (result.promptEvidence?.status === "too_large") {
             log("[minicode] Failed prompt exceeds the 1 MiB evidence limit; Academy received metadata only.")
-            enqueue(run, { type: "log", stream: "stderr", data: "Failed prompt exceeds the 1 MiB evidence limit; Academy received metadata only.\n" })
+            writer.write("framework", "Failed prompt exceeds the 1 MiB evidence limit; Academy received metadata only.\n", "stderr")
           }
           if (capture?.promptCaptureStatus === "unavailable") throw new Error("Prompt evidence cache unavailable; Academy received metadata only")
         } catch (error) {
           const warning = `Academy failure capture failed; the original task remains failed: ${String(error.message).slice(0, 500)}`
           log(`[minicode] ${warning}`)
-          enqueue(run, { type: "log", stream: "stderr", data: `${warning}\n` })
+          writer.write("framework", `${warning}\n`, "stderr")
         } finally {
           delete result.promptEvidence
         }
@@ -724,10 +760,12 @@ export async function startAgentPoolWorker({
       return result
     }).then((result) => {
       if (stopped) return
-      run.done = true
       const registrationError = run.publication?.registrationError
+      const exitCode = run.timedOut ? 124 : run.cancelled ? 130 : run.overflow || registrationError ? 1 : result?.exitCode ?? 1
+      finishLogs(exitCode)
+      run.done = true
       enqueue(run, {
-        type: "result", exitCode: run.timedOut ? 124 : run.cancelled ? 130 : run.overflow || registrationError ? 1 : result?.exitCode ?? 1,
+        type: "result", exitCode: run.timedOut ? 124 : run.cancelled ? 130 : run.overflow ? 1 : exitCode,
         ...(run.timedOut ? { error: "AgentPool assignment exceeded its execution time limit" }
           : run.overflow ? { error: "AgentPool output limit exceeded" }
           : registrationError ? { error: registrationError.slice(0, 2000) }
@@ -735,8 +773,10 @@ export async function startAgentPoolWorker({
       })
     }).catch((error) => {
       if (stopped) return
+      const exitCode = run.timedOut ? 124 : run.cancelled ? 130 : 1
+      finishLogs(exitCode)
       run.done = true
-      enqueue(run, { type: "result", exitCode: run.timedOut ? 124 : run.cancelled ? 130 : 1,
+      enqueue(run, { type: "result", exitCode,
         error: run.timedOut ? "AgentPool assignment exceeded its execution time limit" : String(error.message).slice(0, 2000) })
     })
   }

@@ -477,6 +477,12 @@ export class AgentSession extends EventEmitter {
     return !this.closed && this.activeRun === run && !run.controller.signal.aborted
   }
 
+  #endRound(run) {
+    if (!run.round) return
+    this.#emitActivity({ kind: "model_action", action: "round_end", turn: run.round, summary: `Round ${run.round} end` })
+    run.round = 0
+  }
+
   #throwIfInactive(run) {
     if (!this.#isActive(run)) throw new Error("aborted")
   }
@@ -537,6 +543,12 @@ export class AgentSession extends EventEmitter {
       this.#emitActivity({ kind: "prompt", action: "prompt", summary: prompt })
 
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+        this.#throwIfInactive(run)
+        this.#endRound(run)
+        this.#throwIfInactive(run)
+        run.round = turn + 1
+        run.activity = { turn: run.round, action: "model_request" }
+        this.#emitActivity({ ...run.activity, kind: "model_action", action: "round_start", summary: `Round ${run.round} start` })
         this.#throwIfInactive(run)
         if (this.shellStateNotices.length) {
           this.messages.push({ role: "user", content: `SHELL_STATE_NOTICE\n${this.shellStateNotices.splice(0).join("\n")}` })
@@ -807,6 +819,7 @@ export class AgentSession extends EventEmitter {
     } finally {
       // An old async operation may finish after a new prompt has started;
       // only its owning run is allowed to alter session state or emit done.
+      if (this.activeRun === run) this.#endRound(run)
       if (this.activeRun === run) {
         this.busy = false
         this.controller = null

@@ -1161,6 +1161,67 @@ for (const outputMode of ["normal", "verbose"]) {
   })
 }
 
+for (const harnessName of ["default", "pi", "opencode"]) {
+  test(`${harnessName} logs separate preparation, framework, turns and real rounds`, async t => {
+    const source = harnessName === "default" ? "minicode" : harnessName
+    const activities = []
+    class Session extends EventEmitter {
+      async write() {
+        this.emit("activity", { kind: "model_action", action: "round_start", turn: 1, summary: "Round 1 start" })
+        this.emit("output", { stream: "stdout", data: "Working" })
+        this.emit("output", { stream: "stdout", data: " on it\n" })
+        this.emit("activity", { kind: "model_action", action: "round_end", turn: 1, summary: "Round 1 end" })
+        this.emit("activity", { kind: "model_action", action: "round_start", turn: 2, summary: "Round 2 start" })
+        this.emit("output", { stream: "stderr", data: "\u001b[33mModel rate limited; trying fallback.\u001b[0m\n" })
+        this.emit("output", { stream: "stdout", data: "Done" })
+        this.emit("activity", { kind: "model_action", action: "round_end", turn: 2, summary: "Round 2 end" })
+        return { exitCode: 0 }
+      }
+      interrupt() {}
+      dispose() {}
+    }
+    const fixture = await harness(t, () => new Session(), {
+      harnesses: ["default", "pi", "opencode"], onActivity: value => activities.push(value),
+    })
+    const peer = await fixture.welcome(0)
+    await executeTask(peer, { runId: "readable-run", agent, harness: harnessName })
+    const logs = peer.messages.filter(message => message.type === "log")
+    const output = logs.map(message => message.data).join("")
+    const start = output.indexOf(`<< [prep] Preparation end\n`)
+    assert.ok(start > output.indexOf(">> [prep] Preparation start\n"))
+    assert.ok(output.includes("[prep] Agent workspace: "))
+    assert.equal(output.slice(start), `<< [prep] Preparation end
+>> [${source}] Turn start
+>> [${source}] Round 1 start
+[${source}] Working on it
+<< [${source}] Round 1 end
+>> [${source}] Round 2 start
+!! [${source}] Model rate limited; trying fallback.
+[${source}] Done
+<< [${source}] Round 2 end
+<< [${source}] Turn end | succeeded
+<< [framework] Assignment end | succeeded
+`)
+    assert.deepEqual(logs.filter(message => message.stream === "stderr").map(message => message.data),
+      [`!! [${source}] Model rate limited; trying fallback.\n`])
+    assert.deepEqual(activities.map(value => value.sequence), activities.map((_, index) => index + 1))
+    assert.ok(activities.every(value => value.runId === "readable-run" && value.agentName === agent.name))
+    assert.deepEqual(activities.filter(value => value.action.startsWith("round_")).map(value => [value.action, value.turn]),
+      [["round_start", 1], ["round_end", 1], ["round_start", 2], ["round_end", 2]])
+    assert.ok(activities.some(value => value.action === "turn_end" && /succeeded/.test(value.summary)))
+  })
+}
+
+test("preparation failure ends the assignment honestly without starting a harness turn", async t => {
+  const fixture = await harness(t, () => { throw new Error("Session setup failed") })
+  const peer = await fixture.welcome(0)
+  const result = await executeTask(peer, { runId: "failed-preparation", agent }, 1)
+  assert.equal(result.error, "Session setup failed")
+  const output = peer.messages.filter(message => message.type === "log").map(message => message.data).join("")
+  assert.ok(output.endsWith("<< [prep] Preparation end | failed\n<< [framework] Assignment end | failed\n"))
+  assert.ok(!output.includes("Turn start"))
+})
+
 test("worker credentials survive restart, stay bound to root/server, and require secure transport", async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-worker-test-"))
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }))
@@ -1186,8 +1247,8 @@ test("network reconnect resumes the same session and replays only unacknowledged
   first.send({ type: "task", runId: "run-1", agent, context: { task: "work" } })
   await waitUntil(() => calls === 1)
   session.emit("output", { stream: "stdout", data: "before" })
-  await waitUntil(() => first.messages.some((message) => message.data === "before"))
-  const before = first.messages.find((message) => message.data === "before")
+  await waitUntil(() => first.messages.some((message) => message.data === "[minicode] before"))
+  const before = first.messages.find((message) => message.data === "[minicode] before")
   first.send({ type: "ack", runId: "run-1", seq: before.seq, completed: false })
   first.socket.terminate()
   await waitUntil(() => connections.length === 2)
@@ -1196,7 +1257,8 @@ test("network reconnect resumes the same session and replays only unacknowledged
   const resumed = await welcome(1, before.seq)
   await waitUntil(() => resumed.messages.some((message) => message.type === "result"))
   assert.equal(calls, 1)
-  assert.deepEqual(resumed.messages.filter((message) => message.type === "log").map((message) => message.data), ["while offline"])
+  assert.equal(resumed.messages.filter((message) => message.type === "log").map((message) => message.data).join(""),
+    "while offline\n<< [minicode] Turn end | succeeded\n<< [framework] Assignment end | succeeded\n")
   assert.equal(resumed.messages.find((message) => message.type === "hello").runId, "run-1")
   const result = resumed.messages.find((message) => message.type === "result")
   resumed.send({ type: "ack", runId: "run-1", seq: result.seq, completed: true })
@@ -1206,7 +1268,10 @@ test("network reconnect resumes the same session and replays only unacknowledged
 test("cancellation waits for the active operation, not the immediate done event", async (t) => {
   let release, interrupted = false
   class Session extends EventEmitter {
-    write() { return new Promise((resolve) => { release = resolve }) }
+    write() {
+      this.emit("activity", { kind: "model_action", action: "round_start", turn: 1, summary: "Round 1 start" })
+      return new Promise((resolve) => { release = resolve })
+    }
     interrupt() { interrupted = true; this.emit("done", { exitCode: 130 }) }
     dispose() {}
   }
@@ -1217,9 +1282,12 @@ test("cancellation waits for the active operation, not the immediate done event"
   peer.send({ type: "cancel", runId: "cancel-run" })
   await waitUntil(() => interrupted)
   assert.equal(peer.messages.some((message) => message.type === "result"), false)
+  assert.equal(peer.messages.some(message => message.data?.includes("Turn end")), false)
   release({ exitCode: 130 })
   await waitUntil(() => peer.messages.some((message) => message.type === "result"))
   assert.equal(peer.messages.find((message) => message.type === "result").exitCode, 130)
+  assert.ok(peer.messages.filter(message => message.type === "log").map(message => message.data).join("")
+    .endsWith("<< [minicode] Round 1 end | cancelled\n<< [minicode] Turn end | cancelled\n<< [framework] Assignment end | cancelled\n"))
 })
 
 test("run credentials stay in the per-session tool environment rather than the model prompt", async (t) => {
