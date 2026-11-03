@@ -6,9 +6,11 @@ import { startAgentPoolWorker } from "./agent-pool-worker.js"
 import { hostedBindingToken, startHostedFleet } from "./hosted-fleet.js"
 import { createHostedPublicationTool } from "./hosted-publication.js"
 import { createHostedProviderTool, createHostedProviderPostTool } from "./hosted-provider.js"
+import { startHostedKustoSkill } from "./hosted-kusto.js"
 
 // The parent owns managed identity and repository restoration. Credentials cross this private
 // stdio channel only, never argv, model context, inherited shell environment or a saved auth file.
+// The approved Kusto skill may obtain an ADX token through its run-scoped local API.
 export async function runHostedWorkerCli() {
   const pending = new Map()
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
@@ -95,6 +97,14 @@ export async function runHostedWorkerCli() {
         ? options => createHostedProviderPostTool({
           ...options, baseUrl: configuration.providerPost.baseUrl, routes: configuration.providerPost.routes,
           bodySchema: configuration.providerPost.bodySchema, request,
+        })
+        : undefined,
+      hostedKustoSkill: configuration.kustoToken?.authentication === "managed_identity"
+        ? options => startHostedKustoSkill({
+          ...options,
+          getToken: requestOptions => request("kusto_token", {
+            runId: options.task.runId, bindingId: binding?.workerId,
+          }, requestOptions),
         })
         : undefined,
       minFreeGiB: configuration.minFreeGiB, targetFreeGiB: configuration.targetFreeGiB,

@@ -14,6 +14,7 @@ import { WebSocketServer } from "ws"
 import { agentPoolServerUrl, loadWorkerCredential, parseWorkerCliOptions, parseWorkerReferences, startAgentPoolWorker } from "../server/agent-pool-worker.js"
 import { AgentSession } from "../server/agent-session.js"
 import { createHostedProviderTool, createHostedProviderPostTool } from "../server/hosted-provider.js"
+import { startHostedKustoSkill } from "../server/hosted-kusto.js"
 
 const execFileAsync = promisify(execFile)
 const agent = { id: "agent-a", name: "Agent A" }
@@ -474,6 +475,8 @@ test("Hosted assignments persist busy before repository preparation and retire o
 })
 
 for (const explicitRole of [true, false]) for (const [providerEnabled, postEnabled] of [[true, true], [true, false], [false, true], [false, false]]) test(`Hosted all-repository assignments use supervisory guidance with explicit metadata=${explicitRole}, managed identity read=${providerEnabled}, post=${postEnabled}`, async t => {
+  const kustoEnabled = explicitRole && providerEnabled && postEnabled
+  let kustoEnvironment
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "hosted-catalog-test-"))
   const shared = path.join(root, "supervisory-checkout")
   const writable = path.join(root, "Main")
@@ -519,6 +522,19 @@ for (const explicitRole of [true, false]) for (const [providerEnabled, postEnabl
       assert.ok(this.options.instructions.includes(`review [worker_shared]: ${path.join(shared, ".agents", "skills", "review", "SKILL.md")}`))
       assert.equal(this.options.instructions.includes(`review [repository:Main]: ${path.join(writable, ".agents", "skills", "review", "SKILL.md")}`), !explicitRole)
       assert.equal(this.options.env.WORKER_SHARED, shared)
+      if (kustoEnabled) {
+        kustoEnvironment = this.options.env
+        assert.match(this.options.instructions, /platform\/kusto \[platform\]/)
+        assert.match(this.options.instructions, /approved managed-identity capability/)
+        const response = await fetch(kustoEnvironment.WORKER_KUSTO_TOKEN_URL, {
+          method: "POST", headers: { Authorization: `Bearer ${kustoEnvironment.WORKER_KUSTO_TOKEN_CAPABILITY}` },
+          body: '{}',
+        })
+        assert.equal(response.status, 200)
+        assert.equal((await response.json()).accessToken, "private-kusto-token")
+      } else {
+        assert.equal(this.options.env.WORKER_KUSTO_TOKEN_URL, undefined)
+      }
       assert.ok(this.options.instructions.indexOf("Shared catalog guidance wins.")
         < this.options.instructions.indexOf("Conflicting workspace guidance loses."))
       assert.deepEqual(JSON.parse(this.options.env.WORKER_REFERENCE_REPOS_JSON), [descriptors[2]])
@@ -563,6 +579,11 @@ for (const explicitRole of [true, false]) for (const [providerEnabled, postEnabl
       bodySchema: { type: "object", properties: { expectedAttempt: { type: "integer", minimum: 1, maximum: 5 } } },
       request: async (...args) => { providerCalls.push(args); return { statusCode: 202 } },
     }) : undefined,
+    hostedKustoSkill: kustoEnabled ? options => startHostedKustoSkill({
+      ...options, getToken: async () => ({
+        accessToken: "private-kusto-token", tokenType: "Bearer", expiresOn: new Date(Date.now() + 3600_000).toISOString(),
+      }),
+    }) : undefined,
     prepareHostedRepositories: async selection => {
       assert.equal(selection.mode, "all_repositories")
       return { mode: "all_repositories", cwd: root, workerShared: shared, repositories: descriptors }
@@ -576,6 +597,7 @@ for (const explicitRole of [true, false]) for (const [providerEnabled, postEnabl
   await executeTask(peer, { runId: "catalog", agent, skills: bundle.skills, authToken: "run-credential",
     repositories: { mode: "all_repositories", repositories: descriptors } })
   assert.equal(sessions, 1)
+  if (kustoEnabled) await assert.rejects(fetch(kustoEnvironment.WORKER_KUSTO_TOKEN_URL))
   assert.deepEqual(providerCalls, [
     ...(providerEnabled ? [["provider_read", { runId: "catalog", path: "/v1/builds/123" }, { signal: undefined }]] : []),
     ...(postEnabled ? [["provider_post", {
