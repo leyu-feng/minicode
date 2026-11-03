@@ -34,6 +34,20 @@ function fixture() {
 }
 
 describe("per-agent GitHub device login", () => {
+  it("binds the initiating board's Git identity to sign-in and preserves it through polling and token rotation", async () => {
+    const f = fixture();
+    const gitIdentity = { name: "Board Operator", email: "operator@example.test" };
+    f.responses.push(f.challenge, f.tokens, f.account);
+    expect(await f.login.start(gitIdentity)).toMatchObject({ gitIdentity });
+    expect(await f.login.start({ name: "Another User", email: "other@example.test" })).toMatchObject({ gitIdentity });
+    f.advance(5000);
+    expect(await new GitHubDeviceLogin(f.options).poll()).toMatchObject({ state: "connected", gitIdentity });
+    f.advance(7.5 * 60 * 60_000);
+    f.responses.push({ ...f.tokens, access_token: "rotated-token" });
+    await f.login.assignmentToken(async () => {});
+    expect(await f.login.status()).toMatchObject({ gitIdentity });
+  });
+
   it("blocks assignments until sign-in finishes and never publishes device or credential secrets", async () => {
     const f = fixture();
     await expect(f.login.assignmentToken(async () => {})).rejects.toBeInstanceOf(GitHubLoginRequiredError);

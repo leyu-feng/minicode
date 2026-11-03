@@ -95,17 +95,19 @@ describe("AgentPool execution channel", () => {
     const { broker, worker } = await harness();
     const legacy = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1", "harness_copilotcli_v1"]);
     const client = await worker(randomUUID(), randomUUID(), null, true,
-      ["skill_bundle_v1", "harness_copilotcli_v1", "github_credential_v1"]);
+      ["skill_bundle_v1", "harness_copilotcli_v1", "github_credential_v1", "git_identity_v1"]);
     const ctx = context();
     ctx.config.harness = "copilotcli";
     const githubCredential = {
       accessToken: "private-agent-token", expiresAt: new Date(Date.now() + 8 * 60 * 60_000).toISOString(),
       agentId: ctx.agent.id, companyId: ctx.agent.companyId, runId: ctx.runId,
     };
-    broker.prepareExecution = async () => ({ githubCredential });
+    const gitIdentity = { name: "Operator", email: "operator@example.test" };
+    broker.prepareExecution = async () => ({ githubCredential, gitIdentity });
     const result = broker.execute(ctx);
     const task = await client.take("task");
     expect(task.githubCredential).toEqual(githubCredential);
+    expect(task.gitIdentity).toEqual(gitIdentity);
     expect(JSON.stringify(task.context)).not.toContain("private-agent-token");
     expect(JSON.stringify(ctx)).not.toContain("private-agent-token");
     expect(legacy.messages).toEqual([]);
@@ -120,11 +122,12 @@ describe("AgentPool execution channel", () => {
   it.each([undefined, "claude-opus-4.6"])("uses the Claude default without overriding an explicit model (%s)", async harnessModel => {
     const { broker, worker } = await harness();
     const client = await worker(randomUUID(), randomUUID(), null, true,
-      ["skill_bundle_v1", "harness_claudecode_v1", "github_credential_v1"]);
+      ["skill_bundle_v1", "harness_claudecode_v1", "github_credential_v1", "git_identity_v1"]);
     const ctx = context();
     ctx.config.harness = "claudecode";
     if (harnessModel) ctx.config.harnessModel = harnessModel;
     broker.prepareExecution = async () => ({
+      gitIdentity: { name: "Operator", email: "operator@example.test" },
       githubCredential: {
         accessToken: "private-agent-token", expiresAt: new Date(Date.now() + 8 * 60 * 60_000).toISOString(),
         agentId: ctx.agent.id, companyId: ctx.agent.companyId, runId: ctx.runId,
@@ -142,10 +145,11 @@ describe("AgentPool execution channel", () => {
     "rejects a native credential with an invalid %s binding before dispatch", async field => {
       const { broker, worker } = await harness();
       const client = await worker(randomUUID(), randomUUID(), null, true,
-        ["skill_bundle_v1", "harness_claudecode_v1", "github_credential_v1"]);
+        ["skill_bundle_v1", "harness_claudecode_v1", "github_credential_v1", "git_identity_v1"]);
       const ctx = context();
       ctx.config.harness = "claudecode";
       broker.prepareExecution = async () => ({
+        gitIdentity: { name: "Operator", email: "operator@example.test" },
         githubCredential: {
           accessToken: "private-token", expiresAt: new Date(Date.now() + 8 * 60 * 60_000).toISOString(),
           agentId: ctx.agent.id, companyId: ctx.agent.companyId, runId: ctx.runId,
@@ -163,7 +167,7 @@ describe("AgentPool execution channel", () => {
   ])("rejects malformed or non-token assignment credential fields: %j", async invalid => {
     const { broker, worker } = await harness();
     const client = await worker(randomUUID(), randomUUID(), null, true,
-      ["skill_bundle_v1", "harness_copilotcli_v1", "github_credential_v1"]);
+      ["skill_bundle_v1", "harness_copilotcli_v1", "github_credential_v1", "git_identity_v1"]);
     const ctx = context();
     ctx.config.harness = "copilotcli";
     const githubCredential = {
@@ -171,7 +175,7 @@ describe("AgentPool execution channel", () => {
       agentId: ctx.agent.id, companyId: ctx.agent.companyId, runId: ctx.runId,
     };
     Object.assign(githubCredential, invalid);
-    broker.prepareExecution = async () => ({ githubCredential });
+    broker.prepareExecution = async () => ({ githubCredential, gitIdentity: { name: "Operator", email: "operator@example.test" } });
     await expect(broker.execute(ctx)).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
     expect(client.messages).toEqual([]);
     expect(ctx.onDispatch).not.toHaveBeenCalled();

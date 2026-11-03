@@ -6,6 +6,7 @@ import {
   AGENT_POOL_HOSTED_REPOSITORIES,
   AGENT_POOL_HOSTED_WORKSPACE,
   AGENT_POOL_GITHUB_CREDENTIAL, agentPoolGitHubCredentialSchema, agentPoolRequiresGitHubLogin, type AgentPoolGitHubCredential,
+  AGENT_POOL_GIT_IDENTITY, agentPoolGitIdentitySchema, type AgentPoolGitIdentity,
   agentPoolHelloSchema, agentPoolInstructionsSchema, agentPoolNameSchema, agentPoolTaskSchema,
   agentPoolHarnessIdSchema,
   AGENT_POOL_CLAUDECODE_DEFAULT_MODEL,
@@ -60,7 +61,9 @@ export class AgentPoolBroker {
   private peers = new Map<string, Peer>();
   private deliveries = new Map<string, Promise<void>>();
   private revokedWorkers = new Set<string>();
-  prepareExecution?: (ctx: AdapterExecutionContext) => Promise<void | { githubCredential?: AgentPoolGitHubCredential }>;
+  prepareExecution?: (ctx: AdapterExecutionContext) => Promise<void | {
+    githubCredential?: AgentPoolGitHubCredential; gitIdentity?: AgentPoolGitIdentity;
+  }>;
 
   constructor(private reconnectMs = AGENT_POOL_RECONNECT_MS) {}
 
@@ -84,7 +87,7 @@ export class AgentPoolBroker {
     const harness = agentPoolHarnessIdSchema.parse(ctx.config.harness ?? "default");
     return [AGENT_POOL_SKILL_BUNDLE,
       ...(harness === "default" ? [] : [`harness_${harness}_v1`]),
-      ...(agentPoolRequiresGitHubLogin(harness) ? [AGENT_POOL_GITHUB_CREDENTIAL] : []),
+      ...(agentPoolRequiresGitHubLogin(harness) ? [AGENT_POOL_GITHUB_CREDENTIAL, AGENT_POOL_GIT_IDENTITY] : []),
       ...(ctx.context.paperclipAgentInstructions ? [AGENT_POOL_INLINE_INSTRUCTIONS] : []),
       ...(selection ? [allRepositories ? AGENT_POOL_HOSTED_WORKSPACE : AGENT_POOL_HOSTED_REPOSITORIES] : [])];
   }
@@ -322,9 +325,12 @@ export class AgentPoolBroker {
       executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
     });
     let githubCredential: AgentPoolGitHubCredential | undefined;
+    let gitIdentity: AgentPoolGitIdentity | undefined;
     try {
-      githubCredential = (await this.prepareExecution?.(ctx))?.githubCredential;
+      const prepared = await this.prepareExecution?.(ctx);
+      githubCredential = prepared?.githubCredential;
       if (agentPoolRequiresGitHubLogin(ctx.config.harness)) {
+        gitIdentity = agentPoolGitIdentitySchema.parse(prepared?.gitIdentity);
         const parsed = agentPoolGitHubCredentialSchema.safeParse(githubCredential);
         if (!parsed.success || parsed.data.agentId !== ctx.agent.id
           || parsed.data.companyId !== ctx.agent.companyId || parsed.data.runId !== ctx.runId
@@ -359,6 +365,7 @@ export class AgentPoolBroker {
       runtimeTools: ctx.runtimeTools ?? null,
       authToken: ctx.authToken ?? null,
       ...(githubCredential ? { githubCredential } : {}),
+      ...(gitIdentity ? { gitIdentity } : {}),
       ...(harnessModel ? { harnessModel } : {}),
       ...(repositories ? { repositories } : {}),
     }));

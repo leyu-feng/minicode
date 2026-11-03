@@ -85,3 +85,46 @@ it("labels an older sign-in timestamp as unrecorded rather than displaying token
   expect(container.textContent).toContain("Signed inNot recorded for this sign-in");
   expect(container.querySelectorAll("time")).toHaveLength(1);
 });
+
+it("shows the sign-in owner's Git identity and saves free-text overrides for this agent", async () => {
+  vi.spyOn(agentPoolsApi, "pollGitHubLogin").mockResolvedValue({
+    state: "connected", message: "Connected",
+    gitIdentity: { name: "Board Operator", email: "operator@example.test" },
+  });
+  const save = vi.spyOn(agentPoolsApi, "updateGitIdentity").mockResolvedValue({
+    state: "connected", message: "Connected",
+    gitIdentity: { name: "Board Operator", email: "override@example.test" },
+  });
+  await render("agent");
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+  expect(container.querySelector("input")?.value).toBe("Board Operator");
+  const email = container.querySelector<HTMLInputElement>('input[type="email"]')!;
+  expect(email.value).toBe("operator@example.test");
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(email, "override@example.test");
+    email.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const button = [...container.querySelectorAll("button")].find(item => item.textContent === "Save Git identity")!;
+  await act(async () => button.click());
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+  expect(save).toHaveBeenCalledWith("company", "agent", { name: "Board Operator", email: "override@example.test" });
+  expect(container.textContent).toContain("remain human actions");
+});
+
+it("does not carry an unsaved Git identity to a different agent", async () => {
+  vi.spyOn(agentPoolsApi, "pollGitHubLogin").mockImplementation(async (_company, agentId) => ({
+    state: "connected", message: "Connected", gitIdentity: { name: agentId, email: `${agentId}@example.test` },
+  }));
+  await render("first");
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+  const name = container.querySelector("input")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "Unsaved Operator");
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(name.value).toBe("Unsaved Operator");
+  await render("second");
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+  expect(container.querySelector("input")?.value).toBe("second");
+  expect(container.querySelector<HTMLInputElement>('input[type="email"]')?.value).toBe("second@example.test");
+});

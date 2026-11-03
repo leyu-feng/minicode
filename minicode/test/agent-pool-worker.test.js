@@ -151,18 +151,33 @@ for (const selectedHarness of ["claudecode", "copilotcli"]) {
     ].entries()) {
       const runId = `invalid-native-${index}`
       await executeTask(peer, { runId, agent: assignedAgent, harness: selectedHarness,
+        gitIdentity: { name: "Operator", email: "operator@example.test" },
         githubCredential: { ...credential(runId), ...invalid } }, 1)
     }
     assert.equal(busy, 0)
     assert.equal(sessions.length, 0)
     const runId = "valid-native"
     const assignedCredential = credential(runId)
-    await executeTask(peer, { runId, agent: assignedAgent, harness: selectedHarness, githubCredential: assignedCredential })
+    const gitIdentity = { name: "Operator", email: "operator@example.test" }
+    await executeTask(peer, { runId, agent: assignedAgent, harness: selectedHarness, githubCredential: assignedCredential, gitIdentity })
     assert.equal(sessions.length, 1)
     assert.deepEqual(sessions[0].githubCredential, assignedCredential)
+    assert.equal(sessions[0].env.GIT_AUTHOR_NAME, gitIdentity.name)
+    assert.equal(sessions[0].env.GIT_AUTHOR_EMAIL, gitIdentity.email)
+    assert.equal(sessions[0].env.GIT_COMMITTER_EMAIL, gitIdentity.email)
     assert.ok(!JSON.stringify(sessions[0].env).includes("private-native-token"))
     const messages = peer.messages.filter(message => message.type !== "hello")
     assert.ok(!JSON.stringify(messages).includes("private-native-token"))
+    const nextRun = "next-native"
+    const nextIdentity = { name: "Another Operator", email: "next@example.test" }
+    await executeTask(peer, { runId: nextRun, agent: assignedAgent, harness: selectedHarness,
+      githubCredential: credential(nextRun), gitIdentity: nextIdentity })
+    assert.equal(sessions[1].env.GIT_AUTHOR_EMAIL, nextIdentity.email)
+    assert.equal(sessions[0].env.GIT_AUTHOR_EMAIL, gitIdentity.email)
+    const invalidRun = "invalid-identity"
+    await executeTask(peer, { runId: invalidRun, agent: assignedAgent, harness: selectedHarness,
+      githubCredential: credential(invalidRun), gitIdentity: { name: "Forged\nName", email: gitIdentity.email } }, 1)
+    assert.equal(sessions.length, 2)
   })
 }
 

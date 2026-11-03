@@ -12,6 +12,7 @@ import { unauthorized, notFound } from "../errors.js";
 import { agentPoolSkillsArchive } from "../services/agent-pool-skills.js";
 import { authenticateHostedWorkerProvider } from "../services/entra-hosted-workers.js";
 import { agentGitHubAuthService } from "../services/agent-github-auth.js";
+import { agentPoolGitIdentitySchema } from "@paperclipai/shared";
 
 export function agentPoolPairingRoutes(db: Db) {
   const router = Router();
@@ -105,10 +106,20 @@ export function agentPoolRoutes(db: Db) {
   router.post(login, async (req, res) => {
     const companyId = z.string().uuid().parse(req.params.companyId);
     const agentId = z.string().uuid().parse(req.params.agentId);
-    const status = await github.start(companyId, agentId);
+    const status = await github.start(companyId, agentId, req.actor.userId);
     await logActivity(db, {
       companyId, actorType: "user", actorId: req.actor.userId ?? "local-board",
       action: "agent.github_login_started", entityType: "agent", entityId: agentId,
+    });
+    res.json(status);
+  });
+  router.put(`${login}/git-identity`, validate(agentPoolGitIdentitySchema), async (req, res) => {
+    const companyId = z.string().uuid().parse(req.params.companyId);
+    const agentId = z.string().uuid().parse(req.params.agentId);
+    const status = await github.updateIdentity(companyId, agentId, agentPoolGitIdentitySchema.parse(req.body));
+    await logActivity(db, {
+      companyId, actorType: "user", actorId: req.actor.userId ?? "local-board",
+      action: "agent.git_identity_updated", entityType: "agent", entityId: agentId,
     });
     res.json(status);
   });

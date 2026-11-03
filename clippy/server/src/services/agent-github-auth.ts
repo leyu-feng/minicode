@@ -1,5 +1,6 @@
 import { ManagedIdentityCredential } from "@azure/identity";
-import { agents, heartbeatRuns, type Db } from "@paperclipai/db";
+import { agents, authUsers, heartbeatRuns, type Db } from "@paperclipai/db";
+import { agentPoolGitIdentitySchema, type AgentPoolGitIdentity } from "@paperclipai/shared";
 import { and, eq, ne } from "drizzle-orm";
 import { z } from "zod";
 import { badRequest, conflict, notFound, unprocessable } from "../errors.js";
@@ -72,7 +73,7 @@ class AgentGitHubVault implements GitHubLoginStore {
 
 export function agentGitHubAuthService(db: Db) {
   async function withAgent<T>(companyId: string, agentId: string,
-    action: (login: GitHubDeviceLogin, assertIdle: (runId?: string) => Promise<void>) => Promise<T>): Promise<T> {
+    action: (login: GitHubDeviceLogin, assertIdle: (runId?: string) => Promise<void>, vault: AgentGitHubVault) => Promise<T>): Promise<T> {
     return db.transaction(async tx => {
       const [agent] = await tx.select({ adapterType: agents.adapterType }).from(agents)
         .where(and(eq(agents.companyId, companyId), eq(agents.id, agentId))).for("update");
@@ -82,28 +83,50 @@ export function agentGitHubAuthService(db: Db) {
       if (!/^[a-zA-Z0-9._-]{8,100}$/.test(clientId)) {
         throw unprocessable("The agent GitHub App client ID is invalid.");
       }
-      return action(new GitHubDeviceLogin({ clientId, store: new AgentGitHubVault(companyId, agentId) }), async runId => {
+      const vault = new AgentGitHubVault(companyId, agentId);
+      return action(new GitHubDeviceLogin({ clientId, store: vault }), async runId => {
         const [active] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
           eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId),
           eq(heartbeatRuns.status, "running"), ...(runId ? [ne(heartbeatRuns.id, runId)] : []),
         )).limit(1);
         if (active) throw conflict("GitHub token rotation must wait for this agent's existing assignment to finish.");
-      });
+      }, vault);
     });
   }
 
   return {
     status: (companyId: string, agentId: string) => withAgent(companyId, agentId, login => login.status()),
-    start: (companyId: string, agentId: string) => withAgent(companyId, agentId, async (login, assertIdle) => {
+    start: (companyId: string, agentId: string, userId: string | undefined) => withAgent(companyId, agentId, async (login, assertIdle) => {
       await assertIdle();
-      return login.start();
+      const previous = await login.status();
+      if (previous.state === "pending") return previous;
+      const [user] = userId ? await db.select({ name: authUsers.name, email: authUsers.email })
+        .from(authUsers).where(eq(authUsers.id, userId)) : [];
+      const parsed = agentPoolGitIdentitySchema.safeParse(user);
+      if (!parsed.success) throw unprocessable("GitHub sign-in requires a board user with a valid Git name and email.");
+      return login.start(parsed.data);
     }),
     poll: (companyId: string, agentId: string) => withAgent(companyId, agentId, async login => {
       const previous = await login.status();
       const status = previous.state === "pending" ? await login.poll() : previous;
       return { status, completed: previous.state === "pending" && status.state === "connected" };
     }),
-    assignmentToken: (companyId: string, agentId: string, runId: string) =>
-      withAgent(companyId, agentId, (login, assertIdle) => login.assignmentToken(() => assertIdle(runId))),
+    updateIdentity: (companyId: string, agentId: string, identity: AgentPoolGitIdentity) =>
+      withAgent(companyId, agentId, async (login, _idle, vault) => {
+        const parsed = agentPoolGitIdentitySchema.parse(identity);
+        const status = await login.status();
+        if (status.state !== "connected" && status.state !== "expired")
+          throw conflict("Finish GitHub sign-in before editing its Git identity.");
+        const credential = z.object({ state: z.literal("connected") }).passthrough().parse(await vault.get("credentials"));
+        await vault.set("credentials", { ...credential, gitIdentity: parsed });
+        return { ...status, gitIdentity: parsed };
+      }),
+    assignmentCredentials: (companyId: string, agentId: string, runId: string) =>
+      withAgent(companyId, agentId, async (login, assertIdle) => {
+        const token = await login.assignmentToken(() => assertIdle(runId));
+        const gitIdentity = (await login.status()).gitIdentity;
+        if (!gitIdentity) throw unprocessable("Set this agent's Git name and email in its GitHub sign-in settings before running it.");
+        return { githubCredential: { ...token, companyId, agentId, runId }, gitIdentity };
+      }),
   };
 }

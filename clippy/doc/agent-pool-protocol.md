@@ -44,6 +44,7 @@ Board-only, company-scoped endpoints under `/api` are:
 | GET | `/companies/{companyId}/agents/{agentId}/github-login` | Sanitized status |
 | POST | `/companies/{companyId}/agents/{agentId}/github-login` | Start device-code login |
 | POST | `/companies/{companyId}/agents/{agentId}/github-login/poll` | Poll at GitHub's required interval |
+| PUT | `/companies/{companyId}/agents/{agentId}/github-login/git-identity` | Set Git `{name, email}` for future assignments |
 
 Set `PAPERCLIP_AGENT_CREDENTIAL_VAULT_URL` to an Azure Key Vault HTTPS origin.
 Paperclip uses managed identity exclusively (`AZURE_CLIENT_ID` optionally selects
@@ -64,6 +65,21 @@ sign-in time; the refresh-token deadline can move when GitHub issues a replaceme
 Older stored logins can resolve their account using an unexpired access token,
 but an unrecorded original sign-in time is never inferred from token expiry.
 An expired refresh token requires another device sign-in.
+
+Device sign-in captures the initiating board user's name and email (the Entra
+board identity on hosted deployments), not the GitHub profile or task creator.
+The sanitized status exposes `gitIdentity: {name, email}`. The board can edit
+both fields as text after sign-in. Pending polling and credential refresh preserve
+the original identity; active assignments keep their immutable snapshot.
+Older sign-ins without identity require an explicit identity save or new sign-in.
+Workers must advertise `git_identity_v1` for native harness assignments.
+The Assignment carries `gitIdentity` separately from private credentials. Both
+native harnesses use assignment-scoped `GIT_AUTHOR_*` and `GIT_COMMITTER_*`
+environment variables, never machine-global Git settings. The provider's trusted
+run claim stores the same snapshot for remote commit recreation.
+PR creation remains service-authenticated, with the Git identity in its description.
+Agents and provider APIs must not complete PRs or set auto-complete. A human
+performs completion in Azure DevOps and chooses its source-branch deletion option.
 
 Only workers advertising both their native harness capability and
 `github_credential_v1` can receive `githubCredential`:

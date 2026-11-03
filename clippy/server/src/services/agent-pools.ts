@@ -282,10 +282,9 @@ export function agentPoolService(db: Db) {
       }
       const deadline = AbortSignal.timeout(118_000);
       const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline;
-      const githubCredential = agentPoolRequiresGitHubLogin(harness) ? {
-        ...await agentGitHubAuthService(db).assignmentToken(ctx.agent.companyId, ctx.agent.id, ctx.runId),
-        companyId: ctx.agent.companyId, agentId: ctx.agent.id, runId: ctx.runId,
-      } : undefined;
+      const { githubCredential, gitIdentity } = agentPoolRequiresGitHubLogin(harness)
+        ? await agentGitHubAuthService(db).assignmentCredentials(ctx.agent.companyId, ctx.agent.id, ctx.runId)
+        : { githubCredential: undefined, gitIdentity: undefined };
       signal.throwIfAborted();
       const { client, poolId: remoteId } = provider(await provision(ctx.agent.companyId, pool.id, signal));
       if (harness !== "default" && !(await client.harnesses(remoteId, signal)).some(entry => entry.id === harness)) {
@@ -299,11 +298,11 @@ export function agentPoolService(db: Db) {
         if (!agentPoolBroker.reserveAvailableWorker(ctx)) return false;
         const worker = agentPoolBroker.reservedWorker(ctx.runId);
         if (worker?.executionId) await client.claim(remoteId, {
-          workerId: worker.id, runId: ctx.runId, agentId: ctx.agent.id,
+          workerId: worker.id, runId: ctx.runId, agentId: ctx.agent.id, gitIdentity,
         }, signal);
         return true;
       };
-      if (await reserve()) return { githubCredential };
+      if (await reserve()) return { githubCredential, gitIdentity };
       const pending = waiting.get(pool.id) ?? { runs: new Set<string>(), tail: Promise.resolve() };
       waiting.set(pool.id, pending);
       pending.runs.add(ctx.runId);
@@ -346,7 +345,7 @@ export function agentPoolService(db: Db) {
         }
         if (pending.runs.size === 0 && waiting.get(pool.id) === pending) waiting.delete(pool.id);
       }
-      return { githubCredential };
+      return { githubCredential, gitIdentity };
     },
     async create(companyId: string, name: string) {
       await list(companyId);

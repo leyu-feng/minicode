@@ -143,6 +143,8 @@ for (const harness of ["claudecode", "copilotcli"]) {
 
 for (const harness of ["claudecode", "copilotcli"]) {
   test(`${harness} isolates assignment authentication and uses only explicitly provided tools`, async t => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), `git-identity-${harness}-`))
+    t.after(() => fs.rm(cwd, { recursive: true, force: true }))
     let invocation
     let mcpPath
     const logs = []
@@ -161,11 +163,23 @@ for (const harness of ["claudecode", "copilotcli"]) {
           params: { name: "provider_read", arguments: { route: "approved" } } })
       });
       if (!response.ok || (await response.json()).result.isError) throw new Error("Trusted MCP call failed");
+      const commit = await fetch(config.url, {
+        method: "POST", headers: { ...config.headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call",
+          params: { name: "run_shell", arguments: { command:
+            'git init --quiet && git commit --quiet --allow-empty -m identity-proof && git log -1 --format="%an|%ae|%cn|%ce"' } } })
+      });
+      const proof = await commit.json();
+      if (!commit.ok || proof.result.isError || !JSON.stringify(proof).includes(
+        "Board Operator|operator@example.test|Board Operator|operator@example.test"
+      )) throw new Error("Git commit did not preserve assignment author and committer: " + JSON.stringify(proof));
       console.log(JSON.stringify({ type: "result", subtype: "success", result: "Finished private-github-token" }));
     `
     const session = new HostedHarnessSession({
-      harness, id: "run", cwd: process.cwd(), instructions: "Trusted instructions", harnessModel: "gpt-4.1",
-      env: { GH_TOKEN: "inherited-user-token", IDENTITY_ENDPOINT: "private" },
+      harness, id: "run", cwd, instructions: "Trusted instructions", harnessModel: "gpt-4.1",
+      env: { ...process.env, HOME: cwd, USERPROFILE: cwd, GH_TOKEN: "inherited-user-token", IDENTITY_ENDPOINT: "private",
+        GIT_AUTHOR_NAME: "Board Operator", GIT_AUTHOR_EMAIL: "operator@example.test",
+        GIT_COMMITTER_NAME: "Board Operator", GIT_COMMITTER_EMAIL: "operator@example.test" },
       githubCredential: { accessToken: "private-github-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), runId: "run" },
       tools: [{ name: "provider_read", description: "Trusted read", parameters: { type: "object" },
         execute: async input => { calls.push(input); return "result" } }],
@@ -182,7 +196,7 @@ for (const harness of ["claudecode", "copilotcli"]) {
     t.after(() => session.dispose())
     session.on("output", event => logs.push(event.data))
     session.on("activity", event => logs.push(JSON.stringify(event)))
-    assert.deepEqual(await session.write("Assigned task"), { exitCode: 0, summary: "Finished [redacted]" })
+    assert.deepEqual(await session.write("Assigned task"), { exitCode: 0, summary: "Finished [redacted]" }, logs.join(""))
     assert.deepEqual(calls, [{ route: "approved" }])
     assert.ok(!JSON.stringify(invocation.args).includes("private-github-token"))
     assert.ok(!logs.join("").includes("private-github-token"))
@@ -190,6 +204,9 @@ for (const harness of ["claudecode", "copilotcli"]) {
       assert.ok(!invocation.args.includes(flag))
     }
     assert.equal(invocation.options.env.HOME, invocation.options.env.USERPROFILE)
+    assert.equal(invocation.options.env.GIT_AUTHOR_NAME, "Board Operator")
+    assert.equal(invocation.options.env.GIT_AUTHOR_EMAIL, "operator@example.test")
+    assert.equal(invocation.options.env.GIT_COMMITTER_EMAIL, "operator@example.test")
     if (harness === "claudecode") assert.equal(invocation.options.env.ANTHROPIC_MODEL, "gpt-4.1")
     await assert.rejects(fs.stat(mcpPath), { code: "ENOENT" })
   })

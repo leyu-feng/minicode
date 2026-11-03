@@ -13,9 +13,10 @@ import { WebSocket } from "ws";
 import { ManagedIdentityCredential } from "@azure/identity";
 import { and, eq } from "drizzle-orm";
 import { beforeAll, beforeEach, afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createDb, companies, agents, heartbeatRuns, agentPools, agentPoolWorkers, activityLog } from "@paperclipai/db";
+import { createDb, companies, agents, authUsers, heartbeatRuns, agentPools, agentPoolWorkers, activityLog } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentPoolService, hashAgentPoolToken } from "../services/agent-pools.js";
+import { agentGitHubAuthService } from "../services/agent-github-auth.js";
 import { agentPoolPairingRoutes, agentPoolRoutes } from "../routes/agent-pools.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { setupAgentPoolWebSocketServer } from "../realtime/agent-pool-ws.js";
@@ -39,6 +40,8 @@ const execFileAsync = promisify(execFile);
     cleanup = started.cleanup;
     db = createDb(started.connectionString);
     await db.insert(companies).values({ id: otherCompanyId, name: "Other company", issuePrefix: "AO" });
+    await db.insert(authUsers).values({ id: "board-user", name: "Board Operator", email: "operator@example.test",
+      createdAt: new Date(), updatedAt: new Date() });
   });
   beforeEach(async () => {
     companyId = randomUUID();
@@ -433,6 +436,7 @@ const execFileAsync = promisify(execFile);
     await request(agentApp).get(url).expect(403);
     await request(agentApp).post(url).expect(403);
     await request(agentApp).post(`${url}/poll`).expect(403);
+    await request(agentApp).put(`${url}/git-identity`).send({ name: "Agent", email: "agent@example.test" }).expect(403);
     await request(app()).get(`/api/companies/${otherCompanyId}/agents/${foreignAgent}/github-login`).expect(403);
     await request(app()).get(url).expect(404);
     await request(app()).post(url).expect(404);
@@ -461,22 +465,56 @@ const execFileAsync = promisify(execFile);
       return value ? Response.json({ value }) : new Response(null, { status: 404 });
     });
     const oauth = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
-      expect(String(input)).toBe("https://github.com/login/device/code");
-      return Response.json({
-        device_code: "private-device-code", user_code: "ABCD-1234", verification_uri: "https://github.com/login/device",
-        expires_in: 900, interval: 5,
+      if (String(input) === "https://github.com/login/device/code") return Response.json({
+          device_code: "private-device-code", user_code: "ABCD-1234", verification_uri: "https://github.com/login/device",
+          expires_in: 900, interval: 5,
+        });
+      if (String(input) === "https://github.com/login/oauth/access_token") return Response.json({
+        access_token: "private-access-token", expires_in: 28_800, token_type: "bearer",
+        refresh_token: "private-refresh-token", refresh_token_expires_in: 15_897_600,
       });
+      expect(String(input)).toBe("https://api.github.com/user");
+      return Response.json({ id: 12345, login: "github-account" });
     });
     const url = `/api/companies/${companyId}/agents/${agentId}/github-login`;
     const response = await request(app()).post(url).expect(200);
     expect(response.body).toMatchObject({ state: "pending", userCode: "ABCD-1234" });
+    expect(response.body.gitIdentity).toEqual({ name: "Board Operator", email: "operator@example.test" });
     expect(JSON.stringify(response.body)).not.toMatch(/private-device-code|private-vault-token/);
     expect([...stored.values()].some(value => value.includes("private-device-code"))).toBe(true);
     expect(identity).toHaveBeenCalledWith("https://vault.azure.net/.default", expect.objectContaining({ abortSignal: expect.any(AbortSignal) }));
     await request(app()).post(`${url}/poll`).expect(200);
+    const anotherBoard = app({ type: "board", userId: "another-board-user", source: "session", companyIds: [companyId] });
+    const pending = await request(anotherBoard).post(url).expect(200);
+    expect(pending.body.gitIdentity).toEqual(response.body.gitIdentity);
+    await request(app()).put(`${url}/git-identity`).send({ name: "Override", email: "override@example.test" }).expect(409);
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6000);
+    const connected = await request(anotherBoard).post(`${url}/poll`).expect(200);
+    expect(connected.body).toMatchObject({ state: "connected", gitIdentity: response.body.gitIdentity });
+    await request(app()).put(`${url}/git-identity`).send({ name: "Invalid\nName", email: "override@example.test" }).expect(400);
+    const updated = await request(app()).put(`${url}/git-identity`)
+      .send({ name: "Override", email: "override@example.test" }).expect(200);
+    expect(updated.body.gitIdentity).toEqual({ name: "Override", email: "override@example.test" });
+    expect(JSON.stringify(updated.body)).not.toMatch(/private-|refreshToken|accessToken/);
+    const auth = agentGitHubAuthService(db);
+    const runId = randomUUID();
+    const assignment = await auth.assignmentCredentials(companyId, agentId, runId);
+    expect(assignment).toMatchObject({
+      githubCredential: { companyId, agentId, runId, accessToken: "private-access-token" },
+      gitIdentity: updated.body.gitIdentity,
+    });
+    await request(app()).put(`${url}/git-identity`).send({ name: "Next Operator", email: "next@example.test" }).expect(200);
+    expect(assignment.gitIdentity).toEqual(updated.body.gitIdentity);
+    expect((await auth.assignmentCredentials(companyId, agentId, randomUUID())).gitIdentity)
+      .toEqual({ name: "Next Operator", email: "next@example.test" });
+    const credentialsKey = [...stored.keys()].find(key => key.endsWith("-credentials"))!;
+    const legacy = JSON.parse(stored.get(credentialsKey)!);
+    delete legacy.gitIdentity;
+    stored.set(credentialsKey, JSON.stringify(legacy));
+    await expect(auth.assignmentCredentials(companyId, agentId, randomUUID())).rejects.toThrow("Set this agent's Git name and email");
     await db.insert(heartbeatRuns).values({ companyId, agentId, status: "running" });
     await request(app()).post(url).expect(409);
-    expect(oauth).toHaveBeenCalledTimes(1);
+    expect(oauth).toHaveBeenCalledTimes(3);
   });
 
   it("creates the default once, enforces unique company names, and isolates worker management", async () => {

@@ -6,6 +6,12 @@ export const AGENT_POOL_SKILL_BUNDLE = "skill_bundle_v1";
 export const AGENT_POOL_HOSTED_REPOSITORIES = "hosted_repositories_v1";
 export const AGENT_POOL_HOSTED_WORKSPACE = "hosted_workspace_v2";
 export const AGENT_POOL_GITHUB_CREDENTIAL = "github_credential_v1";
+export const AGENT_POOL_GIT_IDENTITY = "git_identity_v1";
+export const agentPoolGitIdentitySchema = z.object({
+  name: z.string().trim().min(1).max(200).regex(/^[^\x00-\x1f\x7f<>]+$/),
+  email: z.string().trim().max(254).email().regex(/^[^\x00-\x20\x7f<>]+$/),
+}).strict();
+export type AgentPoolGitIdentity = z.infer<typeof agentPoolGitIdentitySchema>;
 export const AGENT_POOL_CLAUDECODE_DEFAULT_MODEL = "claude-sonnet-5";
 export const agentPoolRequiresGitHubLogin = (harness: unknown) =>
   harness === "claudecode" || harness === "copilotcli";
@@ -28,6 +34,7 @@ export interface AgentGitHubLoginStatus {
   signedInAt?: string;
   refreshExpiresAt?: string;
   pollAfterSeconds?: number;
+  gitIdentity?: AgentPoolGitIdentity;
 }
 export const agentPoolHarnessIdSchema = z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9_-]*$/);
 export const hostedWorkerHarnessesSchema = z.array(z.object({
@@ -83,6 +90,7 @@ export const agentPoolTaskSchema = z.object({
   runtimeTools: z.unknown().nullable(),
   authToken: z.string().nullable(),
   githubCredential: agentPoolGitHubCredentialSchema.optional(),
+  gitIdentity: agentPoolGitIdentitySchema.optional(),
   harnessModel: agentPoolHarnessModelSchema.optional(),
   repositories: z.union([z.object({
     primary: z.object({ id: z.string(), name: z.string(), branch: z.string() }),

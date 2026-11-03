@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AgentGitHubLoginStatus } from "@paperclipai/shared";
+import { agentPoolGitIdentitySchema, type AgentGitHubLoginStatus, type AgentPoolGitIdentity } from "@paperclipai/shared";
 
 const MIN_ASSIGNMENT_VALIDITY_MS = 48 * 60_000;
 const accountSchema = z.object({
@@ -22,6 +22,7 @@ const credentialSchema = z.object({
   refreshExpiresAt: z.number().int().positive(),
   account: accountSchema.optional(),
   signedInAt: z.number().int().positive().optional(),
+  gitIdentity: agentPoolGitIdentitySchema.optional(),
 });
 const pendingSchema = z.object({
   state: z.literal("pending"),
@@ -32,6 +33,7 @@ const pendingSchema = z.object({
   expiresAt: z.number().int().positive(),
   interval: z.number().int().positive().max(3600),
   nextPollAt: z.number().int().positive(),
+  gitIdentity: agentPoolGitIdentitySchema.optional(),
 });
 const storedCredentialsSchema = z.union([
   credentialSchema,
@@ -125,6 +127,7 @@ export class GitHubDeviceLogin {
       verificationUri: device.verificationUri,
       expiresAt: new Date(device.expiresAt).toISOString(),
       pollAfterSeconds: Math.max(1, Math.ceil((device.nextPollAt - this.now()) / 1000)),
+      gitIdentity: device.gitIdentity,
     };
   }
 
@@ -140,6 +143,7 @@ export class GitHubDeviceLogin {
         signedInAt: credential.signedInAt === undefined ? undefined : new Date(credential.signedInAt).toISOString(),
         expiresAt: new Date(credential.expiresAt).toISOString(),
         refreshExpiresAt: new Date(credential.refreshExpiresAt).toISOString(),
+        gitIdentity: credential.gitIdentity,
       };
       if (credential.refreshExpiresAt <= this.now()) {
         return { state: "expired", message: "GitHub sign-in expired. Sign in again to run this agent.", ...details };
@@ -162,7 +166,7 @@ export class GitHubDeviceLogin {
     return { state: "required", message: "This agent is blocked until GitHub sign-in is completed." };
   }
 
-  async start(): Promise<GitHubLoginStatus> {
+  async start(gitIdentity?: AgentPoolGitIdentity): Promise<GitHubLoginStatus> {
     const existing = await this.device();
     if (existing?.state === "pending" && existing.clientId === this.options.clientId
       && existing.expiresAt > this.now()) return this.pendingStatus(existing);
@@ -185,6 +189,7 @@ export class GitHubDeviceLogin {
       expiresAt: now + device.data.expires_in * 1000,
       interval: device.data.interval,
       nextPollAt: now + device.data.interval * 1000,
+      ...(gitIdentity ? { gitIdentity: agentPoolGitIdentitySchema.parse(gitIdentity) } : {}),
     };
     await this.options.store.set("credentials", { state: "required" });
     await this.options.store.set("device", pending);
@@ -197,6 +202,7 @@ export class GitHubDeviceLogin {
       throw new Error("GitHub must issue an expiring access token and a refresh token before this agent can run.");
     }
     const now = this.now();
+    const device = previous ? null : await this.device();
     const credential = {
       state: "connected" as const,
       clientId: this.options.clientId,
@@ -206,6 +212,7 @@ export class GitHubDeviceLogin {
       refreshExpiresAt: now + parsed.data.refresh_token_expires_in * 1000,
       account: previous?.account,
       signedInAt: previous ? previous.signedInAt : now,
+      gitIdentity: previous ? previous.gitIdentity : device?.state === "pending" ? device.gitIdentity : undefined,
     };
     await this.options.store.set("credentials", credential);
     return credential;

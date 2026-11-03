@@ -254,6 +254,7 @@ export class HostedHarnessSession extends EventEmitter {
         XDG_STATE_HOME: path.join(temporary, "state"), XDG_DATA_HOME: path.join(temporary, "data") }
       for (const key of Object.keys(childEnv)) {
         if (/^(OPENCODE_|PI_|COPILOT_|GITHUB_TOKEN$|GH_TOKEN$|CLAUDE_CODE_|HOSTED_HARNESS_|OPENAI_|ANTHROPIC_|AZURE_|IDENTITY_|MSI_|MINION_|GIT_CONFIG_)/i.test(key)) delete childEnv[key]
+        if (this.github && /^GIT_(AUTHOR|COMMITTER)_/i.test(key) && !Object.hasOwn(this.env ?? {}, key)) delete childEnv[key]
       }
       let args
       if (this.harness === "opencode") {
