@@ -1,197 +1,202 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { createHostedPublicationTool } from "../server/hosted-publication.js"
-import { publicationSlug } from "../server/pull-request-publisher.js"
+import { createPrInspectorPostback, createHostedPublicationTool } from "../server/hosted-publication.js"
 
-function fixture(t, aliases = false, provider = "azure_devops") {
-  const agentId = "11111111-1111-4111-8111-111111111111"
-  const companyId = "22222222-2222-4222-8222-222222222222"
-  const issueId = "33333333-3333-4333-8333-333333333333"
-  const projectUrl = "https://dev.azure.com/fixture/Project"
-  const repositories = [
-    { id: "44444444-4444-4444-8444-444444444444", name: "First", readOnly: false },
-    { id: "55555555-5555-4555-8555-555555555555", name: "Second", readOnly: false },
-    { id: "66666666-6666-4666-8666-666666666666", name: "Reference", readOnly: true },
-  ]
-  for (const repository of repositories.filter(repo => !repo.readOnly)) {
-    const identity = provider === "azure_devops" ? `${projectUrl}/_git/${repository.id}` : `contoso/${repository.name}`
-    repository.publication = {
-      provider, repository: identity,
-      pullRequestUrlTemplate: provider === "azure_devops" ? `${identity}/pullrequest/{number}` : `https://code.example/${identity}/pull/{number}`,
-      branchTemplate: provider === "azure_devops" ? "u/{workerName}/{feature}" : "agent/{agentId}/{commit}",
-    }
+const agentId = "11111111-1111-4111-8111-111111111111"
+const companyId = "22222222-2222-4222-8222-222222222222"
+const issueId = "33333333-3333-4333-8333-333333333333"
+const inspectorId = "44444444-4444-4444-8444-444444444444"
+const submissionId = `submission-publication-${"d".repeat(64)}`
+const commit = "a".repeat(40), remoteCommit = "b".repeat(40)
+
+function fixture(t, isInspector = false, inspectorExists = true) {
+  const task = {
+    authToken: "fixture-token", runId: "fixture-run",
+    agent: { id: isInspector ? inspectorId : agentId, companyId },
+    context: { issueId }, prPolicy: { inspectorAgentId: inspectorExists ? inspectorId : null, isInspector },
   }
-  if (aliases) for (const repository of repositories) repository.alias = repository.name.toLowerCase()
-  const products = [], comments = [], publications = []
-  let failRegistration = false
-  let returnedBranch
+  const repositories = [{
+    id: "main", name: "Main", alias: "main", readOnly: false,
+    source: "https://code.example.test/project/_git/main",
+    publication: {
+      provider: "azure_devops", repository: "https://code.example.test/project/_git/main",
+      pullRequestUrlTemplate: "https://code.example.test/project/_git/main/pullrequest/{number}",
+      branchTemplate: "u/{workerName}/{feature}",
+    },
+  }, { id: "reference", name: "Reference", readOnly: true }]
+  const products = [], comments = [], children = [], publications = []
+  let failHandoff = false, failRegistration = false
+  let liveInspector = inspectorExists
+  let submitted = false
   t.mock.method(globalThis, "fetch", async (url, options) => {
     const route = new URL(url).pathname
     const body = options.body ? JSON.parse(options.body) : undefined
-    if (route.endsWith(`/issues/${issueId}`)) {
-      return Response.json({ id: issueId, assigneeAgentId: agentId, companyId })
+    assert.equal(options.headers.Authorization, "Bearer fixture-token")
+    assert.equal(options.headers["X-Paperclip-Run-Id"], task.runId)
+    if (route.endsWith("/pr-inspector")) return Response.json({ agentId: liveInspector ? inspectorId : null, specialRole: "pr_inspector" })
+    if (route.endsWith(`/issues/${issueId}`)) return Response.json({ id: issueId, companyId, assigneeAgentId: task.agent.id })
+    if (route.endsWith("/agents")) return Response.json([{ id: inspectorId, companyId, name: "PR Inspector", status: "idle" }])
+    if (route.endsWith(`/companies/${companyId}/issues`)) {
+      if (failHandoff) return new Response("Handoff failed", { status: 503 })
+      const saved = children.find(child => child.idempotencyKey === body.idempotencyKey)
+      if (saved) return Response.json(saved)
+      const child = { ...body, id: "review-task", companyId }
+      children.push(child)
+      return Response.json(child)
     }
     if (route.endsWith("/work-products")) {
       if (options.method === "GET") return Response.json(products)
       if (failRegistration) return new Response("Registration failed", { status: 503 })
-      const product = { ...body, id: `product-${products.length}`, issueId }
+      const product = { ...body, id: "product-1", issueId }
       products.push(product)
       return Response.json(product)
     }
-    if (route.includes("/work-products/")) {
-      const product = products.find(product => route.endsWith(`/${product.id}`))
-      assert.ok(product)
-      Object.assign(product, body)
-      return Response.json(product)
+    if (route.endsWith("/work-products/product-1")) {
+      Object.assign(products[0], body)
+      return Response.json(products[0])
     }
     if (route.endsWith("/comments")) {
       if (options.method === "GET") return Response.json(comments)
-      const comment = { ...body, id: `comment-${comments.length}`, issueId, authorAgentId: agentId }
+      const comment = { ...body, id: "comment-1", issueId, authorAgentId: task.agent.id }
       comments.push(comment)
       return Response.json(comment)
     }
     throw new Error(`Unexpected API route ${route}`)
   })
-  const tool = createHostedPublicationTool({
-    repositories, apiUrl: "https://paperclip.example.test",
-    task: { authToken: "fixture-token", runId: "fixture-run", agent: { id: agentId, companyId }, context: { taskId: issueId } },
-    async request(operation, input) {
+  const request = async (operation, input) => {
       assert.equal(operation, "publish")
       publications.push(input)
-      const repository = repositories.find(repository => repository.id === input.repositoryId)
-      assert.ok(repository && !repository.readOnly)
-      const descriptor = repository.publication
-      const number = repository.name === "First" ? 1 : 2
-      return {
-        provider: descriptor.provider, repository: descriptor.repository, number,
-        url: descriptor.pullRequestUrlTemplate.replace("{number}", String(number)), state: "OPEN", isDraft: input.isDraft,
-        commit: input.commit, branch: returnedBranch ?? products.find(product => product.metadata?.repository === descriptor.repository
-          && product.metadata?.commit === input.commit)?.metadata.branch
-          ?? (descriptor.branchTemplate === "u/{workerName}/{feature}" ? `u/w01/${publicationSlug(input.title)}`
-            : descriptor.branchTemplate.replace("{agentId}", agentId).replace("{commit}", input.commit)),
+      assert.equal(input.repositoryId, "main")
+      if (input.mode === "publish_pull_request") return {
+        submissionId, commit, remoteCommit, branch: "u/w01/feature", provider: "azure_devops",
+        repository: repositories[0].publication.repository, number: 12, state: "OPEN", isDraft: input.isDraft,
+        url: repositories[0].publication.pullRequestUrlTemplate.replace("{number}", "12"),
       }
-    },
+      if (input.mode === "reconcile_branch") return submitted
+        ? { submissionId, commit, remoteCommit, branch: "u/w01/feature", state: "SUBMITTED" }
+        : { state: "NOT_SUBMITTED" }
+      assert.equal(input.mode, "submit_branch")
+      submitted = true
+      return { submissionId, commit, remoteCommit, branch: "u/w01/feature", state: "SUBMITTED" }
+    }
+  const publication = createHostedPublicationTool({
+    repositories, task, apiUrl: "https://paperclip.example.test", request,
   })
   return {
-    tool, repositories, products, comments, publications,
-    input: { commit: "a".repeat(40), title: "Multi-repository change", body: "Awaiting review." },
-    failRegistration(value) { failRegistration = value },
-    branch(value) { returnedBranch = value },
+    publication, publications, children, products, comments, task, repositories,
+    tool: name => publication.tools.find(tool => tool.name === name),
+    failHandoff: value => { failHandoff = value },
+    failRegistration: value => { failRegistration = value },
+    liveInspector: value => { liveInspector = value },
   }
 }
 
-test("Hosted publication selects a writable folder alias while retaining the remote repository identity", async t => {
-  const f = fixture(t, true)
-  assert.deepEqual(f.tool.parameters.properties.repository.enum, ["first", "second"])
-  await f.tool.execute({ ...f.input, repository: "first" })
-  assert.equal(f.publications[0].repositoryId, "44444444-4444-4444-8444-444444444444")
-  await assert.rejects(f.tool.execute({ ...f.input, repository: "reference" }), /writable repository/)
+test("ordinary agents receive only branch submission and hand off idempotently without creating a PR", async t => {
+  const f = fixture(t)
+  assert.deepEqual(f.publication.tools.map(tool => tool.name), ["submit_branch_for_inspection"])
+  const input = { repository: "main", commit, title: "Feature", body: "Review this change." }
+  const receipt = await f.tool("submit_branch_for_inspection").execute(input)
+  assert.equal(receipt.reviewIssueId, "review-task")
+  assert.equal(f.children[0].assigneeAgentId, inspectorId)
+  assert.ok(f.children[0].description.includes(submissionId))
+  assert.ok(f.children[0].description.includes(`Repository URL: ${f.repositories[0].source}`))
+  assert.ok(f.children[0].description.includes("Branch: u/w01/feature"))
+  assert.ok(f.children[0].description.includes(`Remote commit: ${remoteCommit}`))
+  assert.equal(f.publications.find(call => call.mode === "submit_branch").readableBranchNames, true)
+  await f.tool("submit_branch_for_inspection").execute(input)
+  assert.equal(f.children.length, 1)
+  assert.equal(f.publications.filter(call => call.mode === "submit_branch").length, 1)
+  assert.equal(f.products.length, 0)
+  assert.equal(f.publication.registrationError, null)
 })
 
-test("Hosted publication requests readable worker/feature branches and preserves saved branches across title edits", async t => {
-  const f = fixture(t)
-  const receipt = await f.tool.execute({ ...f.input, repository: "First", title: "Add Postgre VNet" })
-  assert.equal(f.publications[0].readableBranchNames, true)
-  assert.equal(receipt.branch, "u/w01/add-postgre-vnet")
-  const retry = await f.tool.execute({ ...f.input, repository: "First", title: "Edited PR title" })
-  assert.equal(retry.branch, receipt.branch)
-  assert.equal(f.products.length, 1)
-})
-
-test("Hosted publication accepts bounded collision suffixes and legacy receipts without duplicate registration", async t => {
-  const f = fixture(t)
-  f.branch("u/w09/multi-repository-change-10")
-  await f.tool.execute({ ...f.input, repository: "First" })
-  f.branch(`u/hosted/11111111-1111-4111-8111-111111111111/${f.input.commit}`)
-  await f.tool.execute({ ...f.input, repository: "Second" })
-  await f.tool.execute({ ...f.input, repository: "Second" })
-  assert.equal(f.products.length, 2)
+test("no inspector allows direct PR publication and reconciles registration with identical inputs", async t => {
+  const f = fixture(t, false, false)
+  assert.deepEqual(f.publication.tools.map(tool => tool.name), ["publish_pull_request"])
+  const input = { repository: "main", commit, title: "Feature", body: "Review", isDraft: true }
+  f.failRegistration(true)
+  await assert.rejects(f.tool("publish_pull_request").execute(input), /PR exists.*registration is incomplete/)
+  assert.match(f.publication.registrationError, /registration is incomplete/)
+  f.failRegistration(false)
+  const receipt = await f.tool("publish_pull_request").execute(input)
+  assert.equal(receipt.number, 12)
+  assert.equal(f.products[0].status, "draft")
+  assert.equal(f.publications.at(-1).mode, "publish_pull_request")
+  assert.equal(f.publications.at(-1).readableBranchNames, true)
+  assert.equal(f.publication.registrationError, null)
+  await assert.rejects(f.tool("publish_pull_request").execute({ ...input, body: "Different" }), /same title, body/)
+  await f.tool("publish_pull_request").execute(input)
   assert.equal(f.publications.at(-1).existingOnly, true)
+  assert.equal(f.products.length, 1)
+  assert.equal(f.comments.length, 1)
+  assert.equal(f.children.length, 0)
 })
 
-for (const branch of ["u/alice/multi-repository-change", "u/w00/multi-repository-change",
-  "u/w01/unrelated-feature", "u/w01/multi-repository-change-11", "u/w01/../main"]) {
-  test(`Hosted publication rejects an unexpected readable branch: ${branch}`, async t => {
-    const f = fixture(t)
-    f.branch(branch)
-    await assert.rejects(f.tool.execute({ ...f.input, repository: "First" }), /invalid PR receipt/)
-    assert.equal(f.products.length, 0)
-  })
-}
+test("missing assignment policy and newly created inspector prevent direct provider mutation", async t => {
+  const f = fixture(t, false, false)
+  const input = { repository: "main", commit, title: "Feature", body: "Review" }
+  f.liveInspector(true)
+  await assert.rejects(f.tool("publish_pull_request").execute(input), /PR Inspector exists/)
+  delete f.task.prPolicy
+  await assert.rejects(f.tool("publish_pull_request").execute(input), /trusted assignment/)
+  assert.equal(f.publications.length, 0)
+})
 
-for (const isDraft of [undefined, false, true]) {
-  test(`Hosted publication honors draft mode ${isDraft ?? "default"} and registers its actual review status`, async t => {
-    const f = fixture(t)
-    const receipt = await f.tool.execute({ ...f.input, repository: "First", ...(isDraft === undefined ? {} : { isDraft }) })
-    assert.equal(f.publications[0].isDraft, isDraft === true)
-    assert.equal(receipt.isDraft, isDraft === true)
-    assert.equal(f.products[0].status, isDraft ? "draft" : "ready_for_review")
-    assert.equal(f.products[0].metadata.isDraft, isDraft === true)
-  })
-}
+test("Devbox inspector records an external PR link without provider calls or provider credentials", async t => {
+  const f = fixture(t, true)
+  assert.deepEqual(f.publication.tools.map(tool => tool.name), ["record_pull_request"])
+  const input = { url: "https://code.example.test/project/_git/main/pullrequest/12", title: "Feature", provider: "azure_devops" }
+  const receipt = await f.tool("record_pull_request").execute(input)
+  assert.equal(receipt.url, input.url)
+  assert.equal(receipt.verification, "not_verified")
+  await f.tool("record_pull_request").execute(input)
+  assert.equal(f.publications.length, 0)
+  assert.equal(f.products.length, 1)
+  assert.equal(f.comments.length, 1)
+  assert.equal(f.products[0].metadata.publicationMode, "external")
+})
 
-test("Hosted publication rejects invalid draft mode before any remote operation", async t => {
+test("failed review handoff stays an execution failure until the same submission reconciles", async t => {
   const f = fixture(t)
-  await assert.rejects(f.tool.execute({ ...f.input, repository: "First", isDraft: "false" }), /isDraft must be a boolean/)
+  const input = { repository: "main", commit, title: "Feature", body: "Review" }
+  f.failHandoff(true)
+  await assert.rejects(f.tool("submit_branch_for_inspection").execute(input), /saved.*handoff is unconfirmed/)
+  assert.match(f.publication.registrationError, /handoff is incomplete/)
+  f.failHandoff(false)
+  await f.tool("submit_branch_for_inspection").execute(input)
+  assert.equal(f.publication.registrationError, null)
+  assert.equal(f.children.length, 1)
+})
+
+test("external PR postback rejects unsafe links, credentials and task overrides", async t => {
+  const f = fixture(t, true)
+  const input = { url: "https://code.example.test/pull/12", title: "Feature", provider: "azure_devops" }
+  await assert.rejects(f.tool("record_pull_request").execute({ ...input, url: "https://secret@code.example.test/pull/12" }), /without credentials/)
+  await assert.rejects(f.tool("record_pull_request").execute({ ...input, issueId: "other-task" }), /only a URL/)
+  await assert.rejects(f.tool("record_pull_request").execute({ ...input, credentials: "secret" }), /only a URL/)
+  const unassigned = createPrInspectorPostback({ task: { ...f.task, context: {} }, apiUrl: "https://paperclip.example.test" })
+  await assert.rejects(unassigned.tools[0].execute(input), /assigned Paperclip issue/)
   assert.equal(f.publications.length, 0)
   assert.equal(f.products.length, 0)
 })
 
-test("Hosted publication registers separate repository PRs and reconciles only the selected saved receipt", async t => {
-  const f = fixture(t)
-  assert.deepEqual(f.tool.parameters.properties.repository.enum, ["First", "Second"])
-  const first = await f.tool.execute({ ...f.input, repository: "First" })
-  const second = await f.tool.execute({ ...f.input, repository: "Second" })
-  assert.notEqual(first.repository, second.repository)
-  assert.equal(f.products.length, 2)
-  assert.equal(f.comments.length, 2)
-  assert.deepEqual(f.publications.map(input => input.existingOnly), [false, false])
-
-  const retry = await f.tool.execute({ ...f.input, repository: "First" })
-  assert.equal(retry.number, first.number)
-  assert.equal(f.publications.at(-1).existingOnly, true)
-  assert.equal(f.products.length, 2)
-  assert.equal(f.comments.length, 2)
-  await assert.rejects(f.tool.execute({ ...f.input, repository: "Reference" }), /writable repository/)
-  assert.equal(f.publications.length, 3)
-})
-
-test("Hosted publication retains another repository's registration failure until that receipt is repaired", async t => {
-  const f = fixture(t)
+test("external PR postback failures remain execution failures until the same link reconciles", async t => {
+  const f = fixture(t, true)
+  const input = { url: "https://code.example.test/pull/12", title: "Feature", provider: "azure_devops" }
   f.failRegistration(true)
-  await assert.rejects(f.tool.execute({ ...f.input, repository: "Second" }), /registration is incomplete/)
-  assert.match(f.tool.registrationError, /PR exists/)
+  await assert.rejects(f.tool("record_pull_request").execute(input), /HTTP 503/)
+  assert.match(f.publication.registrationError, /postback is incomplete/)
   f.failRegistration(false)
-  await f.tool.execute({ ...f.input, repository: "First" })
-  assert.match(f.tool.registrationError, /PR exists/)
-  await f.tool.execute({ ...f.input, repository: "Second" })
-  assert.equal(f.tool.registrationError, null)
-  assert.equal(f.products.length, 2)
+  await f.tool("record_pull_request").execute(input)
+  assert.equal(f.publication.registrationError, null)
+  assert.equal(f.publications.length, 0)
 })
 
-test("Hosted publication uses arbitrary provider descriptors and preserves retry reconciliation", async t => {
-  const f = fixture(t, false, "contoso")
-  const input = { ...f.input, repository: "First" }
-  const first = await f.tool.execute(input)
-  assert.equal(first.provider, "contoso")
-  assert.equal(first.repository, "contoso/First")
-  assert.equal(first.url, "https://code.example/contoso/First/pull/1")
-  assert.match(first.branch, /^agent\//)
-  await f.tool.execute(input)
-  assert.equal(f.publications.at(-1).existingOnly, true)
-  assert.equal(f.products.length, 1)
-})
-
-test("Hosted publication rejects missing or insecure descriptors before attempting publication", () => {
-  const repository = { id: "first", name: "First", readOnly: false }
-  for (const publication of [
-    undefined,
-    { provider: "contoso", repository: "contoso/First", pullRequestUrlTemplate: "http://code.example/pull/{number}", branchTemplate: "agent/{commit}" },
-    { provider: "contoso", repository: "contoso/First", pullRequestUrlTemplate: "https://code.example/pull/{other}", branchTemplate: "agent/{commit}" },
-  ]) {
-    assert.throws(() => createHostedPublicationTool({
-      repositories: [{ ...repository, publication }], task: {}, apiUrl: "https://paperclip.example",
-      request: async () => { throw new Error("Parent must not be called") },
-    }), /requires/)
-  }
+test("read-only repositories and credential-bearing publication descriptors are rejected", async t => {
+  const f = fixture(t)
+  const input = { repository: "Reference", commit, title: "Feature", body: "Review" }
+  await assert.rejects(f.tool("submit_branch_for_inspection").execute(input), /writable repository/)
+  f.repositories[0].publication.pullRequestUrlTemplate = "https://secret@code.example.test/pull/{number}"
+  await assert.rejects(f.tool("submit_branch_for_inspection").execute({ ...input, repository: "main" }), /HTTPS publication descriptor/)
+  assert.equal(f.publications.length, 0)
 })

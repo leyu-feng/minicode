@@ -8,11 +8,12 @@ import { assertBoard, assertBoardOrAgent, assertCompanyAccess } from "./authz.js
 import { logActivity } from "../services/activity-log.js";
 import { agentPoolService } from "../services/agent-pools.js";
 import { agentPoolBroker } from "../services/agent-pool-broker.js";
-import { unauthorized, notFound } from "../errors.js";
+import { unauthorized, notFound, forbidden } from "../errors.js";
 import { agentPoolSkillsArchive } from "../services/agent-pool-skills.js";
 import { authenticateHostedWorkerProvider } from "../services/entra-hosted-workers.js";
 import { agentGitHubAuthService } from "../services/agent-github-auth.js";
 import { agentPoolGitIdentitySchema } from "@paperclipai/shared";
+import { prInspectorService } from "../services/pr-inspector.js";
 
 export function agentPoolPairingRoutes(db: Db) {
   const router = Router();
@@ -92,6 +93,26 @@ export function agentPoolRoutes(db: Db) {
   const router = Router();
   const svc = agentPoolService(db);
   const github = agentGitHubAuthService(db);
+  const inspectors = prInspectorService(db);
+  router.get("/companies/:companyId/pr-inspector", async (req, res) => {
+    assertBoardOrAgent(req);
+    const companyId = z.string().uuid().parse(req.params.companyId);
+    assertCompanyAccess(req, companyId);
+    res.setHeader("Cache-Control", "no-store");
+    res.json(await inspectors.get(companyId));
+  });
+  router.post("/companies/:companyId/pr-inspector", validate(z.object({}).strict()), async (req, res) => {
+    assertBoard(req);
+    const companyId = z.string().uuid().parse(req.params.companyId);
+    assertCompanyAccess(req, companyId);
+    const state = await inspectors.create(companyId, req.actor.userId ?? null);
+    await logActivity(db, {
+      companyId, actorType: "user", actorId: req.actor.userId ?? "local-board",
+      action: "company.pr_inspector_created", entityType: "company", entityId: companyId,
+      details: { agentId: state.agentId },
+    });
+    res.json(state);
+  });
   router.use(agentPoolSkillsRoutes());
   const login = "/companies/:companyId/agents/:agentId/github-login";
   router.use(login, (req, res, next) => {

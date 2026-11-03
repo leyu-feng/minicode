@@ -35,14 +35,14 @@ async function harness(reconnectMs = 1000) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
   async function worker(id = randomUUID(), instanceId = randomUUID(), runId: string | null = null, ready = true, capabilities: string[] = ["skill_bundle_v1"],
-    identity: { executionId?: string; poolName?: string } = {}) {
+    identity: { executionId?: string; poolName?: string } = {}, inspectorCompatible = true) {
     identities.set(id, identity);
     const socket = new WebSocket(`ws://127.0.0.1:${port}?id=${id}`);
     const messages: Array<Record<string, unknown>> = [];
     socket.on("message", (data) => messages.push(JSON.parse(data.toString())));
     await once(socket, "open");
     const send = (value: object) => socket.send(JSON.stringify(value));
-    send({ type: "hello", protocolVersion: 1, instanceId, runId, capabilities });
+    send({ type: "hello", protocolVersion: 1, instanceId, runId, capabilities: [...(inspectorCompatible ? ["pr_inspector_v1"] : []), ...capabilities] });
     await vi.waitFor(() => expect(messages.length || socket.readyState === WebSocket.CLOSED).toBeTruthy());
     const welcome = messages.shift();
     if (welcome && !runId && ready) {
@@ -66,6 +66,13 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("does not dispatch to old workers that lack PR Inspector enforcement", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1"], {}, false);
+    await expect(broker.execute(context())).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
+    expect(client.messages).toEqual([]);
+    expect(broker.status(client.id)).toBe("idle");
+  });
   it("preserves the actual final response without inferring task completion from exit zero", async () => {
     const { broker, worker } = await harness();
     const client = await worker();
@@ -103,11 +110,13 @@ describe("AgentPool execution channel", () => {
       agentId: ctx.agent.id, companyId: ctx.agent.companyId, runId: ctx.runId,
     };
     const gitIdentity = { name: "Operator", email: "operator@example.test" };
-    broker.prepareExecution = async () => ({ githubCredential, gitIdentity });
+    const prPolicy = { inspectorAgentId: randomUUID(), isInspector: false };
+    broker.prepareExecution = async () => ({ githubCredential, gitIdentity, prPolicy });
     const result = broker.execute(ctx);
     const task = await client.take("task");
     expect(task.githubCredential).toEqual(githubCredential);
     expect(task.gitIdentity).toEqual(gitIdentity);
+    expect(task.prPolicy).toEqual(prPolicy);
     expect(JSON.stringify(task.context)).not.toContain("private-agent-token");
     expect(JSON.stringify(ctx)).not.toContain("private-agent-token");
     expect(legacy.messages).toEqual([]);

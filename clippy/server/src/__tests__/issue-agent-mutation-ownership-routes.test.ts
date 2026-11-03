@@ -74,6 +74,7 @@ const mockWorkProductService = vi.hoisted(() => ({
   remove: vi.fn(),
   update: vi.fn(),
 }));
+const mockPrPostbackAllowed = vi.hoisted(() => vi.fn(async (_companyId: string, _agentId: string) => {}));
 
 const mockStorageService = vi.hoisted(() => ({
   provider: "local_disk",
@@ -195,6 +196,9 @@ function registerRouteMocks() {
 
   vi.doMock("../services/work-products.js", () => ({
     workProductService: () => mockWorkProductService,
+  }));
+  vi.doMock("../services/pr-inspector.js", () => ({
+    prInspectorService: () => ({ assertPrPostbackAllowed: mockPrPostbackAllowed }),
   }));
 
   vi.doMock("../services/external-objects.js", () => ({
@@ -469,6 +473,7 @@ describe("agent issue mutation checkout ownership", () => {
     // by an earlier test.
     routeModules.value.__clearIssueListResponseCacheForTests();
     vi.clearAllMocks();
+    mockPrPostbackAllowed.mockReset().mockResolvedValue(undefined);
     mockIssueTreeControlService.getActivePauseHoldGate.mockReset().mockResolvedValue(null);
     mockChatRunRetries.prepareFailedChatRunRetry.mockReset();
     mockChatRunRetries.processFailedChatRunRetry.mockReset();
@@ -1177,6 +1182,43 @@ describe("agent issue mutation checkout ownership", () => {
         }),
       }),
     );
+  });
+
+  it("rejects an ordinary agent's PR postback before recording its link", async () => {
+    mockPrPostbackAllowed.mockRejectedValue(new HttpError(403, "Only this company's PR Inspector may record a PR"));
+    await request(createApp(ownerActor())).post(`/api/issues/${issueId}/work-products`).send({
+      type: "pull_request", provider: "github", title: "Externally created PR",
+      url: "https://github.com/example/project/pull/12",
+    }).expect(403);
+    expect(mockPrPostbackAllowed).toHaveBeenCalledWith(companyId, ownerAgentId);
+    expect(mockWorkProductService.createForIssue).not.toHaveBeenCalled();
+  });
+
+  it("does not allow bypassing PR postback policy by changing an artifact's type", async () => {
+    mockPrPostbackAllowed.mockRejectedValue(new HttpError(403, "Only this company's PR Inspector may record a PR"));
+    await request(createApp(ownerActor())).patch("/api/work-products/product-1").send({
+      type: "pull_request", provider: "github", url: "https://github.com/example/project/pull/12",
+    }).expect(403);
+    expect(mockPrPostbackAllowed).toHaveBeenCalledWith(companyId, ownerAgentId);
+    expect(mockWorkProductService.update).not.toHaveBeenCalled();
+  });
+
+  it("restricts PR URL replacement but preserves ordinary status updates", async () => {
+    mockWorkProductService.getById.mockResolvedValue({
+      id: "product-1", issueId, companyId, type: "pull_request",
+    });
+    mockPrPostbackAllowed.mockRejectedValue(new HttpError(403, "Only this company's PR Inspector may record a PR"));
+    const app = await createApp(ownerActor());
+    await request(app).patch("/api/work-products/product-1").send({
+      url: "https://github.com/example/project/pull/13",
+    }).expect(403);
+    expect(mockWorkProductService.update).not.toHaveBeenCalled();
+    mockPrPostbackAllowed.mockClear();
+    await request(app).patch("/api/work-products/product-1").send({
+      status: "ready_for_review",
+    }).expect(200);
+    expect(mockPrPostbackAllowed).not.toHaveBeenCalled();
+    expect(mockWorkProductService.update).toHaveBeenCalled();
   });
 
   it("falls back to GitHub commit stats when the authenticated run has no diff event", async () => {

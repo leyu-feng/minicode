@@ -11,6 +11,16 @@ import { agentRecords } from "./adapters/records.js";
 import { assertRootDatabase, createLifecycleStore } from "./adapters/postgres.js";
 import { createLifecycleWorker } from "./application/worker.js";
 import type { LifecycleDriver } from "./application/ports.js";
+import type { CreateAgentData, CreateAgentOptions } from "../../lib/agent-records.js";
+import type { ActivityPublication } from "../../types/activity-publication.js";
+
+// The caller holds the company accounting lock and schedules lifecycle work after commit.
+export function requestAgentHireInTransaction(db: Db, effects: LifecycleEffects, companyId: string,
+  data: CreateAgentData, options: CreateAgentOptions, publications: ActivityPublication[]) {
+  return agentRecords(db, {
+    ...effects, transaction: (_db, _companyId, work) => work(db, publications),
+  }).create(companyId, data, options);
+}
 
 export { AgentLifecycleConflict, canConfigureAgentConnection, isAgentAwaitingSetup } from "./domain/policy.js";
 

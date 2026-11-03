@@ -41,7 +41,8 @@ export function useAgentPoolSelection({
   const duplicate = mode === "new" && Boolean(existing);
   const validName = agentPoolNameSchema.safeParse(name).success;
   const repositoryConfig: { primaryRepositoryId?: string; referenceRepositoryIds?: string[]; harness?: string } = existing?.type === "hosted"
-    ? { ...(primaryRepositoryId ? { primaryRepositoryId } : {}), referenceRepositoryIds, harness } : {};
+    ? { ...(primaryRepositoryId ? { primaryRepositoryId } : {}), referenceRepositoryIds, harness }
+    : {};
   return {
     pools, name, mode, modeChoice, duplicate, companyId,
     repositoryConfig,

@@ -17,6 +17,7 @@ import { createDb, companies, agents, authUsers, heartbeatRuns, agentPools, agen
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentPoolService, hashAgentPoolToken } from "../services/agent-pools.js";
 import { agentGitHubAuthService } from "../services/agent-github-auth.js";
+import { prInspectorService } from "../services/pr-inspector.js";
 import { agentPoolPairingRoutes, agentPoolRoutes } from "../routes/agent-pools.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { setupAgentPoolWebSocketServer } from "../realtime/agent-pool-ws.js";
@@ -125,8 +126,8 @@ const execFileAsync = promisify(execFile);
       .rejects.toThrow("not available");
     const devbox = await svc.create(companyId, "local");
     await expect(svc.validateAgentRepositories(companyId, { name: devbox.name, harness: "pi" }))
-      .rejects.toThrow("default Hosted pool");
-    await expect(svc.harnesses(companyId, devbox.id)).rejects.toThrow("Only the default pool");
+      .rejects.toThrow("Hosted pools");
+    await expect(svc.harnesses(companyId, devbox.id)).resolves.toEqual([{ id: "default", name: "Default" }]);
   });
 
   it("rejects board revocation of Hosted workers without changing their credentials", async () => {
@@ -427,6 +428,81 @@ const execFileAsync = promisify(execFile);
     result.use(errorHandler);
     return result;
   }
+
+  it("allows direct PRs without an inspector and limits inspector creation to the company board", async () => {
+    const url = `/api/companies/${companyId}/pr-inspector`;
+    expect((await request(app()).get(url).expect(200)).body).toEqual({
+      agentId: null, specialRole: "pr_inspector",
+    });
+    const agentApp = app({ type: "agent", agentId: randomUUID(), companyId, source: "api_key" });
+    await request(agentApp).post(url).send({}).expect(403);
+    await request(app()).post(`/api/companies/${otherCompanyId}/pr-inspector`).send({}).expect(403);
+    await request(app()).post(url).send({ agentId: randomUUID() }).expect(400);
+    expect(await prInspectorService(db).assignmentPolicy(companyId, randomUUID())).toEqual({
+      inspectorAgentId: null, isInspector: false,
+    });
+  });
+
+  it("creates exactly one Devbox inspector and pool and restores direct PRs after termination", async () => {
+    const url = `/api/companies/${companyId}/pr-inspector`;
+    const [first, second] = await Promise.all([
+      request(app()).post(url).send({}),
+      request(app()).post(url).send({}),
+    ]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body.agentId).toBe(first.body.agentId);
+    const rows = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: first.body.agentId, name: "Pull Request (PR) Inspector",
+      adapterType: "agent_pool", adapterConfig: { name: "pr-inspector", harness: "default" },
+    });
+    expect(await db.select().from(agentPools).where(eq(agentPools.companyId, companyId))).toMatchObject([
+      { name: "pr-inspector", type: "devbox", hostedPoolId: null, hostedApiUrl: null, hostedAudience: null },
+    ]);
+    expect(await prInspectorService(db).assignmentPolicy(companyId, first.body.agentId)).toEqual({
+      inspectorAgentId: first.body.agentId, isInspector: true,
+    });
+    expect(await prInspectorService(db).assignmentPolicy(companyId, randomUUID())).toMatchObject({ isInspector: false });
+    const ctx: AdapterExecutionContext = {
+      runId: randomUUID(), agent: { ...rows[0], adapterConfig: rows[0].adapterConfig },
+      config: rows[0].adapterConfig, context: {}, runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      onLog: async () => {},
+    };
+    await expect(agentPoolService(db).prepareExecution(ctx)).resolves.toEqual({
+      prPolicy: { inspectorAgentId: first.body.agentId, isInspector: true },
+    });
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, first.body.agentId));
+    expect(await prInspectorService(db).assignmentPolicy(companyId, randomUUID()))
+      .toEqual({ inspectorAgentId: first.body.agentId, isInspector: false });
+    await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, first.body.agentId));
+    expect(await prInspectorService(db).assignmentPolicy(companyId, first.body.agentId))
+      .toEqual({ inspectorAgentId: null, isInspector: false });
+    const recreated = await request(app()).post(url).send({}).expect(200);
+    expect(recreated.body.agentId).not.toBe(first.body.agentId);
+    expect(await db.select().from(agentPools).where(eq(agentPools.companyId, companyId))).toHaveLength(1);
+    expect(await prInspectorService(db).get(otherCompanyId)).toMatchObject({ agentId: null });
+  });
+
+  it("rejects an incompatible inspector pool without creating an agent", async () => {
+    await db.insert(agentPools).values({ companyId, name: "pr-inspector", type: "hosted" });
+    await request(app()).post(`/api/companies/${companyId}/pr-inspector`).send({}).expect(409);
+    expect(await db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(0);
+    expect(await prInspectorService(db).get(companyId)).toMatchObject({ agentId: null });
+  });
+
+  it("limits external PR postbacks to the inspector while it exists", async () => {
+    const svc = prInspectorService(db);
+    const producerId = randomUUID();
+    await expect(svc.assertPrPostbackAllowed(companyId, producerId)).resolves.toBeUndefined();
+    const inspector = await svc.create(companyId, "board-user");
+    await expect(svc.assertPrPostbackAllowed(companyId, producerId)).rejects.toThrow(/Only.*PR Inspector/);
+    await expect(svc.assertPrPostbackAllowed(companyId, inspector.agentId!)).resolves.toBeUndefined();
+    await expect(svc.assertPrPostbackAllowed(otherCompanyId, producerId)).resolves.toBeUndefined();
+    await db.delete(agents).where(eq(agents.id, inspector.agentId!));
+    await expect(svc.assertPrPostbackAllowed(companyId, producerId)).resolves.toBeUndefined();
+  });
 
   it("isolates GitHub login APIs by company, agent and board access", async () => {
     const foreignAgent = randomUUID();

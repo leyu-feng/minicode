@@ -235,6 +235,7 @@ import type {
   taskWatchdogService,
 } from "../services/task-watchdogs.js";
 import { logger } from "../middleware/logger.js";
+import { prInspectorService } from "../services/pr-inspector.js";
 import {
   badRequest,
   conflict,
@@ -11273,6 +11274,8 @@ export function issueRoutes(
         projectId: req.body.projectId ?? issue.projectId ?? null,
         sourceTrust: await sourceTrustForActorWrite(issue, actor),
       };
+      if (req.actor.type === "agent" && createInput.type === "pull_request")
+        await prInspectorService(db).assertPrPostbackAllowed(issue.companyId, req.actor.agentId);
       const createdByRunId = await resolveWorkProductCreatedByRunId(
         req,
         res,
@@ -11699,6 +11702,10 @@ export function issueRoutes(
         return;
       const actor = getActorInfo(req);
       const patch = { ...req.body };
+      if (req.actor.type === "agent" && (patch.type === "pull_request"
+        || (existing.type === "pull_request" && ["type", "provider", "url", "externalId", "metadata"]
+          .some(key => Object.hasOwn(patch, key)))))
+        await prInspectorService(db).assertPrPostbackAllowed(issue.companyId, req.actor.agentId);
       const createdByRunId = await resolveWorkProductCreatedByRunId(
         req,
         res,

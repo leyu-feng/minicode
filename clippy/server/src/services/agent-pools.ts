@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
-import { agentPools, agentPoolWorkers, companies, type Db } from "@paperclipai/db";
+import { agents, agentPools, agentPoolWorkers, companies, heartbeatRuns, type Db } from "@paperclipai/db";
 import { AGENT_POOL_CLAUDECODE_DEFAULT_MODEL, agentPoolNameSchema, agentPoolHarnessIdSchema, agentPoolHarnessModelSchema,
   agentPoolRequiresGitHubLogin, hostedAgentRepositoriesSchema, type AgentPool, type HostedWorkerRepository,
   type hostedAgentPoolWorkerSchema, type hostedAgentPoolSlotsSchema } from "@paperclipai/shared";
@@ -13,6 +13,7 @@ import type { AdapterExecutionContext } from "../adapters/types.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { logger } from "../middleware/logger.js";
 import { agentGitHubAuthService } from "./agent-github-auth.js";
+import { prInspectorService } from "./pr-inspector.js";
 
 type Pool = typeof agentPools.$inferSelect;
 
@@ -227,6 +228,8 @@ export function agentPoolService(db: Db) {
       return client.repositories(remoteId);
     },
     async harnesses(companyId: string, poolId: string) {
+      const pool = await get(companyId, poolId);
+      if (pool.type === "devbox") return [{ id: "default", name: "Default" }];
       const { client, poolId: remoteId } = provider(await provision(companyId, poolId));
       return client.harnesses(remoteId);
     },
@@ -249,7 +252,7 @@ export function agentPoolService(db: Db) {
         return config;
       }
       if (pool.type !== "hosted") {
-        if (harness !== "default") throw badRequest("Harness selection is available only in the default Hosted pool.");
+        if (harness !== "default") throw badRequest("Harness selection is only available for Hosted pools.");
         return config;
       }
       const { client, poolId: remoteId } = provider(await provision(companyId, pool.id, signal));
@@ -272,19 +275,22 @@ export function agentPoolService(db: Db) {
       }
     },
     async prepareExecution(ctx: AdapterExecutionContext) {
+      const prPolicy = await prInspectorService(db).assignmentPolicy(ctx.agent.companyId, ctx.agent.id);
       const name = agentPoolNameSchema.parse(ctx.config.name ?? "default");
       const harness = agentPoolHarnessIdSchema.parse(ctx.config.harness ?? "default");
       const [pool] = await db.select().from(agentPools)
         .where(and(eq(agentPools.companyId, ctx.agent.companyId), eq(agentPools.name, name)));
+      if (prPolicy.isInspector && (pool?.type !== "devbox" || harness !== "default"))
+        throw conflict("The PR Inspector requires the default Devbox harness.");
       if (!pool || pool.type !== "hosted") {
-        if (harness !== "default") throw badRequest("Harness selection requires the default Hosted pool.");
-        return;
+        if (harness !== "default") throw badRequest("Harness selection is only available for Hosted pools.");
+        return { prPolicy };
       }
-      const deadline = AbortSignal.timeout(118_000);
-      const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline;
       const { githubCredential, gitIdentity } = agentPoolRequiresGitHubLogin(harness)
         ? await agentGitHubAuthService(db).assignmentCredentials(ctx.agent.companyId, ctx.agent.id, ctx.runId)
         : { githubCredential: undefined, gitIdentity: undefined };
+      const deadline = AbortSignal.timeout(118_000);
+      const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline;
       signal.throwIfAborted();
       const { client, poolId: remoteId } = provider(await provision(ctx.agent.companyId, pool.id, signal));
       if (harness !== "default" && !(await client.harnesses(remoteId, signal)).some(entry => entry.id === harness)) {
@@ -299,10 +305,11 @@ export function agentPoolService(db: Db) {
         const worker = agentPoolBroker.reservedWorker(ctx.runId);
         if (worker?.executionId) await client.claim(remoteId, {
           workerId: worker.id, runId: ctx.runId, agentId: ctx.agent.id, gitIdentity,
+          prInspectorAgentId: prPolicy.inspectorAgentId,
         }, signal);
         return true;
       };
-      if (await reserve()) return { githubCredential, gitIdentity };
+      if (await reserve()) return { githubCredential, gitIdentity, prPolicy };
       const pending = waiting.get(pool.id) ?? { runs: new Set<string>(), tail: Promise.resolve() };
       waiting.set(pool.id, pending);
       pending.runs.add(ctx.runId);
@@ -345,7 +352,7 @@ export function agentPoolService(db: Db) {
         }
         if (pending.runs.size === 0 && waiting.get(pool.id) === pending) waiting.delete(pool.id);
       }
-      return { githubCredential, gitIdentity };
+      return { githubCredential, gitIdentity, prPolicy };
     },
     async create(companyId: string, name: string) {
       await list(companyId);

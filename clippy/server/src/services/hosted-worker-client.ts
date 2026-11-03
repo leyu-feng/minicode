@@ -63,10 +63,10 @@ export function hostedWorkerClient(config: HostedWorkerConfig) {
       await request("POST", path(poolId), 202, hostedWorkerDemandSchema.parse({ itemsWaiting }), signal);
     },
     async claim(poolId: string, assignment: {
-      workerId: string; runId: string; agentId: string; gitIdentity?: AgentPoolGitIdentity;
+      workerId: string; runId: string; agentId: string; gitIdentity?: AgentPoolGitIdentity; prInspectorAgentId?: string | null;
     }, signal?: AbortSignal) {
       const input = z.object({ workerId: z.string().uuid(), runId: z.string().uuid(), agentId: z.string().uuid(),
-        gitIdentity: agentPoolGitIdentitySchema.optional() }).parse(assignment);
+        gitIdentity: agentPoolGitIdentitySchema.optional(), prInspectorAgentId: z.string().uuid().nullable().optional() }).parse(assignment);
       await request("POST", `${path(poolId)}/claim`, 200, input, signal);
     },
     async delete(poolId: string) { await request("DELETE", path(poolId), 204); },

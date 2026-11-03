@@ -16,7 +16,7 @@ export function HostedHarnessSelect({ companyId, poolName, value, onChange }: {
   });
   if (pools.error) return <p role="alert" className="text-sm text-destructive">{pools.error.message}</p>;
   if (pool?.type !== "hosted") return null;
-  if (harnesses.isPending) return <p role="status" className="text-sm text-muted-foreground">Loading hosted harnesses...</p>;
+  if (harnesses.isPending) return <p role="status" className="text-sm text-muted-foreground">Loading Hosted harnesses...</p>;
   if (harnesses.error) return <p role="alert" className="text-sm text-destructive">{harnesses.error.message}</p>;
   const available = harnesses.data.some(entry => entry.id === value);
   return <label className="block space-y-2 text-sm">

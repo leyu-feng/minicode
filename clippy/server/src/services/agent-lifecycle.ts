@@ -9,6 +9,13 @@ import { deleteAgentDependencies } from "./agent-deletion.js";
 import { prepareAgentConfiguration, completeAgentConfiguration } from "./agent-configuration.js";
 import { prepareAgentHire, initializeAgentHire, prepareAgentHireApproval, completeAgentHireApproval } from "./agent-hiring.js";
 import { trackIdleWork } from "./task-admission.js";
+import type { CreateAgentData, CreateAgentOptions } from "../lib/agent-records.js";
+import type { ActivityPublication } from "./activity-log.js";
+
+export function requestAgentHireInTransaction(db: Db, companyId: string, data: CreateAgentData,
+  options: CreateAgentOptions, publications: ActivityPublication[]) {
+  return lifecycle.requestAgentHireInTransaction(db, createAgentLifecycleEffects(), companyId, data, options, publications);
+}
 
 export { scheduleAgentLifecycle } from "../modules/agent-lifecycle/index.js";
 export type { LifecycleDriver, LifecycleAgent } from "../modules/agent-lifecycle/index.js";

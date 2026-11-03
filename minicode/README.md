@@ -195,8 +195,12 @@ The `hosted_workspace_v2` capability receives an `all_repositories` descriptor
 instead of primary/reference selections. The parent prepares all repositories
 directly below the non-Git `/ws/repos` root and fetches every configured branch's latest ref before
 model execution. Assignments start at that root. Writable checkouts can be edited
-and committed independently; `publish_pull_request` selects a repository and
-registers each PR with Paperclip. Read-only checkouts are reference material.
+and committed independently. Ordinary agents use `submit_branch_for_inspection`
+to select a repository and automatically hand its branch to the organization's
+PR Inspector when one exists. The inspector reviews and creates the PR externally
+using local Devbox user credentials, then records its link with `record_pull_request`.
+Without an inspector, agents receive `publish_pull_request`, subject
+to a live company-policy check. Read-only checkouts are reference material.
 The provider selects a supervisory repository by marking it `"supervisory": true`
 in the catalog, workspace manifest and trusted assignment descriptors. Its name,
 branch and checkout path are configurable; its resolved checkout becomes `worker_shared`.
@@ -289,6 +293,15 @@ reconciliation without assuming a Git hosting service. For example:
 The trusted parent enforces the admitted run, writable catalog membership and
 any designated-publisher policy. It returns a receipt matching those descriptors;
 the model cannot override repository identity, credentials or publication policy.
+The `pr_inspector_v1` capability is required for every assignment. Trusted
+`prPolicy: {inspectorAgentId, isInspector}` defaults to disabled; the provider
+claim, not model input, grants inspector authority. Publication modes are
+`reconcile_branch` (recover a saved producer submission without local Git),
+`submit_branch` (save a producer branch, never a PR), `inspect_branch` (read its
+complete diff or exact-commit/base file contents), and `create_pull_request`
+(inspector only, exact reviewed commit and review summary required). Missing or
+legacy modes fail closed. The provider must bind review to the current assignment
+before creating a new PR and enforce company, repository and source-agent scope.
 Partner-specific authentication, routes, storage, lifecycle schedules and Git
 hosting adapters belong to the provider, not the AgentPool protocol.
 
@@ -860,6 +873,20 @@ unchanged by the public-log filter.
 Interactive CLI and web logging are unchanged.
 
 #### Harness-owned PR publication
+
+**Current policy:** When the organization's PR Inspector exists, only it may
+create PRs. The board creates the fixed-name inspector from **New Agent** into
+the dedicated `pr-inspector` Devbox pool, using its default harness without
+per-agent GitHub sign-in.
+It reviews Hosted branch submissions and creates PRs outside Paperclip using
+local user credentials. Only the resulting link is posted back through the
+work-products API; Paperclip does not receive those provider credentials.
+Pausing preserves this restriction; termination or deletion removes it.
+Without an inspector, Hosted and configured fixed-repository Devbox agents may
+use `publish_pull_request`. The harness rechecks the live company policy before
+direct publication. Restricted assignments never initialize legacy publishers
+or expose their credentials. If no managed handoff tool exists, report the
+blocker; do not publish through shell commands or alternate endpoints.
 
 **GitHub**
 

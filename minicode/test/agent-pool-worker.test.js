@@ -711,104 +711,102 @@ test("disk monitoring does not cancel the assignment deadline after repository p
   assert.equal(started, true)
 })
 
-test("an unresolved PR registration failure fails the run even if the model claims success", async t => {
-  const issueId = "11111111-1111-4111-8111-111111111111"
-  const commit = "a".repeat(40)
-  let published = false
-  t.mock.method(globalThis, "fetch", async (url, options) => {
-    const route = new URL(url).pathname
-    if (route === `/api/issues/${issueId}`) return Response.json({ id: issueId, assigneeAgentId: agent.id })
-    assert.ok(route.endsWith("/work-products"))
-    return options.method === "GET" ? Response.json([]) : new Response("", { status: 403 })
-  })
+test("an unresolved inspection handoff fails the run even if the model claims success", async t => {
+  let submitted = false
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "inspection-handoff-test-"))
+  const shared = path.join(root, "shared")
+  await fs.mkdir(shared)
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
   class Session extends EventEmitter {
     constructor(options) { super(); this.tool = options.tools[0] }
     async write() {
-      await assert.rejects(this.tool.execute({ commit, title: "CI", body: "Validated" }), /HTTP 403/)
+      await assert.rejects(this.tool.execute({}), /Handoff failed/)
       return { exitCode: 0 }
     }
     interrupt() {}
     dispose() {}
   }
   const fixture = await harness(t, options => new Session(options), {
-    githubRepo: "fixture-owner/repo", githubUser: "fixture-owner",
-    async publisherFactory() {
-      return () => ({ name: "publish_pull_request", description: "Fixture", parameters: { type: "object", properties: {} },
-        async execute() {
-          published = true
-          return { repository: "fixture-owner/repo", number: 1, url: "https://github.com/fixture-owner/repo/pull/1",
-            commit, branch: `minicode/${agent.id}/${commit}`, state: "OPEN", worktreeRemoved: true }
-        } })
-    },
+    workspaceMode: "worktree",
+    cwd: root, hostedWorkspaceMode: "all_repositories",
+    prepareHostedRepositories: async () => ({
+      mode: "all_repositories", cwd: root, workerShared: shared,
+      repositories: [{ id: "main", name: "Main", path: fixture.source, readOnly: false }],
+    }),
+    hostedPublicationTool: () => ({
+      tools: [{ name: "submit_branch_for_inspection", description: "Fixture", parameters: { type: "object", properties: {} },
+        async execute() { submitted = true; throw new Error("Handoff failed") } }],
+      get registrationError() { return submitted ? "Branch inspection handoff is incomplete" : null },
+    }),
   })
   const peer = await fixture.welcome(0)
-  peer.send({ type: "task", runId: "registration-failure", agent, authToken: "fixture-key", context: { issueId } })
+  peer.send({ type: "task", runId: "registration-failure", agent, context: {},
+    repositories: { mode: "all_repositories", repositories: [{ id: "main", name: "Main", readOnly: false }] } })
   await waitUntil(() => peer.messages.some(message => message.type === "result"))
   const result = peer.messages.find(message => message.type === "result")
-  assert.equal(published, true)
+  assert.equal(submitted, true)
   assert.equal(result.exitCode, 1)
-  assert.match(result.error, /GitHub PR exists.*Receipt:.*HTTP 403/)
+  assert.match(result.error, /Branch inspection handoff is incomplete/)
 })
 
-test("Azure worker publication uses its configured provider, users namespace and existing registration flow", async t => {
+test("legacy publication configuration cannot bypass the PR Inspector or expose operator credentials", async t => {
   const previousPat = process.env.AZURE_DEVOPS_EXT_PAT
   process.env.AZURE_DEVOPS_EXT_PAT = "operator-pat-not-for-model-tools"
   t.after(() => {
     if (previousPat === undefined) delete process.env.AZURE_DEVOPS_EXT_PAT
     else process.env.AZURE_DEVOPS_EXT_PAT = previousPat
   })
-  const issueId = "11111111-1111-4111-8111-111111111111", commit = "a".repeat(40)
-  const repository = "fixture/Project/Repository"
-  const pullRequestUrl = number => `https://dev.azure.com/fixture/Project/_git/Repository/pullrequest/${number}`
-  const branchForCommit = (agentId, hash) => `users/alice/minicode-${agentId}-${hash}`
-  const products = [], comments = []
-  t.mock.method(globalThis, "fetch", async (url, options) => {
-    const route = new URL(url).pathname
-    const body = options.body ? JSON.parse(options.body) : null
-    if (route === `/api/issues/${issueId}`) return Response.json({ id: issueId, assigneeAgentId: agent.id })
-    if (route.endsWith("/work-products")) {
-      if (body) products.push({ ...body, id: "product-1", issueId })
-      return Response.json(body ? products.at(-1) : products)
-    }
-    assert.ok(route.endsWith("/comments"))
-    if (body) comments.push({ ...body, id: "comment-1", issueId, authorAgentId: agent.id })
-    return Response.json(body ? comments.at(-1) : comments)
-  })
+  let publisherCreated = false
   class Session extends EventEmitter {
     constructor(options) {
       super()
       assert.equal(options.env.AZURE_DEVOPS_EXT_PAT, undefined)
       assert.ok(!options.instructions.includes("operator-pat-not-for-model-tools"))
-      this.tool = options.tools.find(tool => tool.name === "publish_pull_request")
+      assert.equal(options.tools.find(tool => tool.name === "publish_pull_request"), undefined)
+      assert.match(options.instructions, /PR Inspector/)
     }
     async write() {
-      const receipt = await this.tool.execute({ commit, title: "Feature", body: "Validated" })
-      assert.equal(receipt.branch, branchForCommit(agent.id, commit))
       return { exitCode: 0 }
     }
     interrupt() {}
     dispose() {}
   }
   const fixture = await harness(t, options => new Session(options), {
-    azureDevOpsOrg: "https://dev.azure.com/fixture", azureDevOpsProject: "Project",
-    azureDevOpsRepo: "Repository", azureDevOpsUser: "alice@contoso.test",
-    async azureDevOpsPublisherFactory(config) {
-      assert.equal(config.organization, "https://dev.azure.com/fixture")
-      assert.equal(config.user, "alice@contoso.test")
-      return Object.assign(() => ({
-        name: "publish_pull_request", description: "Azure fixture", parameters: { type: "object", properties: {} },
-        async execute() { return { provider: "azure_devops", repository, number: 12, url: pullRequestUrl(12),
-          commit, branch: branchForCommit(agent.id, commit), state: "OPEN", worktreeRemoved: true } },
-      }), { repository, pullRequestUrl, branchForCommit })
-    },
+    azureDevOpsOrg: "https://code.example.test/fixture", azureDevOpsProject: "Project",
+    azureDevOpsRepo: "Repository", azureDevOpsUser: "operator@example.test",
+    async azureDevOpsPublisherFactory() { publisherCreated = true; throw new Error("Legacy publisher must remain disabled") },
   })
   const peer = await fixture.welcome(0)
-  await executeTask(peer, { runId: "azure-publication", agent, authToken: "fixture-key", context: { issueId } })
-  assert.equal(products.length, 1)
-  assert.equal(products[0].provider, "azure_devops")
-  assert.equal(comments.length, 1)
+  await executeTask(peer, { runId: "azure-publication", agent,
+    prPolicy: { inspectorAgentId: "inspector-a", isInspector: false } })
+  assert.equal(publisherCreated, false)
   await assert.rejects(startAgentPoolWorker({ githubRepo: "fixture/repository",
     azureDevOpsOrg: "https://dev.azure.com/fixture" }), /not both/)
+})
+
+test("default Devbox inspector needs no GitHub login and exposes only external PR postback", async t => {
+  class Session extends EventEmitter {
+    constructor(options) {
+      super()
+      assert.equal(options.tools.find(tool => tool.name === "record_pull_request")?.name, "record_pull_request")
+      assert.equal(options.tools.find(tool => tool.name === "publish_pull_request"), undefined)
+      assert.match(options.instructions, /existing local user credentials/)
+      assert.match(options.instructions, /API postback only/)
+    }
+    async write() { return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, options => new Session(options), {
+    githubRepo: "example/project", githubUser: "fixture-user",
+    publisherFactory: async () => { throw new Error("The inspector must not initialize a system publisher") },
+  })
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, {
+    runId: "devbox-inspector", harness: "default", agent: { ...agent, companyId: "company-a" },
+    authToken: "fixture-token", context: { issueId: "11111111-1111-4111-8111-111111111111" },
+    prPolicy: { inspectorAgentId: agent.id, isInspector: true },
+  })
 })
 
 test("inline instructions are agent-scoped snapshots applied without workspace instruction files", async (t) => {
@@ -820,7 +818,7 @@ test("inline instructions are agent-scoped snapshots applied without workspace i
   }
   const fixture = await harness(t, (options) => { sessions.push(options); return new Session() })
   const peer = await fixture.welcome(0)
-  assert.deepEqual(peer.messages.find(message => message.type === "hello").capabilities, ["inline_instructions_v1", "skill_bundle_v1"])
+  assert.deepEqual(peer.messages.find(message => message.type === "hello").capabilities, ["inline_instructions_v1", "skill_bundle_v1", "pr_inspector_v1"])
   for (const [index, content] of ["Keep reports concise.", "Updated instructions: include evidence."].entries()) {
     const runId = `inline-${index}`
     peer.send({ type: "task", protocolVersion: 1, runId, agent, context: {}, instructions: inlineInstructions(content, `revision-${index}`) })
@@ -1670,22 +1668,10 @@ test("real model tools use committed files in an independent workspace, not the 
       choices: [{ message: { content: JSON.stringify(actions.shift()) } }],
     }), { status: 200, headers: { "Content-Type": "application/json" } })
   })
-  let cwd, publication
+  let cwd
   const fixture = await harness(t, (options) => { cwd = options.cwd; return new AgentSession(options) }, {
     githubRepo: "fixture-owner/repo", githubUser: "publisher-fixture",
-    async publisherFactory(config) {
-      assert.equal(config.repository, "fixture-owner/repo")
-      assert.equal(config.githubUser, "publisher-fixture")
-      return ({ workspace, agentId }) => ({
-        name: "publish_pull_request", description: "Publish the committed revision", parameters: { type: "object" },
-        async execute(args, { signal }) {
-          publication = { workspace, agentId, args }
-          assert.equal(signal.aborted, false)
-          return { repository: "fixture-owner/repo", number: 1, state: "OPEN", commit: args.commit,
-            branch: `minicode/${agentId}/${args.commit}`, url: "https://github.com/fixture-owner/repo/pull/1", worktreeRemoved: true }
-        },
-      })
-    },
+    async publisherFactory() { assert.fail("Legacy GitHub publisher must remain disabled") },
   })
   const shared = path.join(path.dirname(await fs.realpath(fixture.source)), "worker_shared")
   await fs.writeFile(path.join(shared, "shared.txt"), "SHARED_CONFIG_SENTINEL")
@@ -1707,10 +1693,8 @@ test("real model tools use committed files in an independent workspace, not the 
   })
   await waitUntil(() => peer.messages.some((message) => message.type === "result"))
   assert.equal(peer.messages.find((message) => message.type === "result").exitCode, 0)
-  assert.equal(products.length, 1)
-  assert.equal(comments.length, 1)
-  assert.equal(products[0].type, "pull_request")
-  assert.ok(comments[0].body.includes("https://github.com/fixture-owner/repo/pull/1"))
+  assert.equal(products.length, 0)
+  assert.equal(comments.length, 0)
   assert.ok(requests.length > 0)
   assert.ok(requests.every((request) => request.messages[0].role === "system"
     && request.messages[0].content.includes("Repository-specific rule: preserve existing assessment files.")))
@@ -1720,8 +1704,7 @@ test("real model tools use committed files in an independent workspace, not the 
   assert.ok(requests[1].messages.at(-1).content.includes("\u001b[31mRAW_TOOL_SENTINEL\u001b[0m"))
   assert.ok(requests[1].messages.at(-1).content.split("output:\n")[1].includes("SHARED_CONFIG_SENTINEL"))
   assert.equal(cwd, path.join(await fs.realpath(fixture.workspaceRoot), agent.id))
-  assert.deepEqual(publication, { workspace: cwd, agentId: agent.id, args: { commit: "a".repeat(40), title: "CI", body: "Validated" } })
-  assert.match(requests.at(-1).messages.at(-1).content, /https:\/\/github.com\/fixture-owner\/repo\/pull\/1/)
+  assert.match(requests.at(-1).messages.at(-1).content, /Harness tool is not enabled: publish_pull_request/)
   const output = peer.messages.filter((message) => message.type === "log").map((message) => message.data).join("")
   assert.ok(output.includes(cwd))
   assert.ok(output.includes("tracked.txt"))

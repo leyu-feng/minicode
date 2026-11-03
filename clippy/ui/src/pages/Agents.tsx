@@ -1,5 +1,6 @@
 import { PrimaryAgentIndicator } from "@/components/primary-agent/PrimaryAgentPresentation";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { NewAgentMenu } from "../components/NewAgentMenu";
 import { useAgentChatEnabled } from "../hooks/useAgentChatEnabled";
 import { useState, useEffect, useMemo, lazy, Suspense } from "react";
 import { Link, useNavigate, useLocation } from "@/lib/router";
@@ -26,7 +27,7 @@ import { relativeTime, cn, agentRouteRef, agentUrl } from "../lib/utils";
 import { PageTabBar } from "../components/PageTabBar";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, Bot, Plus, List, Network } from "lucide-react";
+import { AlertTriangle, Bot, List, Network } from "lucide-react";
 import { AGENT_ROLE_LABELS, type Agent, type Environment, type EnvironmentCapabilities } from "@paperclipai/shared";
 import {
   resourceMembershipState,
@@ -478,10 +479,7 @@ export function Agents({ initialView = "list" }: { initialView?: AgentsView } = 
                 <Network className="h-3.5 w-3.5" />
               </Button>
           </div> : null}
-          <Button size="sm" variant="outline" onClick={openNewAgent}>
-            <Plus className="h-3.5 w-3.5 mr-1.5" />
-            New Agent
-          </Button>
+          <NewAgentMenu companyId={selectedCompanyId} onCreateCustomized={openNewAgent} />
         </div>
       </div>
 
@@ -495,7 +493,7 @@ export function Agents({ initialView = "list" }: { initialView?: AgentsView } = 
         <EmptyState
           icon={Bot}
           message="Create your first agent to get started."
-          action="New Agent"
+          action="Create Customized Agent"
           onAction={openNewAgent}
         />
       )}

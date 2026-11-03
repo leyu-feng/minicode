@@ -91,6 +91,49 @@ it does not change the worker host's pinned CLI version.
 Claude Code defaults to `claude-sonnet-5` once the agent has signed in, unless an
 explicit native model is selected. Copilot CLI retains its `auto` default.
 
+### Organization PR Inspector
+
+The **New Agent** dropdown offers **Create PR Inspector Agent** and
+**Create Customized Agent**. Customized creation retains the existing name and
+adapter flow. Board-only `POST /api/companies/{companyId}/pr-inspector` accepts `{}`.
+It atomically creates or returns one fixed **Pull Request (PR) Inspector**, using
+the dedicated `pr-inspector` Devbox pool and default harness. No per-agent GitHub
+sign-in or native-harness credential is required. Its configuration link opens the
+normal Devbox settings. GET on the same endpoint returns the current policy.
+Presence of a nonterminated inspector restricts PR creation. Pausing preserves
+the restriction; termination or deletion restores ordinary agents' PR permission.
+
+Assignments carry trusted `prPolicy: {inspectorAgentId, isInspector}`; absence
+of an inspector has a null inspector and false authority. Names, editable agent roles,
+task context and model inputs cannot confer this privilege. The provider
+snapshots the inspector ID into its authenticated company/agent/run claim.
+All dispatches require `pr_inspector_v1`, including organizations without an inspector.
+
+When an inspector exists, ordinary Hosted agents receive only `submit_branch_for_inspection`. It saves a branch,
+then automatically creates an idempotent review child assigned to the inspector.
+Retries first recover the saved submission without depending on local files or
+pushing again. The handoff includes repository URL, branch and exact remote
+commit. The Devbox inspector reviews the complete change list and affected
+contents with local user credentials, requests fixes when necessary, then
+creates the PR outside Paperclip. The bundled `pr-inspector` skill describes
+this workflow for all harnesses.
+
+The inspector uses `record_pull_request` to post the external PR link to the
+existing `POST /api/issues/{reviewIssueId}/work-products` API and task chat.
+Paperclip never receives its provider credentials or creates that PR; the
+postback records an unverified link with authenticated task/run attribution.
+While an inspector exists, only it may register PR work products or change their
+identity through the agent API. Human board actions remain available.
+
+Without an inspector, agents receive `publish_pull_request`, including configured
+fixed-repository Devbox publishers. Direct tools recheck the live company policy;
+missing or invalid policy fails closed. Legacy publishers are never initialized
+for inspector-restricted assignments. Running assignments keep their tool
+snapshot and must start a new assignment when policy changes.
+Repository permissions must separately restrict out-of-band credentials; the
+application cannot prevent external CLI PR creation with independent credentials.
+PR completion, auto-complete and source-branch deletion remain human actions.
+
 Workers send WebSocket pings every 15 seconds and accept either pings or pongs as
 liveness, closing after 45 seconds without either. Client-initiated probes keep
 proxy hops alive even when server-initiated control frames are not forwarded.
@@ -232,12 +275,13 @@ other read-only repositories are reference material, not instruction sources.
 Duplicate writable repository skills are repository-qualified.
 Read-only access is instruction policy, not OS isolation.
 
-The Hosted harness exposes one repository-selecting `publish_pull_request` tool.
-Each writable repository publishes/registers its own PR; the model has no remote
+The Hosted harness exposes repository-selecting branch-submission or inspector
+tools according to the trusted organization policy above. Each writable
+repository has its own submission/PR receipt; the model has no provider remote
 write credential. Publication requires an admitted active run and current
-writable catalog entry. Retry/reconcile uses the same repository and local
-commit, including after local cleanup. Repositories with a designated publisher
-may only be published through that publisher; the trusted parent enforces this policy.
+writable catalog entry. Retry/reconcile uses the same repository and original
+submission, including after local cleanup. Repositories with a designated
+publisher may only be published through that publisher.
 Prepared writable descriptors include provider publication metadata for repository
 identity, PR URL and branch templates, rather than assuming a Git hosting service.
 See the [provider integration contract](../../minicode/README.md#provider-integration-contract).
@@ -253,7 +297,7 @@ client credential in the Authorization bearer header. Send a hello:
   "protocolVersion": 1,
   "instanceId": "a-fresh-uuid-for-this-worker-process",
   "runId": null,
-  "capabilities": ["inline_instructions_v1", "skill_bundle_v1"]
+  "capabilities": ["inline_instructions_v1", "skill_bundle_v1", "pr_inspector_v1"]
 }
 ```
 
@@ -282,6 +326,7 @@ assigned at a time:
       { "path": "paperclip/SKILL.md", "sha256": "<SHA-256-of-file-bytes>" }
     ]
   },
+  "prPolicy": { "inspectorAgentId": null, "isInspector": false },
   "context": {},
   "continuation": null,
   "runtimeTools": null,
@@ -445,7 +490,7 @@ Oversized assignments fail before dispatch; instructions are never silently
 truncated. Keep instruction entry documents concise.
 
 Unversioned legacy hellos mean protocol 1 with no capabilities. Updated servers
-skip workers without `skill_bundle_v1`; tasks with instructions additionally
+skip workers without `skill_bundle_v1` and `pr_inspector_v1`; tasks with instructions additionally
 require the explicit inline capability. If none is compatible the run fails
 with an upgrade/connect instruction. New Minicode workers still accept legacy
 tasks from older servers with no inline instructions or skill metadata, but those

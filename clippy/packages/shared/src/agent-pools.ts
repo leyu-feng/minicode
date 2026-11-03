@@ -7,6 +7,12 @@ export const AGENT_POOL_HOSTED_REPOSITORIES = "hosted_repositories_v1";
 export const AGENT_POOL_HOSTED_WORKSPACE = "hosted_workspace_v2";
 export const AGENT_POOL_GITHUB_CREDENTIAL = "github_credential_v1";
 export const AGENT_POOL_GIT_IDENTITY = "git_identity_v1";
+export const AGENT_POOL_PR_INSPECTOR = "pr_inspector_v1";
+export const agentPoolPrPolicySchema = z.object({
+  inspectorAgentId: z.string().uuid().nullable(),
+  isInspector: z.boolean(),
+}).strict();
+export type AgentPoolPrPolicy = z.infer<typeof agentPoolPrPolicySchema>;
 export const agentPoolGitIdentitySchema = z.object({
   name: z.string().trim().min(1).max(200).regex(/^[^\x00-\x1f\x7f<>]+$/),
   email: z.string().trim().max(254).email().regex(/^[^\x00-\x20\x7f<>]+$/),
@@ -91,6 +97,7 @@ export const agentPoolTaskSchema = z.object({
   authToken: z.string().nullable(),
   githubCredential: agentPoolGitHubCredentialSchema.optional(),
   gitIdentity: agentPoolGitIdentitySchema.optional(),
+  prPolicy: agentPoolPrPolicySchema.optional(),
   harnessModel: agentPoolHarnessModelSchema.optional(),
   repositories: z.union([z.object({
     primary: z.object({ id: z.string(), name: z.string(), branch: z.string() }),
