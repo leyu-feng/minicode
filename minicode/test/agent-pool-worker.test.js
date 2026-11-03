@@ -852,7 +852,7 @@ test("bundled skills download once, repair extracted files each assignment, and 
   assert.equal(sessions[0].env.PAPERCLIP_TASK_ID, "task-a")
   assert.equal(sessions[0].env.PAPERCLIP_WAKE_REASON, "issue_assigned")
   assert.equal(sessions[0].env.PAPERCLIP_WAKE_COMMENT_ID, "comment-a")
-  for (const name of ["paperclip_get_issue", "paperclip_add_comment", "paperclip_update_issue"]) {
+  for (const name of ["paperclip_get_issue", "paperclip_list_agents", "paperclip_create_issue", "paperclip_add_comment", "paperclip_update_issue"]) {
     assert.ok(sessions[0].tools.some(tool => tool.name === name))
     assert.ok(sessions[0].instructions.includes(name))
   }
