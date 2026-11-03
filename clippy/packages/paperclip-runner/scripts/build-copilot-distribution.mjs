@@ -11,13 +11,18 @@ const MAX_EXPANDED_BYTES = 384 * 1024 * 1024;
 const PROFILE_DIGEST = profiles.profiles.copilot.commandDigest;
 
 /** Build-time only; outputRoot is the exact runner-owned platform asset directory. */
-export async function buildPinnedCopilotDistribution({ outputRoot, platform = process.platform, architecture = process.arch }, { fetchImpl = fetch } = {}) {
+export async function buildPinnedCopilotDistribution({ outputRoot, platform = process.platform, architecture = process.arch }, { fetchImpl = fetch, registry = process.env.PAPERCLIP_RUNNER_BUILD_NPM_REGISTRY ?? "https://registry.npmjs.org/" } = {}) {
   if (typeof outputRoot !== "string" || !isAbsolute(outputRoot) || resolve(outputRoot) !== outputRoot || outputRoot.includes("\0")) {
     throw new Error("Copilot outputRoot must be a normalized absolute build directory");
   }
   const distribution = resolveCopilotDistribution(platform, architecture);
   const packageBasename = distribution.packageName.slice("@github/".length);
-  const archiveUrl = `https://registry.npmjs.org/${distribution.packageName}/-/${packageBasename}-${COPILOT_VERSION}.tgz`;
+  const registryUrl = new URL(registry);
+  if (registryUrl.protocol !== "https:" || registryUrl.username || registryUrl.password || registryUrl.search || registryUrl.hash) {
+    throw new Error("Copilot build registry must be HTTPS without credentials or URL parameters");
+  }
+  registryUrl.pathname = `${registryUrl.pathname.replace(/\/+$/, "")}/`;
+  const archiveUrl = new URL(`${distribution.packageName}/-/${packageBasename}-${COPILOT_VERSION}.tgz`, registryUrl).href;
   const response = await fetchImpl(archiveUrl, { redirect: "error", credentials: "omit", signal: AbortSignal.timeout(120_000) });
   if (!response.ok || !response.body) throw new Error(`Pinned Copilot archive download failed (${response.status})`);
   const advertisedLength = response.headers.get("content-length");

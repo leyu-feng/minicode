@@ -69,6 +69,18 @@ test("only the exact brace-expansion security correction may differ from Pi's sh
   }
 });
 
+test("mirror installation uses the external build npmrc without enabling lifecycle scripts", () => {
+  const command = piDistributionInstallCommand({
+    registry: "https://mirror.example.test/npm/",
+    userconfig: "/run/secrets/npmrc",
+  });
+  assert.ok(command.includes("--registry=https://mirror.example.test/npm/"));
+  assert.ok(command.includes("--userconfig=/run/secrets/npmrc"));
+  assert.ok(command.includes("--ignore-scripts"));
+  assert.ok(command.includes("--globalconfig=.npmrc-global"));
+  assert.ok(!command.some((arg) => arg.includes("registry.npmjs.org")));
+});
+
 test("package verification rejects missing, version-shifted and incomplete shrinkwrap graphs", async (t) => {
   const { root, write } = await fixture(t);
   const pi = "node_modules/@earendil-works/pi-coding-agent";

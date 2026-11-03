@@ -55,3 +55,17 @@ test("builder bounds download metadata before streaming", async () => {
     fetchImpl: async () => new Response("small", { headers: { "content-length": String(129 * 1024 * 1024) } }),
   }), /download bound/);
 });
+
+test("configured mirror preserves the exact package pin and integrity verification", async () => {
+  await assert.rejects(buildPinnedCopilotDistribution({ outputRoot: "/unused-copilot-build", platform: "linux", architecture: "x64" }, {
+    registry: "https://mirror.example.test/npm",
+    fetchImpl: async (url) => {
+      assert.equal(url, "https://mirror.example.test/npm/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.88.tgz");
+      return new Response("corrupt");
+    },
+  }), /integrity mismatch/);
+  await assert.rejects(buildPinnedCopilotDistribution({ outputRoot: "/unused-copilot-build", platform: "linux", architecture: "x64" }, {
+    registry: "https://user:secret@example.test/npm/",
+    fetchImpl: async () => { assert.fail("Invalid registry must not be fetched"); },
+  }), /without credentials/);
+});

@@ -167,10 +167,13 @@ FROM build AS runner-provider-pack
 ARG PROVIDER_PACK_EXCLUDE=""
 # Unstamped local builds remain usable, but cannot qualify a remote pack.
 # Never invent a source revision to make an unqualified pack look verified.
-RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=true \
   mkdir -p /provider-pack \
   && if [ -n "${PAPERCLIP_BUILD_COMMIT}" ]; then \
-    PAPERCLIP_RUNNER_SOURCE_REVISION="${PAPERCLIP_BUILD_COMMIT}" node packages/paperclip-runner/scripts/build-provider-pack.mjs /provider-pack "--exclude-providers=${PROVIDER_PACK_EXCLUDE}"; \
+    PAPERCLIP_RUNNER_SOURCE_REVISION="${PAPERCLIP_BUILD_COMMIT}" \
+    PAPERCLIP_RUNNER_BUILD_NPM_REGISTRY="$(cd /tmp && npm config get registry)" \
+    PAPERCLIP_RUNNER_BUILD_NPMRC=/root/.npmrc \
+    node packages/paperclip-runner/scripts/build-provider-pack.mjs /provider-pack "--exclude-providers=${PROVIDER_PACK_EXCLUDE}"; \
   else \
     echo "Skipping remote provider pack: supply a full PAPERCLIP_BUILD_COMMIT to enable remote OpenCode/ACPX execution"; \
   fi

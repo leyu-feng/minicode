@@ -27,8 +27,8 @@ export const PI_DISTRIBUTION_PINS = Object.freeze({
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 /** Install the published Pi graph; then apply the one pinned security correction. */
-export function piDistributionInstallCommand() {
-  return ["ci", "--ignore-scripts", "--include=optional", "--omit=dev", "--no-audit", "--no-fund", "--registry=https://registry.npmjs.org", "--userconfig=.npmrc", "--globalconfig=.npmrc-global"];
+export function piDistributionInstallCommand({ registry = "https://registry.npmjs.org", userconfig = ".npmrc" } = {}) {
+  return ["ci", "--ignore-scripts", "--include=optional", "--omit=dev", "--no-audit", "--no-fund", `--registry=${registry}`, `--userconfig=${userconfig}`, "--globalconfig=.npmrc-global"];
 }
 
 function supports(list, current) {
@@ -143,6 +143,16 @@ export async function materializePiDistribution({ outputRoot, nodeExecutable, np
   const inputSecurityPatchPath = inputs?.securityPatchPath ?? securityPatchPath;
   const helperSourcePath = inputs?.helperSourcePath ?? join(packageRoot, "src/drivers/acpx/pi-acp-runtime.ts");
   const extensionSourcePath = inputs?.extensionSourcePath ?? join(packageRoot, "src/drivers/acpx/pi-runtime-extension.ts");
+  const buildRegistry = process.env.PAPERCLIP_RUNNER_BUILD_NPM_REGISTRY;
+  const buildNpmrc = process.env.PAPERCLIP_RUNNER_BUILD_NPMRC;
+  if (buildRegistry !== undefined || buildNpmrc !== undefined) {
+    if (!buildRegistry || !buildNpmrc || !isAbsolute(buildNpmrc)) throw new Error("Pi mirror builds require a registry and absolute build npmrc path");
+    const registryUrl = new URL(buildRegistry);
+    if (registryUrl.protocol !== "https:" || registryUrl.username || registryUrl.password || registryUrl.search || registryUrl.hash) {
+      throw new Error("Pi build registry must be HTTPS without credentials or URL parameters");
+    }
+    await lstat(buildNpmrc);
+  }
   if (typeof outputRoot !== "string" || !outputRoot || !isAbsolute(outputRoot)) throw new Error("Pi distribution output must be absolute");
   const output = resolve(outputRoot);
   if (["/", workspaceRoot, packageRoot].includes(output)) throw new Error("Refusing unsafe Pi distribution output");
@@ -183,14 +193,14 @@ export async function materializePiDistribution({ outputRoot, nodeExecutable, np
     await writeFile(join(runtimeRoot, ".npmrc"), "registry=https://registry.npmjs.org/\nignore-scripts=true\naudit=false\nfund=false\n");
     await writeFile(join(runtimeRoot, ".npmrc-global"), "");
     const buildHome = join(staging, "build-home"); await mkdir(buildHome);
-    // Do not inherit NPM_TOKEN, npm_config_*, NODE_OPTIONS, provider keys or user
-    // .npmrc. Public registry downloads need no private application credential.
+    // Keep application credentials out of setup. Mirror builds explicitly use
+    // a build-only npmrc outside the runtime; it is never copied into the pack.
     const environment = Object.fromEntries(["PATH", "LANG", "LC_ALL", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"].flatMap((key) => typeof process.env[key] === "string" ? [[key, process.env[key]]] : []));
     environment.HOME = buildHome;
     // npm 10 prunes non-host packages bundled by upstream Pi, unlike the npm
     // 11.19.0 used to qualify this complete closure. Public setup must use the
     // npm pinned by the verified Node archive, never whichever npm is on PATH.
-    await runOwned(bundledNpm ? node : npmExecutable, [...(bundledNpm ? [bundledNpm] : []), ...piDistributionInstallCommand()], { cwd: runtimeRoot, env: environment, timeout: 300_000, maxBuffer: 4 * 1024 * 1024 });
+    await runOwned(bundledNpm ? node : npmExecutable, [...(bundledNpm ? [bundledNpm] : []), ...piDistributionInstallCommand(buildRegistry ? { registry: buildRegistry, userconfig: buildNpmrc } : {})], { cwd: runtimeRoot, env: environment, timeout: 300_000, maxBuffer: 4 * 1024 * 1024 });
     const installedLockBytes = await readFile(join(runtimeRoot, "package-lock.json"));
     if (!installedLockBytes.equals(await readFile(join(inputLockDirectory, "package-lock.json")))) throw new Error("Pi installation changed its committed lock");
     const lock = JSON.parse(installedLockBytes.toString("utf8"));
