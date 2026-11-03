@@ -115,5 +115,5 @@ if ($BuildOnly) {
   if ($latestDigest -ne $digest) { throw "Published latest tag does not match the versioned image digest." }
   Write-Host "Published image: $image"
   Write-Host "Published image: $latestImage"
-  Write-Host "Deployment reference: $loginServer/$ImageName@$digest"
+  Write-Host "Deployment reference: $latestImage"
 }
