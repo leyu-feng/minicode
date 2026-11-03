@@ -1,10 +1,11 @@
 import { createServer } from "node:http"
 import { once } from "node:events"
 import { randomBytes } from "node:crypto"
-import { Readable } from "node:stream"
+import { Readable, Transform } from "node:stream"
 import { pipeline } from "node:stream/promises"
 
 const MAX_BODY = 4 * 1024 * 1024
+const MAX_EVENT_CHARS = 4 * 1024 * 1024
 
 async function body(request) {
   const chunks = []
@@ -17,6 +18,58 @@ async function body(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"))
 }
 
+function trackModelCompletion(chatCompletions, onCompletion) {
+  const decoder = new TextDecoder()
+  let pending = ""
+  let data = ""
+  let skipLF = false
+  let invalid = false
+  return new Transform({
+    transform(chunk, encoding, callback) {
+      try {
+        if (!invalid) {
+          const text = decoder.decode(chunk, { stream: true })
+          const lines = (pending + (skipLF && text.startsWith("\n") ? text.slice(1) : text)).split(/\r\n|\r|\n/)
+          if (text) skipLF = text.endsWith("\r")
+          pending = lines.pop()
+          for (const line of lines) {
+            if (line.startsWith("data:")) data += `${line.slice(5).replace(/^ /, "")}\n`
+            else if (line === "" && data) {
+              const payload = data.trim()
+              data = ""
+              if (!payload) continue
+              if (chatCompletions && payload === "[DONE]") onCompletion(true)
+              else {
+                let event
+                try { event = JSON.parse(payload) }
+                catch (error) {
+                  if (!(error instanceof SyntaxError)) throw error
+                  invalid = true
+                  break
+                }
+                if (event?.error || ["error", "response.failed", "response.incomplete"].includes(event?.type)) {
+                  invalid = true
+                  break
+                }
+                if (!chatCompletions && event?.type === "response.completed" && event.response?.status === "completed") onCompletion(true)
+              }
+            }
+            if (data.length > MAX_EVENT_CHARS) { invalid = true; break }
+          }
+          if (invalid || data.length + pending.length > MAX_EVENT_CHARS) {
+            invalid = true
+            data = pending = ""
+            onCompletion(false)
+          }
+        }
+        callback(null, chunk)
+      } catch (error) {
+        callback(error)
+      }
+    },
+  })
+}
+
 export async function startHostedHarnessBridge({ endpoint, model, getAccessToken, tools, signal, onError, onModelRequest, onToolEvent, modelEnabled = true }) {
   const upstream = modelEnabled ? new URL(endpoint) : null
   if (upstream && (upstream.protocol !== "https:" || upstream.username || upstream.password
@@ -27,6 +80,7 @@ export async function startHostedHarnessBridge({ endpoint, model, getAccessToken
   let toolCalls = 0
   const server = createServer((request, response) => {
     let modelRequest
+    let modelCompleted = false
     const json = (status, value) => {
       response.writeHead(status, { "Content-Type": "application/json" })
       response.end(JSON.stringify(value))
@@ -98,10 +152,18 @@ export async function startHostedHarnessBridge({ endpoint, model, getAccessToken
         json(remote.status, { error: { message: `Hosted model request failed (HTTP ${remote.status})`, type: "hosted_model_error" } })
         return
       }
-      response.writeHead(remote.status, { "Content-Type": remote.headers.get("content-type") ?? "application/json" })
-      if (remote.body) await pipeline(Readable.fromWeb(remote.body), response, { signal })
-      else response.end()
+      const contentType = remote.headers.get("content-type") ?? "application/json"
+      response.writeHead(remote.status, { "Content-Type": contentType })
+      if (remote.body) {
+        const streams = [Readable.fromWeb(remote.body)]
+        if (/^text\/event-stream(?:;|$)/i.test(contentType)) {
+          streams.push(trackModelCompletion(request.url.endsWith("/chat/completions"), completed => { modelCompleted = completed }))
+        }
+        await pipeline(...streams, response, { signal })
+      } else response.end()
     })().catch(error => {
+      // Harnesses can close a completed SSE response before the upstream HTTP EOF.
+      if (!signal.aborted && modelCompleted && error.code === "ERR_STREAM_PREMATURE_CLOSE") return
       onError(signal.aborted ? "Hosted harness cancelled" : error.message,
         modelRequest ? { ...modelRequest, code: error.cause?.code ?? error.code } : undefined)
       if (response.headersSent) response.destroy()

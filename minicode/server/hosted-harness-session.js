@@ -11,6 +11,7 @@ import { createHostedHarnessWorkspaceTools } from "./agent-session.js"
 
 const MAX_LOG_CHARS = 24000
 const MAX_DIAGNOSTIC_BYTES = 512 * 1024
+const MAX_HARNESS_OUTPUT_BYTES = 4 * 1024 * 1024
 
 function logValue(value, secrets) {
   const text = typeof value === "string" ? value : JSON.stringify(value, (key, item) => {
@@ -315,13 +316,13 @@ export class HostedHarnessSession extends EventEmitter {
       const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity })
       child.stdout.on("data", data => {
         bytes += data.length
-        if (bytes > 2 * 1024 * 1024) {
+        if (bytes > MAX_HARNESS_OUTPUT_BYTES) {
           fail("Hosted harness output exceeded its limit")
           this.kill()
         }
       })
       lines.on("line", line => {
-        if (bytes > 2 * 1024 * 1024) return
+        if (bytes > MAX_HARNESS_OUTPUT_BYTES) return
         let event
         try { event = JSON.parse(line) }
         catch {
@@ -436,7 +437,7 @@ export class HostedHarnessSession extends EventEmitter {
       })
       child.stderr.on("data", data => {
         bytes += data.length
-        if (bytes > 2 * 1024 * 1024) {
+        if (bytes > MAX_HARNESS_OUTPUT_BYTES) {
           fail("Hosted harness output exceeded its limit")
           this.kill()
         } else output("stderr", data.toString())

@@ -272,6 +272,132 @@ test("Hosted model bridge authenticates, pins the deployment and never exposes u
   assert.deepEqual(errors, [])
 })
 
+for (const scenario of [
+  { name: "completed Responses stream", frame: 'data: {"type":"response.completed","response":{"status":"completed"}}\n\n', success: true },
+  { name: "split CRLF completion", frame: 'data:\r\n\r\n: caf\u00e9\r\ndata: {"type":"response.completed",\r\ndata: "response":{"status":"completed"}}\r\n\r\n', split: true, success: true },
+  { name: "completed Chat Completions stream", route: "chat/completions", frame: "data: [DONE]\n\n", success: true },
+  { name: "unfinished Responses stream", frame: 'data: {"type":"response.output_text.delta","delta":"response.completed"}\n\n' },
+  { name: "unsuccessful Responses completion", frame: 'data: {"type":"response.completed","response":{"status":"incomplete"}}\n\n' },
+  { name: "unterminated completion event", frame: 'data: {"type":"response.completed","response":{"status":"completed"}}\n' },
+  { name: "malformed stream before completion", frame: 'data: {invalid}\n\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n' },
+  { name: "failed Chat Completions stream", route: "chat/completions", frame: 'data: {"error":{"message":"Request failed"}}\n\ndata: [DONE]\n\n' },
+  { name: "non-SSE response", frame: 'data: {"type":"response.completed","response":{"status":"completed"}}\n\n', contentType: "application/json" },
+]) {
+  test(`client closing ${scenario.name} preserves the correct assignment outcome`, { timeout: 10000 }, async t => {
+    const fetchOriginal = globalThis.fetch
+    let requests = 0
+    let cancelled
+    const streamCancelled = new Promise(resolve => { cancelled = resolve })
+    t.mock.method(globalThis, "fetch", async (url, options) => {
+      if (!String(url).startsWith("https://model.example")) return fetchOriginal(url, options)
+      if (++requests > 1) return new Response('{"output":[]}')
+      return new Response(new ReadableStream({
+        start(controller) {
+          const bytes = Buffer.from(scenario.frame)
+          if (scenario.split) {
+            for (let i = 0; i < bytes.length; i++) controller.enqueue(bytes.subarray(i, i + 1))
+          } else controller.enqueue(bytes)
+        },
+        cancel() { cancelled() },
+      }), { headers: { "Content-Type": scenario.contentType ?? "text/event-stream" } })
+    })
+    let toolCalls = 0
+    const session = new HostedHarnessSession({
+      harness: "opencode", id: "stream-close", cwd: process.cwd(), env: {}, instructions: "Policy",
+      tools: [{ name: "provider_read", description: "Offline read", parameters: { type: "object" },
+        execute: async () => { await streamCancelled; toolCalls++; return "read result" } }],
+      modelConfig: { endpoint, model: "deployment", getAccessToken: async () => "offline-fixture-token" },
+      prepare: async () => ({ harness: "opencode", command: "trusted-shim", version: "2.2.5-beta.2" }),
+      spawnProcess: (_command, _args, options) => spawn(process.execPath, ["--input-type=module", "-e", `
+        for await (const chunk of process.stdin) {}
+        const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT).provider.hosted.options;
+        const post = (route, input) => fetch(config.baseURL.replace(/\\/openai\\/v1$/, "") + route, {
+          method: "POST", headers: { Authorization: "Bearer " + config.apiKey, "Content-Type": "application/json" },
+          body: JSON.stringify(input)
+        });
+        console.log(JSON.stringify({ type: "step_start" }));
+        const response = await post("/openai/v1/${scenario.route ?? "responses"}", { stream: true, input: "Offline request" });
+        const reader = response.body.getReader();
+        const received = [];
+        let bytes = 0;
+        while (bytes < ${Buffer.byteLength(scenario.frame)}) {
+          const chunk = await reader.read();
+          if (chunk.done) throw new Error("Expected an open upstream stream");
+          bytes += chunk.value.length;
+          received.push(Buffer.from(chunk.value));
+        }
+        if (Buffer.concat(received).toString("utf8") !== ${JSON.stringify(scenario.frame)}) throw new Error("Response bytes changed");
+        await reader.cancel();
+        const tool = await post("/mcp", {
+          jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "provider_read", arguments: {} }
+        });
+        if ((await tool.json()).result.isError) throw new Error("Offline tool failed");
+        console.log(JSON.stringify({ type: "step_finish" }));
+        console.log(JSON.stringify({ type: "step_start" }));
+        await (await post("/openai/v1/responses", { input: "Follow-up request" })).text();
+        console.log(JSON.stringify({ type: "text", part: { text: "Finished" } }));
+        console.log(JSON.stringify({ type: "step_finish" }));
+      `], options),
+    })
+    const timeout = setTimeout(() => session.interrupt(), 8000)
+    t.after(async () => { clearTimeout(timeout); await session.dispose() })
+    const output = []
+    session.on("output", event => output.push(event.data))
+    const result = await session.write("Offline stream-close reproduction")
+    assert.equal(requests, 2, output.join(""))
+    assert.equal(toolCalls, 1)
+    assert.ok(output.join("").includes("Finished"))
+    if (scenario.success) assert.deepEqual(result, { exitCode: 0, summary: "Finished" })
+    else {
+      assert.equal(result.exitCode, 1)
+      assert.equal(result.error, "Premature close")
+      assert.equal(result.modelFailure.code, "ERR_STREAM_PREMATURE_CLOSE")
+    }
+  })
+}
+
+test("completed model streams still report upstream transport errors and assignment cancellation", { timeout: 10000 }, async t => {
+  const fetchOriginal = globalThis.fetch
+  for (const cancelled of [false, true]) {
+    let upstream
+    t.mock.method(globalThis, "fetch", async (url, options) => {
+      if (!String(url).startsWith("https://model.example")) return fetchOriginal(url, options)
+      return new Response(new ReadableStream({
+        start(controller) {
+          upstream = controller
+          controller.enqueue(Buffer.from('data: {"type":"response.completed","response":{"status":"completed"}}\n\n'))
+        },
+      }), { headers: { "Content-Type": "text/event-stream" } })
+    })
+    const errors = []
+    let report
+    const reported = new Promise(resolve => { report = resolve })
+    const controller = new AbortController()
+    const bridge = await startHostedHarnessBridge({
+      endpoint, model: "deployment", tools: [], signal: controller.signal, getAccessToken: async () => "offline-fixture-token",
+      onError: (message, request) => { errors.push({ message, code: request?.code }); report() },
+    })
+    try {
+      const response = await fetchOriginal(`${bridge.baseUrl}/openai/v1/responses`, {
+        method: "POST", headers: { Authorization: `Bearer ${bridge.secret}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ stream: true, input: "Offline request" }),
+      })
+      const reader = response.body.getReader()
+      assert.ok(new TextDecoder().decode((await reader.read()).value).includes("response.completed"))
+      if (cancelled) controller.abort()
+      else upstream.error(Object.assign(new Error("Upstream connection reset"), { code: "ECONNRESET" }))
+      await assert.rejects(reader.read())
+      await reported
+      assert.equal(errors.length, 1)
+      if (cancelled) assert.equal(errors[0].message, "Hosted harness cancelled")
+      else assert.deepEqual(errors[0], { message: "Upstream connection reset", code: "ECONNRESET" })
+    } finally {
+      controller.abort()
+      await bridge.close()
+    }
+  }
+})
+
 for (const harness of ["opencode", "pi"]) {
   test(`${harness} runs a separate CLI with assignment credentials and trusted tools`, async t => {
     const fetchOriginal = globalThis.fetch
@@ -380,6 +506,43 @@ for (const harness of ["opencode", "pi"]) {
     const logs = JSON.stringify({ events, activities })
     for (const secret of ["run-secret", "private-token", "unregistered-credential", "HIDDEN_REASONING"]) assert.ok(!logs.includes(secret), secret)
   })
+}
+
+for (const harness of ["opencode", "pi"]) {
+  for (const overLimit of [false, true]) {
+    test(`${harness} ${overLimit ? "rejects combined output above 4 MiB" : "accepts raw protocol output between 2 and 4 MiB"}`, async t => {
+      const session = new HostedHarnessSession({
+        harness, id: "output-budget", cwd: process.cwd(), env: {}, instructions: "Policy", tools: [],
+        modelConfig: { endpoint, model: "deployment", getAccessToken: async () => "unused" },
+        prepare: async () => ({ harness, command: "trusted-shim", version: "offline-fixture" }),
+        spawnProcess: (_command, _args, options) => spawn(process.execPath, ["--input-type=module", "-e", `
+          import readline from "node:readline";
+          const lines = readline.createInterface({ input: process.stdin });
+          await new Promise(resolve => lines.once("line", resolve));
+          lines.close();
+          process.stdin.pause();
+          const line = JSON.stringify({ type: "diagnostic", data: "x".repeat(16000) }) + "\\n";
+          for (let bytes = 0; bytes < 3 * 1024 * 1024; bytes += line.length) {
+            await new Promise(resolve => process.stdout.write(line, resolve));
+          }
+          ${overLimit ? `for (let bytes = 0; bytes < 2 * 1024 * 1024; bytes += 16000) {
+            await new Promise(resolve => process.stderr.write("x".repeat(16000), resolve));
+          }` : ""}
+          ${harness === "pi" ? `
+            console.log(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Finished" } }));
+            console.log(JSON.stringify({ type: "agent_end", messages: [] }));
+          ` : `
+            console.log(JSON.stringify({ type: "text", part: { text: "Finished" } }));
+            console.log(JSON.stringify({ type: "step_finish" }));
+          `}
+        `], options),
+      })
+      t.after(() => session.dispose())
+      const result = await session.write("Offline output-budget reproduction")
+      if (overLimit) assert.deepEqual(result, { exitCode: 1, error: "Hosted harness output exceeded its limit" })
+      else assert.deepEqual(result, { exitCode: 0, summary: "Finished" })
+    })
+  }
 }
 
 test("external harness rejects missing or multiline package versions before handoff", async t => {
