@@ -189,7 +189,12 @@ export async function materializePiDistribution({ outputRoot, nodeExecutable, np
     if (version !== `v${PI_NODE_VERSION}`) throw new Error("Pi distribution requires exact pinned Node version");
     if ((await runOwned(node, ["-p", "process.versions.undici"], { env: {}, timeout: buildNodeStartupTimeout() })).stdout.trim() !== PI_DISTRIBUTION_PINS.nodeBundledUndici) throw new Error("Pi Node bundled Undici differs from its reviewed security pin");
     await mkdir(runtimeRoot);
-    await Promise.all(["package.json", "package-lock.json"].map((name) => copyFile(join(inputLockDirectory, name), join(runtimeRoot, name))));
+    await Promise.all(["package.json", "package-lock.json"].map(async (name) => {
+      const destination = join(runtimeRoot, name);
+      await copyFile(join(inputLockDirectory, name), destination);
+      // Windows Docker contexts mark ordinary manifests executable.
+      await chmod(destination, 0o644);
+    }));
     await writeFile(join(runtimeRoot, ".npmrc"), "registry=https://registry.npmjs.org/\nignore-scripts=true\naudit=false\nfund=false\n");
     await writeFile(join(runtimeRoot, ".npmrc-global"), "");
     const buildHome = join(staging, "build-home"); await mkdir(buildHome);
