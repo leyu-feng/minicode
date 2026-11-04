@@ -2,6 +2,12 @@ import { paperclipPublicationTool } from "./paperclip-publication.js"
 import { createPaperclipTaskTools } from "./paperclip-task-tools.js"
 import { httpErrorDetails, redactSecrets } from "./http-error.js"
 
+function handoffValue(issue, name) {
+  const matches = String(issue.description ?? "").split(/\r?\n/).filter(entry => entry.startsWith(`${name}: `))
+  if (matches.length !== 1) throw new Error("The assigned review must contain one original branch handoff")
+  return matches[0].slice(name.length + 2)
+}
+
 async function paperclipApi(task, apiUrl, path, method, body, signal) {
   if (!task.authToken || !task.runId || !task.agent?.companyId) throw new Error("Publication requires run-scoped Paperclip authentication")
   const response = await fetch(`${apiUrl.replace(/\/+$/, "")}/api${path}`, {
@@ -62,11 +68,7 @@ export function createPrInspectorPostback({ task, apiUrl, separateBranch = false
         throw new Error("PR postback requires the inspector's assigned issue in this company")
       let parent, metadata = { publicationMode: "external" }
       if (separateBranch) {
-        const line = name => {
-          const matches = String(issue.description ?? "").split(/\r?\n/).filter(entry => entry.startsWith(`${name}: `))
-          if (matches.length !== 1) throw new Error("The assigned review must contain one original branch handoff")
-          return matches[0].slice(name.length + 2)
-        }
+        const line = name => handoffValue(issue, name)
         if (!/^submission-publication-[a-f0-9]{64}$/.test(input.submissionId ?? "")
           || !/^[a-f0-9]{40}$/.test(input.reviewedCommit ?? "")
           || !/^[a-z0-9][a-z0-9_-]{0,23}$/i.test(workerName ?? "")
@@ -161,6 +163,70 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
     required: ["repository", ...required], additionalProperties: false,
   })
   const call = (repo, mode, input, options) => request("publish", { ...input, repositoryId: repo.id, mode }, options)
+  const retireSuperseded = async (repo, input, number, options) => {
+    const snapshot = await taskTools.find(tool => tool.name === "paperclip_get_issue").execute({}, options)
+    const reviews = snapshot.children.filter(child => child.assigneeAgentId === task.prPolicy.inspectorAgentId
+      && String(child.description ?? "").includes(`Repository URL: ${repo.source ?? repo.publication.repository}\n`))
+    if (reviews.every(child => handoffValue(child, "Submission ID") === input.submissionId
+      || ["done", "cancelled"].includes(child.status))) return []
+    const replacement = reviews.filter(child => handoffValue(child, "Submission ID") === input.submissionId)
+    if (replacement.length !== 1) throw new Error("Reconcile the unique replacement inspection before retiring superseded submissions")
+    const readReview = async child => {
+      const review = await paperclipApi(task, apiUrl, `/issues/${encodeURIComponent(child.id)}`, "GET", undefined, options?.signal)
+      if (review.id !== child.id || review.companyId !== task.agent.companyId || review.parentId !== issueId
+        || review.assigneeAgentId !== task.prPolicy.inspectorAgentId || review.createdByAgentId !== task.agent.id
+        || handoffValue(review, "Source agent") !== task.agent.id || handoffValue(review, "Source task") !== issueId
+        || handoffValue(review, "Repository URL") !== (repo.source ?? repo.publication.repository))
+        throw new Error("Supersession requires this producer's inspector reviews of the same task and repository")
+      return review
+    }
+    const accepted = await readReview(replacement[0])
+    const products = await paperclipApi(task, apiUrl, `/issues/${encodeURIComponent(accepted.id)}/work-products`, "GET", undefined, options?.signal)
+    if (!Array.isArray(products)) throw new Error("Paperclip returned an invalid replacement work-product list")
+    const matching = products.filter(product => product.type === "pull_request" && product.url === input.url
+      && product.metadata?.submissionId === input.submissionId && product.metadata?.sourceAgentId === task.agent.id
+      && product.metadata?.inspectionIssueId === accepted.id
+      && product.metadata?.reviewedCommit === handoffValue(accepted, "Remote commit"))
+    if (matching.length !== 1) throw new Error("Supersession requires the replacement inspection's confirmed PR work product")
+    const retired = []
+    const reports = await paperclipApi(task, apiUrl, `/issues/${encodeURIComponent(issueId)}/comments?limit=100&order=desc`, "GET", undefined, options?.signal)
+    if (!Array.isArray(reports)) throw new Error("Paperclip returned an invalid producer report list")
+    for (const child of reviews.filter(child => child.id !== accepted.id && !["done", "cancelled"].includes(child.status))) {
+      const review = await readReview(child)
+      const previous = handoffValue(review, "Submission ID")
+      const branch = handoffValue(review, "Branch")
+      const reviewedCommit = handoffValue(review, "Remote commit")
+      const previousProducts = await paperclipApi(task, apiUrl, `/issues/${encodeURIComponent(review.id)}/work-products`, "GET", undefined, options?.signal)
+      if (review.status !== "blocked" || review.executionRunId || review.checkoutRunId
+        || review.unblockDescriptor?.owner?.agentId !== task.prPolicy.inspectorAgentId
+        || !Array.isArray(previousProducts) || previousProducts.some(product => product.type === "pull_request")
+        || previous === input.submissionId || !/^submission-publication-[a-f0-9]{64}$/.test(previous)
+        || !/^[a-f0-9]{40}$/.test(reviewedCommit)
+        || !reports.some(report => report.authorAgentId === task.prPolicy.inspectorAgentId
+          && /^\s*Changes (?:requested|required)\b/i.test(report.body ?? "")
+          && report.body.includes(previous) && report.body.includes(reviewedCommit)))
+        throw new Error("Retain the earlier branch until its stopped inspection confirms rejection without a PR")
+      const receipt = await call(repo, "delete_submitted_branch", {
+        submissionId: previous, supersededBySubmissionId: input.submissionId, pullRequestNumber: number,
+      }, options)
+      if (receipt?.submissionId !== previous || receipt.state !== "DELETED" || receipt.branch !== branch
+        || receipt.supersededBySubmissionId !== input.submissionId)
+        throw new Error("The provider did not confirm superseded submission retirement")
+      pendingSubmissions.delete(previous)
+      const marker = `<!-- superseded-submission:${previous}:${input.submissionId}:${number} -->`
+      const route = `/issues/${encodeURIComponent(review.id)}/comments`
+      const comments = await paperclipApi(task, apiUrl, route, "GET", undefined, options?.signal)
+      if (!Array.isArray(comments)) throw new Error("Paperclip returned an invalid superseded-review comment list")
+      const comment = comments.find(entry => entry.authorAgentId === task.agent.id && entry.body?.includes(marker))
+        ?? await paperclipApi(task, apiUrl, route, "POST", {
+          body: `Producer cleanup confirmed: rejected submission ${previous} (${reviewedCommit}) is superseded by inspection ${accepted.id}, submission ${input.submissionId}, and PR ${input.url} at ${handoffValue(accepted, "Remote commit")}.\n\nThe managed retirement tool provider-verified the replacement PR and deleted only my unchanged rejected branch ${branch} (DELETED). The inspector PR branch remains intact. Read the replacement inspection and close this obsolete review as superseded; do not reinspect, edit, publish, or create another PR. Report closure to the parent as an informational update only.\n\n${marker}`,
+        }, options?.signal)
+      if (!comment?.id || comment.issueId !== review.id || comment.authorAgentId !== task.agent.id || !comment.body?.includes(marker))
+        throw new Error("Paperclip did not confirm the superseded review closure request")
+      retired.push({ ...receipt, reviewIssueId: review.id, commentId: comment.id })
+    }
+    return retired
+  }
   if (task.prPolicy?.isInspector) return createPrInspectorPostback({ task, apiUrl })
   const tools = task.prPolicy?.inspectorAgentId === null && task.prPolicy?.isInspector === false ? [
     {
@@ -267,7 +333,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
     },
     {
       name: "retire_submission_branch",
-      description: "After the inspector returns a separate PR link, verify it with the provider and delete only this agent's original submitted branch. The provider checks company/agent ownership, repository, target, exact preserved commit, distinct PR source and unchanged original tip. Retry identical inputs after an uncertain result; never delete through shell commands.",
+      description: "After the inspector returns a separate PR link, verify it with the provider and delete this agent's original submitted branch. Also retire rejected submissions from stopped inspector reviews of this same task/repository using the verified replacement, and notify the inspector to close superseded reviews. The provider checks company/agent ownership, repository, target, exact replacement commit, distinct PR source and unchanged original tips. Retry identical inputs after an uncertain result; never delete through shell commands.",
       parameters: schema({
         submissionId: { type: "string" }, url: { type: "string" },
       }, ["submissionId", "url"]),
@@ -290,9 +356,10 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
         if (receipt?.submissionId !== input.submissionId || receipt.state !== "DELETED"
           || typeof receipt.branch !== "string" || !receipt.branch.startsWith("u/"))
           throw new Error("The provider did not confirm deletion of the owned submission branch")
+        const superseded = await retireSuperseded(repo, input, number, options)
         handoffFailures.delete(key)
         pendingSubmissions.delete(input.submissionId)
-        return receipt
+        return { ...receipt, superseded }
       },
     },
   ]

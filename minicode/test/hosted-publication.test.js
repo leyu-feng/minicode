@@ -27,7 +27,7 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
   }, { id: "reference", name: "Reference", readOnly: true }]
   const products = [], comments = [], children = [], publications = []
   let failHandoff = false, failRegistration = false
-  let failProducerNotification = false, failCleanup = false
+  let failProducerNotification = false, failCleanup = false, failSupersededNotification = false
   let failWaiting = false, sourceStatus = "in_progress", waitingWrites = 0
   let sourceUnblockDescriptor
   let liveInspector = inspectorExists
@@ -57,13 +57,16 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
     if (route.endsWith(`/issues/${parentId}`)) return Response.json({ id: parentId, companyId, assigneeAgentId: agentId })
     if (route.endsWith("/agents")) return Response.json([{ id: inspectorId, companyId, name: "PR Inspector", status: "idle" }])
     if (route.endsWith(`/companies/${companyId}/issues`)) {
+      if (options.method === "GET") return Response.json(children)
       if (failHandoff) return new Response("Handoff failed", { status: 503 })
       const saved = children.find(child => child.idempotencyKey === body.idempotencyKey)
       if (saved) return Response.json(saved)
-      const child = { ...body, id: "review-task", companyId }
+      const child = { ...body, id: "review-task", companyId, createdByAgentId: agentId }
       children.push(child)
       return Response.json(child)
     }
+    const review = children.find(child => route.endsWith(`/issues/${child.id}`))
+    if (review) return Response.json(review)
     if (route.endsWith("/work-products")) {
       const targetIssueId = route.split("/").at(-2)
       if (targetIssueId === parentId) return new Response("Agent cannot mutate another agent's issue", { status: 403 })
@@ -81,6 +84,8 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
       const targetIssueId = route.split("/").at(-2)
       if (options.method === "GET") return Response.json(comments.filter(comment => comment.issueId === targetIssueId))
       if (failProducerNotification && targetIssueId === parentId) return new Response("Notification failed", { status: 503 })
+      if (failSupersededNotification && targetIssueId === "rejected-review")
+        return new Response("Superseded notification failed", { status: 503 })
       const comment = { ...body, id: `comment-${comments.length + 1}`, issueId: targetIssueId, authorAgentId: task.agent.id }
       comments.push(comment)
       return Response.json(comment)
@@ -93,7 +98,9 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
       assert.equal(input.repositoryId, "main")
       if (input.mode === "delete_submitted_branch") {
         if (failCleanup) throw new Error("Provider verification failed")
-        return { submissionId, branch: "u/w01/feature", state: "DELETED" }
+        return { submissionId: input.submissionId,
+          branch: input.supersededBySubmissionId ? "u/w01/rejected-feature" : "u/w01/feature",
+          state: "DELETED", ...(input.supersededBySubmissionId ? { supersededBySubmissionId: input.supersededBySubmissionId } : {}) }
       }
       if (input.mode === "publish_pull_request") return {
         submissionId, commit, remoteCommit, branch: "u/w01/feature", provider: "azure_devops",
@@ -120,6 +127,7 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
     liveInspector: value => { liveInspector = value },
     failProducerNotification: value => { failProducerNotification = value },
     failCleanup: value => { failCleanup = value },
+    failSupersededNotification: value => { failSupersededNotification = value },
     failWaiting: value => { failWaiting = value },
     get sourceStatus() { return sourceStatus },
     get waitingWrites() { return waitingWrites },
@@ -300,6 +308,78 @@ test("producer retirement is repository-bound, fails explicitly and reconciles o
   assert.equal((await tool.execute(input)).state, "DELETED")
   assert.equal(f.publications.at(-1).pullRequestNumber, 12)
   assert.equal(f.publication.registrationError, null)
+})
+
+async function supersessionFixture(t) {
+  const f = fixture(t)
+  await f.tool("submit_branch_for_inspection").execute({ repository: "main", commit, title: "Feature", body: "Review" })
+  const accepted = f.children[0]
+  accepted.status = "done"
+  const previous = `submission-publication-${"e".repeat(64)}`
+  const rejectedCommit = "c".repeat(40)
+  const rejected = {
+    ...accepted, id: "rejected-review", status: "blocked",
+    description: accepted.description.replace(submissionId, previous).replace(remoteCommit, rejectedCommit)
+      .replace("u/w01/feature", "u/w01/rejected-feature"),
+    unblockDescriptor: { owner: { agentId: inspectorId }, action: "Reinspect after correction." },
+  }
+  f.children.push(rejected)
+  f.comments.push({ id: "findings", issueId, authorAgentId: inspectorId,
+    body: `Changes requested for ${previous}, reviewed commit ${rejectedCommit}.` })
+  const url = "https://code.example.test/project/_git/main/pullrequest/12"
+  f.products.push({ id: "accepted-pr", issueId: accepted.id, type: "pull_request", url,
+    metadata: { submissionId, sourceAgentId: agentId, inspectionIssueId: accepted.id, reviewedCommit: remoteCommit } })
+  return { ...f, rejected, previous, input: { repository: "main", submissionId, url } }
+}
+
+test("accepted retirement automatically retires rejected same-task submissions and requests inspector-owned closure", async t => {
+  const f = await supersessionFixture(t)
+  const receipt = await f.tool("retire_submission_branch").execute(f.input)
+  assert.equal(receipt.superseded.length, 1)
+  assert.equal(receipt.superseded[0].submissionId, f.previous)
+  assert.equal(receipt.superseded[0].reviewIssueId, f.rejected.id)
+  assert.deepEqual(f.publications.filter(call => call.mode === "delete_submitted_branch").map(call => ({
+    submissionId: call.submissionId, supersededBySubmissionId: call.supersededBySubmissionId,
+  })), [{ submissionId, supersededBySubmissionId: undefined }, { submissionId: f.previous, supersededBySubmissionId: submissionId }])
+  const notifications = () => f.comments.filter(comment => comment.issueId === f.rejected.id)
+  assert.equal(notifications().length, 1)
+  assert.equal(notifications()[0].authorAgentId, agentId)
+  assert.match(notifications()[0].body, /superseded-submission:/)
+  assert.equal(f.rejected.status, "blocked")
+  f.publication.assertCanComplete()
+  await f.tool("retire_submission_branch").execute(f.input)
+  assert.equal(notifications().length, 1)
+})
+
+test("partial superseded cleanup remains an explicit failure and reconciles without duplicate notifications", async t => {
+  const f = await supersessionFixture(t)
+  f.failSupersededNotification(true)
+  await assert.rejects(f.tool("retire_submission_branch").execute(f.input), /HTTP 503/)
+  assert.match(f.publication.registrationError, /cleanup is unconfirmed/)
+  assert.throws(() => f.publication.assertCanComplete(), /not complete/)
+  f.failSupersededNotification(false)
+  await f.tool("retire_submission_branch").execute(f.input)
+  assert.equal(f.comments.filter(comment => comment.issueId === f.rejected.id).length, 1)
+  assert.equal(f.publication.registrationError, null)
+  f.publication.assertCanComplete()
+})
+
+test("supersession never retires foreign, active, unpublished, or unconfirmed inspections", async t => {
+  for (const mismatch of ["parent", "company", "producer", "busy", "has-pr", "missing-report", "replacement-commit"]) {
+    await t.test(mismatch, async t => {
+      const f = await supersessionFixture(t)
+      if (mismatch === "parent") f.rejected.parentId = parentId
+      if (mismatch === "company") f.rejected.companyId = "other-company"
+      if (mismatch === "producer") f.rejected.createdByAgentId = inspectorId
+      if (mismatch === "busy") f.rejected.executionRunId = "active-run"
+      if (mismatch === "has-pr") f.products.push({ issueId: f.rejected.id, type: "pull_request", url: f.input.url })
+      if (mismatch === "missing-report") f.comments.find(comment => comment.id === "findings").authorAgentId = agentId
+      if (mismatch === "replacement-commit") f.products[0].metadata.reviewedCommit = commit
+      await assert.rejects(f.tool("retire_submission_branch").execute(f.input), /Supersession|Retain the earlier|invalid assigned-issue child list/)
+      assert.equal(f.publications.filter(call => call.supersededBySubmissionId).length, 0)
+      assert.equal(f.comments.filter(comment => comment.issueId === f.rejected.id).length, 0)
+    })
+  }
 })
 
 test("read-only repositories and credential-bearing publication descriptors are rejected", async t => {

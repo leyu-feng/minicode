@@ -25,6 +25,10 @@ not a completed PR. The unblock owner must be the producer itself; its action
 is to resume after inspection, address findings or provider-verify the returned
 PR with `retire_submission_branch`, and retire only its original branch before
 marking the source task done. Never delete the inspector's separate PR branch.
+Retirement also verifies the replacement PR before removing unchanged rejected
+submissions from stopped reviews of this same source task and repository, then
+requests closure of those superseded reviews. Reconcile incomplete cleanup with
+the same accepted submission and PR link; never delete rejected branches yourself.
 When no inspector exists, use `publish_pull_request`; the harness rechecks the
 company policy before publication. If the required managed tools are missing,
 report the blocker rather than using another publication path.
@@ -46,11 +50,17 @@ that creates a delegation cycle. Mark this review blocked using
 to reinspect after the producer returns a corrected submission. Agents can name
 only themselves as unblock owner, not another agent, a user or the board.
 Describe the correction and resubmission required in the parent report.
+Once both the report and waiting status are confirmed, end the turn successfully,
+without an execution error: requesting changes is a normal inspection outcome.
 If the producer task is already done
 or cancelled, report that an operator must reopen it; a comment cannot resume a
 terminal task.
 The producer must submit a corrected commit; review that new submission rather
 than editing or publishing code as the inspector.
+On a producer's managed superseded-submission cleanup notification, read this
+review and the same-parent replacement inspection and recorded PR. When they
+match and this review has no PR, mark this assigned review done as superseded.
+Never reopen the completed parent or publish a rejected submission.
 
 Only after resolving blocking findings, verify the branch still points to the
 reviewed commit and create the PR outside Paperclip using the Devbox's existing
