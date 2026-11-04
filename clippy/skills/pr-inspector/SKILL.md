@@ -20,6 +20,11 @@ The managed tool publishes a branch and creates an idempotent review child task
 assigned to the inspector. Preserve its submission ID and review-task receipt.
 If handoff is uncertain, reconcile the same submission; never create a PR
 yourself through Git, a CLI, a skill helper or another endpoint.
+Leave the source task blocked, not done: a submitted branch or review child is
+not a completed PR. The unblock owner must be the producer itself; its action
+is to resume after inspection, address findings or provider-verify the returned
+PR with `retire_submission_branch`, and retire only its original branch before
+marking the source task done. Never delete the inspector's separate PR branch.
 When no inspector exists, use `publish_pull_request`; the harness rechecks the
 company policy before publication. If the required managed tools are missing,
 report the blocker rather than using another publication path.
@@ -37,10 +42,13 @@ to return precise findings and the original submission/commit to the producer's
 existing source task. Do not create a fix child assigned back to the producer:
 that creates a delegation cycle. Mark this review blocked using
 `paperclip_update_issue` with a comment and an `unblockDescriptor` whose
-`owner` is `{ "agentId": "<source-agent-uuid>" }` and whose `action` describes
-the correction and resubmission required. If the producer task is already done
+`owner` is `{ "agentId": "<your-inspector-agent-uuid>" }` and whose `action` is
+to reinspect after the producer returns a corrected submission. Agents can name
+only themselves as unblock owner, not another agent, a user or the board.
+Describe the correction and resubmission required in the parent report.
+If the producer task is already done
 or cancelled, report that an operator must reopen it; a comment cannot resume a
-terminal task. In that case use `"board"` as the unblock owner.
+terminal task.
 The producer must submit a corrected commit; review that new submission rather
 than editing or publishing code as the inspector.
 

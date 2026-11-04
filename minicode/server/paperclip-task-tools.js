@@ -5,7 +5,7 @@ const MAX_COMMENT = 16000
 const PRIORITIES = ["critical", "high", "medium", "low"]
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i
 
-export function createPaperclipTaskTools({ apiUrl, authToken, runId, issueId, agentId, companyId }) {
+export function createPaperclipTaskTools({ apiUrl, authToken, runId, issueId, agentId, companyId, assertCanComplete }) {
   if (!issueId || !authToken || !runId || !agentId || !companyId) return []
   const route = `/issues/${encodeURIComponent(issueId)}`
   const companyRoute = `/companies/${encodeURIComponent(companyId)}`
@@ -188,7 +188,7 @@ export function createPaperclipTaskTools({ apiUrl, authToken, runId, issueId, ag
     },
     {
       name: "paperclip_update_issue",
-      description: "Save the assigned Paperclip issue's status with an explanatory comment. Entering blocked requires unresolved blockers, a pending interaction/approval, or an unblockDescriptor naming who must act and what they must do. Use done only when the task acceptance criteria are met. Existing checkout, pause, approval and authorization gates remain enforced. A successful CLI exit or final message never changes task status." + guidance,
+      description: "Save the assigned Paperclip issue's status with an explanatory comment. Entering blocked requires unresolved blockers, a pending interaction/approval, or an unblockDescriptor naming this agent as owner and describing its next action after the dependency is resolved. Agents cannot name another agent, a user or the board as unblock owner. Use done only when the task acceptance criteria are met. Existing checkout, pause, approval and authorization gates remain enforced. A successful CLI exit or final message never changes task status." + guidance,
       parameters: parameters({
         status: { type: "string", enum: STATUSES },
         comment: { type: "string", minLength: 1, maxLength: MAX_COMMENT },
@@ -196,13 +196,8 @@ export function createPaperclipTaskTools({ apiUrl, authToken, runId, issueId, ag
           anyOf: [{ type: "null" }, {
             type: "object", additionalProperties: false, required: ["owner", "action"],
             properties: {
-              owner: { anyOf: [
-                { type: "string", enum: ["board"] },
-                { type: "object", additionalProperties: false, required: ["agentId"],
-                  properties: { agentId: { type: "string", pattern: UUID.source } } },
-                { type: "object", additionalProperties: false, required: ["userId"],
-                  properties: { userId: { type: "string", minLength: 1 } } },
-              ] },
+              owner: { type: "object", additionalProperties: false, required: ["agentId"],
+                properties: { agentId: { type: "string", enum: [agentId] } } },
               action: { type: "string", minLength: 1, maxLength: 2000 },
             },
           }],
@@ -217,15 +212,13 @@ export function createPaperclipTaskTools({ apiUrl, authToken, runId, issueId, ag
           validate(descriptor, ["owner", "action"])
           if (input.status !== "blocked") throw new Error("An unblockDescriptor requires blocked status")
           text(descriptor.action, "unblock action", 2000)
-          if (descriptor.owner !== "board") {
-            const owner = descriptor.owner
-            if (!owner || typeof owner !== "object" || Array.isArray(owner) || Object.keys(owner).length !== 1
-              || !(Object.hasOwn(owner, "agentId") && typeof owner.agentId === "string" && UUID.test(owner.agentId)
-                || Object.hasOwn(owner, "userId") && typeof owner.userId === "string" && owner.userId.trim()))
-              throw new Error("An unblock owner must be board, an agent UUID, or a company user ID")
-          }
+          const owner = descriptor.owner
+          if (!owner || typeof owner !== "object" || Array.isArray(owner) || Object.keys(owner).length !== 1
+            || owner.agentId !== agentId)
+            throw new Error("Agents may only name themselves as an unblock owner")
         }
         await read(signal)
+        if (input.status === "done") await assertCanComplete?.()
         const patch = { status: input.status, comment: input.comment,
           ...(descriptor !== undefined ? { unblockDescriptor: descriptor } : {}) }
         const issue = assignedIssue(await api(route, "PATCH", patch, signal))

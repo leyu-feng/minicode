@@ -43,6 +43,8 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
         if (failWaiting) return new Response("Waiting state failed", { status: 503 })
         if (body.status === "blocked" && !body.unblockDescriptor)
           return Response.json({ error: "Entering blocked requires an unblockDescriptor" }, { status: 422 })
+        if (body.unblockDescriptor?.owner?.agentId !== task.agent.id)
+          return Response.json({ error: "Agents may only name themselves as an unblock owner" }, { status: 403 })
         sourceStatus = body.status
         sourceUnblockDescriptor = body.unblockDescriptor
         waitingWrites++
@@ -133,7 +135,7 @@ test("ordinary agents receive branch submission and owned retirement, handing of
   assert.equal(receipt.reviewIssueId, "review-task")
   assert.equal(receipt.waitingForInspection, true)
   assert.equal(f.sourceStatus, "blocked")
-  assert.deepEqual(f.sourceUnblockDescriptor.owner, { agentId: inspectorId })
+  assert.deepEqual(f.sourceUnblockDescriptor.owner, { agentId })
   assert.ok(f.sourceUnblockDescriptor.action.includes("review-task"))
   assert.equal(f.children[0].assigneeAgentId, inspectorId)
   assert.ok(f.children[0].description.includes(submissionId))
@@ -147,6 +149,12 @@ test("ordinary agents receive branch submission and owned retirement, handing of
   assert.equal(f.publications.filter(call => call.mode === "submit_branch").length, 1)
   assert.equal(f.products.length, 0)
   assert.equal(f.publication.registrationError, null)
+  assert.throws(() => f.publication.assertCanComplete(), /retire_submission_branch/)
+  await f.tool("retire_submission_branch").execute({
+    repository: "main", submissionId,
+    url: f.repositories[0].publication.pullRequestUrlTemplate.replace("{number}", "12"),
+  })
+  f.publication.assertCanComplete()
 })
 
 test("no inspector allows direct PR publication and reconciles registration with identical inputs", async t => {
@@ -201,6 +209,8 @@ test("failed review handoff stays an execution failure until the same submission
   f.failHandoff(true)
   await assert.rejects(f.tool("submit_branch_for_inspection").execute(input), /saved.*handoff is unconfirmed/)
   assert.match(f.publication.registrationError, /handoff is incomplete/)
+  assert.match(f.publication.registrationError, /HTTP 503/)
+  assert.throws(() => f.publication.assertCanComplete(), /not complete/)
   f.failHandoff(false)
   await f.tool("submit_branch_for_inspection").execute(input)
   assert.equal(f.publication.registrationError, null)

@@ -74,16 +74,14 @@ test("blocked updates preserve an explicit unblock owner/action and reject uncon
     return Response.json({ ...original, status: body.status,
       ...(confirm ? { unblockDescriptor: body.unblockDescriptor } : {}) })
   })
-  for (const owner of ["board", { agentId: assignee.id }, { userId: "reviewer" }]) {
-    const descriptor = { owner, action: "Correct the reviewed submission and resubmit." }
-    const saved = await tools().paperclip_update_issue.execute({
-      status: "blocked", comment: "Waiting for correction.", unblockDescriptor: descriptor,
-    }, context)
-    assert.deepEqual(saved.unblockDescriptor, descriptor)
-  }
+  const descriptor = { owner: { agentId: scope.agentId }, action: "Reinspect after the producer returns a corrected submission." }
+  const saved = await tools().paperclip_update_issue.execute({
+    status: "blocked", comment: "Waiting for correction.", unblockDescriptor: descriptor,
+  }, context)
+  assert.deepEqual(saved.unblockDescriptor, descriptor)
   confirm = false
   await assert.rejects(tools().paperclip_update_issue.execute({
-    status: "blocked", comment: "Waiting.", unblockDescriptor: { owner: "board", action: "Review findings." },
+    status: "blocked", comment: "Waiting.", unblockDescriptor: { owner: { agentId: scope.agentId }, action: "Review findings." },
   }, context), /did not confirm the requested unblock/)
 })
 
@@ -94,6 +92,9 @@ test("invalid unblock descriptors cannot send mutations or scope overrides", asy
     { owner: { agentId: [assignee.id] }, action: "Review." },
     { owner: { agentId: assignee.id, userId: "reviewer" }, action: "Review." },
     { owner: { agentId: "not-a-uuid" }, action: "Review." },
+    { owner: { agentId: assignee.id }, action: "Review." },
+    { owner: { userId: "reviewer" }, action: "Review." },
+    { owner: "board", action: "Review." },
     { owner: "other", action: "Review." },
     { owner: "board", action: "Review.", companyId: "other" },
   ]) await assert.rejects(tools().paperclip_update_issue.execute({
@@ -102,6 +103,22 @@ test("invalid unblock descriptors cannot send mutations or scope overrides", asy
   await assert.rejects(tools().paperclip_update_issue.execute({
     status: "done", comment: "Complete.", unblockDescriptor: { owner: "board", action: "Review." },
   }, context), /requires blocked/)
+})
+
+test("completion guards reject premature done before any status write", async t => {
+  let guarded = false
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    assert.equal(options.method, "GET")
+    return Response.json(original)
+  })
+  const available = createPaperclipTaskTools({ ...scope, assertCanComplete() {
+    guarded = true
+    throw new Error("Inspection and owned branch cleanup are incomplete")
+  } })
+  await assert.rejects(available.find(tool => tool.name === "paperclip_update_issue").execute({
+    status: "done", comment: "The review child was created.",
+  }, context), /cleanup are incomplete/)
+  assert.equal(guarded, true)
 })
 
 test("parent reports reconcile uncertain saves without delegating back or changing parent state", async t => {

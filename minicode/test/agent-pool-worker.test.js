@@ -762,16 +762,23 @@ test("disk monitoring does not cancel the assignment deadline after repository p
   assert.equal(started, true)
 })
 
-test("an unresolved inspection handoff fails the run even if the model claims success", async t => {
+test("an unresolved inspection handoff prevents task completion and fails the run even if the model claims success", async t => {
   let submitted = false
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "inspection-handoff-test-"))
   const shared = path.join(root, "shared")
   await fs.mkdir(shared)
   t.after(() => fs.rm(root, { recursive: true, force: true }))
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    assert.equal(options.method, "GET", "Premature completion must not send a status mutation")
+    return Response.json({ id: "assigned-issue", companyId: "company-a", assigneeAgentId: agent.id })
+  })
   class Session extends EventEmitter {
-    constructor(options) { super(); this.tool = options.tools[0] }
+    constructor(options) { super(); this.tools = options.tools }
     async write() {
-      await assert.rejects(this.tool.execute({}), /Handoff failed/)
+      await assert.rejects(this.tools.find(tool => tool.name === "submit_branch_for_inspection").execute({}), /Handoff failed/)
+      await assert.rejects(this.tools.find(tool => tool.name === "paperclip_update_issue").execute({
+        status: "done", comment: "The review child was created.",
+      }), /Inspection cleanup is incomplete/)
       return { exitCode: 0 }
     }
     interrupt() {}
@@ -788,10 +795,12 @@ test("an unresolved inspection handoff fails the run even if the model claims su
       tools: [{ name: "submit_branch_for_inspection", description: "Fixture", parameters: { type: "object", properties: {} },
         async execute() { submitted = true; throw new Error("Handoff failed") } }],
       get registrationError() { return submitted ? "Branch inspection handoff is incomplete" : null },
+      assertCanComplete() { if (submitted) throw new Error("Inspection cleanup is incomplete") },
     }),
   })
   const peer = await fixture.welcome(0)
-  peer.send({ type: "task", runId: "registration-failure", agent, context: {},
+  peer.send({ type: "task", runId: "registration-failure", agent: { ...agent, companyId: "company-a" },
+    authToken: "fixture-run-token", context: { issueId: "assigned-issue" },
     repositories: { mode: "all_repositories", repositories: [{ id: "main", name: "Main", readOnly: false }] } })
   await waitUntil(() => peer.messages.some(message => message.type === "result"))
   const result = peer.messages.find(message => message.type === "result")

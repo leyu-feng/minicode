@@ -1,6 +1,6 @@
 import { paperclipPublicationTool } from "./paperclip-publication.js"
 import { createPaperclipTaskTools } from "./paperclip-task-tools.js"
-import { httpErrorDetails } from "./http-error.js"
+import { httpErrorDetails, redactSecrets } from "./http-error.js"
 
 async function paperclipApi(task, apiUrl, path, method, body, signal) {
   if (!task.authToken || !task.runId || !task.agent?.companyId) throw new Error("Publication requires run-scoped Paperclip authentication")
@@ -140,6 +140,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
   const registrations = new Map()
   const registrationInputs = new Map()
   const handoffFailures = new Map()
+  const pendingSubmissions = new Set()
   const retirementUrls = new Map()
   const repository = input => {
     const repo = writable.find(repo => (repo.alias ?? repo.name) === input?.repository)
@@ -234,6 +235,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
           || receipt.commit !== input.commit || !/^[a-f0-9]{40}$/.test(receipt.remoteCommit ?? "")
           || typeof receipt.branch !== "string" || !receipt.branch.trim()
           || receipt.state !== "SUBMITTED") throw new Error("The provider did not confirm the submitted branch")
+        pendingSubmissions.add(receipt.submissionId)
         try {
           const review = await create.execute({
             title: `Review PR: ${input.title}`,
@@ -249,15 +251,17 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
           if (source.status !== "blocked" || !comments.some(entry => entry.authorAgentId === task.agent.id && entry.body?.includes(marker))) {
             await update.execute({
               status: "blocked",
-              unblockDescriptor: { owner: { agentId: inspector },
-                action: `Review submission ${receipt.submissionId} in task ${review.id} and return its PR link or correction findings.` },
+              unblockDescriptor: { owner: { agentId: task.agent.id },
+                action: `After inspection task ${review.id} returns a PR link or corrections for ${receipt.submissionId}, resume to verify the PR and retire the original branch, or address the findings.` },
               comment: `Waiting for inspection task ${review.id} to return a separate PR link for branch ${receipt.branch}.\n\nResume to provider-verify that PR and retire only this original submission. The submitted branch is not a PR and this source task is not complete.\n\n${marker}`,
             }, options)
           }
           handoffFailures.delete(failureKey)
           return { ...receipt, reviewIssueId: review.id, inspectorAgentId: inspector, waitingForInspection: true }
         } catch (cause) {
-          throw new Error(`Branch ${receipt.submissionId} was saved, but its review-task handoff is unconfirmed. Retry the same submission to reconcile; do not claim a PR was created.`, { cause })
+          const detail = redactSecrets(cause instanceof Error ? cause.message : String(cause), [task.authToken]).slice(0, 2000)
+          handoffFailures.set(failureKey, `Branch inspection handoff is incomplete: ${detail}. Reconcile submission ${receipt.submissionId}.`)
+          throw new Error(`Branch was saved, but its review-task handoff is unconfirmed: ${detail}. Retry submission ${receipt.submissionId} with the same inputs; do not claim a PR was created.`, { cause })
         }
       },
     },
@@ -287,12 +291,17 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
           || typeof receipt.branch !== "string" || !receipt.branch.startsWith("u/"))
           throw new Error("The provider did not confirm deletion of the owned submission branch")
         handoffFailures.delete(key)
+        pendingSubmissions.delete(input.submissionId)
         return receipt
       },
     },
   ]
   return {
     tools,
+    assertCanComplete() {
+      if (handoffFailures.size || pendingSubmissions.size)
+        throw new Error("Branch inspection is not complete. Reconcile any failed handoff, wait for the inspector's PR or corrections, and provider-verify the PR with retire_submission_branch before marking the source task done.")
+    },
     get registrationError() {
       return [...registrations.values()].find(tool => tool.registrationError)?.registrationError
         ?? handoffFailures.values().next().value ?? null
