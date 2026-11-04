@@ -73,6 +73,18 @@ async function fixture(t) {
   }
 }
 
+test("named workers publish readable u branches, retry collisions and retain durable allocation across worker-name changes", async t => {
+  const f = await fixture(t)
+  await f.git(f.remote, "update-ref", "refs/heads/u/pi1/ci-baseline", await f.git(f.source, "rev-parse", "HEAD"))
+  const named = f.publisher({ workspace: f.workspace, agentId: "engineer", workerName: "pi1" })
+  const receipt = await named.execute(f.input)
+  assert.equal(receipt.branch, "u/pi1/ci-baseline-1")
+  const retry = f.publisher({ workspace: f.workspace, agentId: "engineer", workerName: "pi2" })
+  const saved = await retry.execute(f.input, { publication: { existing: receipt } })
+  assert.equal(saved.branch, receipt.branch)
+  assert.equal(f.pushCount, 1)
+})
+
 test("publisher creates and reuses a PR without changing either checkout or retaining its worktree", async t => {
   const f = await fixture(t)
   const before = await f.git(f.source, "rev-parse", "HEAD")

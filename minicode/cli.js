@@ -64,7 +64,8 @@ Options:
   --no-secret-store       Disable process-memory secrets for paired workers
   --worker-shared <dir>   Worker read-only shared folder (default: sibling worker_shared)
   --reference-repo [<branch>@]<name>=<dir>  Attach a synced read-only reference checkout (repeatable)
-  --workspace-mode <mode>  worktree (default): clean worker-agent siblings; clone: legacy per-agent clones
+  --workspace-mode <mode>  worktree (default): clean worker-agent siblings; clone: legacy per-agent clones;
+                          workspace: non-Git root with operator workspace.json and isolated repository worktrees
   --worker-name <name>    Short sibling prefix, e.g. w1 creates w1a1 (default: w-<worker-id prefix>)
   --min-free-gib <GiB>    Evict idle worktrees below this free space (default: 24)
   --target-free-gib <GiB>  LRU cleanup recovery target (default: 36; worktree mode only)

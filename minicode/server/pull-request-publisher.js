@@ -48,9 +48,13 @@ export function publicationSlug(value) {
   return String(value).normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 64).replace(/-$/, "")
 }
 
-export function publicationBranch(alias, agentName, title) {
+export function publicationBranch(alias, agentName, title, workerName) {
   const agent = publicationSlug(agentName), feature = publicationSlug(title)
   if (!agent || !feature) throw new Error("PR branch naming requires an agent name and title containing letters or numbers")
+  if (workerName !== undefined) {
+    if (!/^[a-z0-9][a-z0-9_-]{0,23}$/i.test(workerName)) throw new Error("PR publication requires a safe worker name")
+    return `u/${workerName}/${feature}`
+  }
   return `users/${alias}/${agent}/${feature}`
 }
 

@@ -13,11 +13,11 @@ export async function createGitHubPublisher({ repoRoot, repository, githubUser, 
     throw new Error("--github-repo must match the source checkout's GitHub origin")
   }
   let repositoryId
-  return ({ workspace, agentId, agentName = agentId }) => pullRequestTool({
+  return ({ workspace, agentId, agentName = agentId, workerName }) => pullRequestTool({
     repoRoot, workspace, agentId, env, run,
     url: `https://github.com/${repository}.git`,
-    branchForTitle: title => publicationBranch(githubUser, agentName, title),
-    description: `Publish an existing local commit to ${repository} for review using harness-owned GitHub credentials. Branches use users/${githubUser}/<agent-name>/<feature-title> with up to 10 collision suffixes. Saved PRs reconcile without local history. Never merges or deploys.`,
+    branchForTitle: title => publicationBranch(githubUser, agentName, title, workerName),
+    description: `Publish an existing local commit to ${repository} for review using harness-owned GitHub credentials. Branches use ${workerName === undefined ? `users/${githubUser}/<agent-name>` : `u/${workerName}`}/<feature-title> with up to 10 collision suffixes. Saved PRs reconcile without local history. Never merges or deploys.`,
     async prepare({ title, body, signal, saved }) {
       if (await local(["remote", "get-url", "origin"], { signal }) !== origin) throw new Error("Source origin changed; restart the worker before publication")
       const token = await run("gh", ["auth", "token", "--hostname", "github.com", "--user", githubUser], { cwd: repoRoot, env, signal })

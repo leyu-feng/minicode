@@ -125,6 +125,54 @@ async function harness(t, factory, workerOptions = {}) {
   }
 }
 
+test("Devbox workspace-root sessions use supervisory guidance, isolated bundles and inspector postback without Hosted identity tools", async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "devbox-root-session-"))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const shared = path.join(root, "supervisor"), writable = path.join(root, "pi1-application")
+  const artifacts = path.join(root, ".workers", "pi1", "run-root")
+  await fs.mkdir(shared)
+  await fs.mkdir(writable)
+  await fs.mkdir(path.join(artifacts, "reviews"), { recursive: true })
+  await fs.writeFile(path.join(shared, "AGENTS.md"), "Synthetic supervisory instructions.")
+  const bundle = skillBundle()
+  let sessionOptions
+  class Session extends EventEmitter {
+    constructor(options) { super(); sessionOptions = options }
+    async write() { return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, options => new Session(options), {
+    bundle, cwd: root, workspaceRoot: undefined, workspaceMode: "workspace", workerName: "pi1",
+    workspaceFactory: async () => ({
+      workerShared: shared, release() {}, async checkDisk() {}, async ensureDiskSpace() {},
+      async prepare() {
+        return { artifacts, manifestPath: path.join(artifacts, "workspace.json"), reviews: path.join(artifacts, "reviews"),
+          repositories: [
+            { name: "supervisor", path: shared, readOnly: true, supervisory: true, branch: "dev", commit: "a".repeat(40) },
+            { name: "application", path: writable, readOnly: false, supervisory: false, branch: "main", commit: "b".repeat(40) },
+          ] }
+      },
+    }),
+  })
+  const peer = await fixture.welcome(0)
+  await executeTask(peer, { runId: "run-root", agent: { ...agent, companyId: randomUUID() },
+    context: { issueId: randomUUID() }, authToken: "private-run-token", skills: bundle.skills,
+    prPolicy: { isInspector: true, inspectorAgentId: agent.id } })
+  assert.equal(sessionOptions.cwd, root)
+  assert.equal(sessionOptions.env.WORKER_SHARED, shared)
+  assert.match(sessionOptions.instructions, /Synthetic supervisory instructions/)
+  assert.ok(sessionOptions.instructions.includes(`common workspace root is ${root}; it is read-only`))
+  assert.ok(sessionOptions.instructions.includes(`review scratch directory ${path.join(artifacts, "reviews")}`))
+  assert.ok(sessionOptions.instructions.includes(`Repository manifest: ${path.join(artifacts, "workspace.json")}`))
+  assert.doesNotMatch(sessionOptions.instructions, /Hosted identity restrictions take precedence/)
+  assert.ok(sessionOptions.tools.some(tool => tool.name === "record_pull_request"))
+  assert.ok(!sessionOptions.tools.some(tool => ["provider_read", "provider_post", "publish_pull_request"].includes(tool.name)))
+  assert.equal(await fs.readFile(path.join(artifacts, ".worker", "skills", "paperclip", "SKILL.md"), "utf8"),
+    "# Paperclip skill\nPost progress with the issue comments API and verify task completion.")
+  await assert.rejects(fs.stat(path.join(root, ".worker")), { code: "ENOENT" })
+})
+
 for (const selectedHarness of ["claudecode", "copilotcli"]) {
   test(`${selectedHarness} rejects invalid expiring credentials before preparation and keeps valid tokens private`, async t => {
     const sessions = []
@@ -348,7 +396,7 @@ test("worker passes an explicit resource Azure CLI context to assignment session
   await assert.rejects(startAgentPoolWorker({ ...fixture.options, toolAzureConfigDir: path.join(os.tmpdir(), randomUUID()) }), /ENOENT/)
 })
 
-test("Academy failure capture completes before reporting the original failed result and includes only structured evidence", async t => {
+test("supervisory failure capture completes before reporting the original failed result and includes only structured evidence", async t => {
   const evidence = []
   let release
   const gate = new Promise(resolve => { release = resolve })
@@ -364,10 +412,10 @@ test("Academy failure capture completes before reporting the original failed res
   const peer = await fixture.welcome(0)
   const instructions = inlineInstructions("Private agent instructions")
   await waitUntil(() => peer.messages.some(message => message.type === "ready"))
-  peer.send({ type: "task", runId: "academy-failure", agent, context: { task: "Private task body" }, instructions })
+  peer.send({ type: "task", runId: "supervisory-failure", agent, context: { task: "Private task body" }, instructions })
   await waitUntil(() => evidence.length === 1)
   assert.ok(!peer.messages.some(message => message.type === "result"))
-  assert.deepEqual(evidence, [{ runId: "academy-failure", failure: {
+  assert.deepEqual(evidence, [{ runId: "supervisory-failure", failure: {
     code: "invalid_prompt", model: "fixture", httpStatus: 400, instructionsHash: instructions.contentSha256,
   } }])
   assert.doesNotMatch(JSON.stringify(evidence), /Private/)
@@ -376,7 +424,7 @@ test("Academy failure capture completes before reporting the original failed res
   assert.equal(peer.messages.find(message => message.type === "result").exitCode, 1)
 })
 
-test("Academy reporting failure is visible and does not change or replay the failed task", async t => {
+test("supervisory reporting failure is visible and does not change or replay the failed task", async t => {
   let executions = 0
   const logs = []
   class Session extends EventEmitter {
@@ -388,14 +436,14 @@ test("Academy reporting failure is visible and does not change or replay the fai
     onModelFailure: async () => { throw new Error("Capture unavailable") }, log: message => logs.push(message),
   })
   const peer = await fixture.welcome(0)
-  const result = await executeTask(peer, { runId: "academy-reporting-error", agent }, 1)
+  const result = await executeTask(peer, { runId: "supervisory-reporting-error", agent }, 1)
   assert.equal(result.error, "Original policy rejection")
   assert.equal(executions, 1)
-  assert.ok(logs.some(message => message.includes("Academy failure capture failed")))
+  assert.ok(logs.some(message => message.includes("failure capture failed")))
   assert.ok(peer.messages.some(message => message.type === "log" && message.data.includes("Capture unavailable")))
 })
 
-test("failed prompt evidence travels only on the private Academy callback, not Paperclip result messages", async t => {
+test("failed prompt evidence travels only on the private supervisory callback, not Paperclip result messages", async t => {
   const evidence = []
   class Session extends EventEmitter {
     async write() {

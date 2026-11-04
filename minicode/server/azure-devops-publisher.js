@@ -114,11 +114,11 @@ export async function createAzureDevOpsPublisher({ repoRoot, organization, proje
   const identity = `${source.organization}/${bound.project.name}/${bound.name}`
   const webUrl = `https://dev.azure.com/${source.organization}/${encodeURIComponent(bound.project.name)}/_git/${encodeURIComponent(bound.name)}`
   const branchForCommit = (agentId, commit) => `users/${alias}/minicode-${agentId}-${commit}`
-  const publisher = ({ workspace, agentId, agentName = agentId }) => pullRequestTool({
+  const publisher = ({ workspace, agentId, agentName = agentId, workerName }) => pullRequestTool({
     repoRoot, workspace, agentId, env, run, url: pushUrl.href,
     branchForCommit: commit => branchForCommit(agentId, commit),
-    branchForTitle: title => publicationBranch(alias, agentName, title),
-    description: `Publish an existing local commit to Azure Repos ${identity} using existing Git credentials and harness-only MSAL REST credentials. Branches use users/${alias}/<agent-name>/<feature-title> with up to 10 collision suffixes. Saved PRs reconcile without local history. Never merges or deploys.`,
+    branchForTitle: title => publicationBranch(alias, agentName, title, workerName),
+    description: `Publish an existing local commit to Azure Repos ${identity} using existing Git credentials and harness-only MSAL REST credentials. Branches use ${workerName === undefined ? `users/${alias}/<agent-name>` : `u/${workerName}`}/<feature-title> with up to 10 collision suffixes. Saved PRs reconcile without local history. Never merges or deploys.`,
     async prepare({ title, body, signal, saved }) {
       const currentOrigin = repositoryUrl(await run("git", ["remote", "get-url", "origin"], { cwd: repoRoot, env, signal }))
       if (JSON.stringify(currentOrigin) !== JSON.stringify(source)) throw new Error("Source origin changed; restart the worker before publication")

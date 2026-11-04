@@ -479,6 +479,83 @@ opened.
 
 ## Connect as an AgentPool worker
 
+### Devbox workspace-root mode
+
+Use `--workspace-mode workspace --repo-root E:\Code` to start at a non-Git
+workspace root rather than one primary repository. The operator's
+`E:\Code\workspace.json` declares all available repositories:
+
+```json
+{
+  "version": 1,
+  "repositories": [
+    { "id": "supervisor", "source": "https://example.com/Supervisor", "checkout": "clone", "branch": "dev", "supervisory": true },
+    { "id": "application", "source": "https://example.com/Application", "checkout": "clone", "branch": "main" },
+    { "id": "reference", "source": "https://example.com/Reference", "checkout": "clone", "branch": "main", "readOnly": true }
+  ]
+}
+```
+
+Exactly one repository must be supervisory; it supplies `worker_shared` and
+must contain `AGENTS.md`. Its instructions and same-named skills override
+subordinate repository guidance, as in Hosted workspace-root mode. Supervisory
+and explicitly read-only checkouts are never reset or written by the worker;
+they are observed at their existing committed HEAD.
+
+Existing sources resolve as `<root>\<id>`, or `<root>\<id>\<branch>` for the
+workspace's bare-repository/worktree layout. Their origin must exactly match
+the configured HTTPS source. Missing sources are cloned at startup using Git's
+existing credentials. Uncommitted source changes are never copied or reset.
+Do not use this mode with primary branch selectors, shared/reference overrides
+or fixed GitHub/Azure DevOps publication settings.
+
+Every writable repository gets its own clean-reset, worker/agent-owned worktree
+under the workspace root. Workers never share writable checkouts. The common
+root, source checkouts and other workers' folders remain read-only. A per-run
+resolved manifest and isolated skill cache live under
+`.workers\<worker-id>\<run-id>`; only the supplied `reviews` subdirectory is
+agent-writable scratch storage. Save durable results through task/artifact APIs.
+Editing `workspace.json` requires restarting the workers.
+
+The designated Devbox PR Inspector may inspect a trusted handoff's exact
+repository/branch/commit with existing CLI sign-in, create the reviewed PR
+externally from its separate `u/<worker-name>/<readable-feature-title>` branch.
+It creates only a previously absent ref, at the exact reviewed remote commit;
+occupied names get `-1` through `-10` collision suffixes. It never changes the
+producer's branch or the harness-owned local branch, merges or enables auto-complete.
+`record_pull_request` records the link on both the review and source tasks,
+with the original submission ID and reviewed commit. Partial postbacks reconcile
+without duplicate work products/comments. This records an external link, not
+independent provider verification. The producer uses `retire_submission_branch`
+to verify the separate PR and delete only its original, unchanged submission
+through the managed provider; no CLI branch deletion is authorized. Logical
+ownership follows the submitting company/agent across worker-machine changes,
+not the local checkout or shared ADO credential identity. The provider must
+support `delete_submitted_branch`; older deployments fail explicitly and retain
+the source branch. Workspace mode has no generic branch-submission,
+direct-publication or `sync_repositories` tool. Initial writable worktrees are
+fetched/reset before each assignment; source and read-only checkouts stay intact.
+Other agents must report missing publication capabilities rather than improvise.
+Named Devbox publishers create new PR branches as
+`u/<worker-name>/<readable-feature-title>`, with the existing `-1` through `-10`
+collision retries and durable allocation/reconciliation. Existing saved branches
+are reused unchanged. An inspector copies the submitted remote commit onto its
+own new PR branch; it does not rename, edit or delete another worker's branch.
+Branch handoff also saves the producer task in its blocked/waiting state before
+releasing the assignment. The inspector's parent-task comment returns the PR
+link through the existing continuation/wakeup path, without cross-agent
+work-product writes.
+
+This matches Hosted's non-Git root, simultaneous repository manifest and
+supervisory instruction layout, **not** its managed-identity provider tools.
+Devbox credentials remain local; pairing and model authentication are separate.
+
+```powershell
+node .\minicode\cli.js worker --server https://clippy.example.test `
+  --worker-id <id> --repo-root E:\Workspace --workspace-mode workspace `
+  --worker-name reviewer-one --entra-user operator@example.test --auth @copilot
+```
+
 ### Separate Azure CLI identity for shell tools
 
 A Devbox worker can use a different Azure CLI context for agent shell commands than its model profile and Paperclip service session. Prepare an existing, signed-in Azure CLI configuration directory, verify its account, tenant and subscription, then add `--tool-azure-config-dir <absolute-directory>` to the worker command. For the standard Windows Azure CLI directory, an example is `--tool-azure-config-dir "$env:USERPROFILE\.azure"`. This option affects `AZURE_CONFIG_DIR` in assignment shell tools only; it does not change model authentication, Paperclip's `--entra-user` session, Git or Azure DevOps publication. Without the option, existing behavior is unchanged: a model profile with an isolated Azure CLI directory also supplies that directory to shell commands.
