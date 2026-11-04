@@ -9,6 +9,19 @@ const inspectorId = "44444444-4444-4444-8444-444444444444"
 const parentId = "55555555-5555-4555-8555-555555555555"
 const submissionId = `submission-publication-${"d".repeat(64)}`
 const commit = "a".repeat(40), remoteCommit = "b".repeat(40)
+const inspectionInput = {
+  schema: "pr_inspection_result_v1", outcome: "approved", submissionId, reviewedCommit: remoteCommit,
+  body: "Reviewed the exact submitted diff.",
+}
+function inspectionReceipt(overrides = {}) {
+  return { id: "receipt-1", body: inspectionInput.body, result: {
+    schema: "pr_inspection_result_v1", outcome: "approved", companyId, inspectionIssueId: issueId,
+    sourceIssueId: parentId, inspectorAgentId: inspectorId, sourceAgentId: agentId,
+    runId: "66666666-6666-4666-8666-666666666666", submissionId, reviewedCommit: remoteCommit,
+    repositoryUrl: "https://code.example.test/project/_git/main", branch: "u/producer-one/feature",
+    ...overrides,
+  } }
+}
 
 function fixture(t, isInspector = false, inspectorExists = true, separateBranch = false) {
   const task = {
@@ -26,6 +39,7 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
     },
   }, { id: "reference", name: "Reference", readOnly: true }]
   const products = [], comments = [], children = [], publications = []
+  const receipts = new Map(isInspector || separateBranch ? [[issueId, inspectionReceipt()]] : [])
   let failHandoff = false, failRegistration = false
   let failProducerNotification = false, failCleanup = false, failSupersededNotification = false
   let failWaiting = false, sourceStatus = "in_progress", waitingWrites = 0
@@ -52,7 +66,7 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
       }
       return Response.json({ id: issueId, companyId, assigneeAgentId: task.agent.id, status: sourceStatus,
         unblockDescriptor: sourceUnblockDescriptor,
-        ...(separateBranch ? { parentId, description: `Submission ID: ${submissionId}\nRemote commit: ${remoteCommit}\nBranch: u/producer-one/feature\nSource agent: ${agentId}` } : {}) })
+        ...(isInspector || separateBranch ? { parentId, description: `Submission ID: ${submissionId}\nRemote commit: ${remoteCommit}\nBranch: u/producer-one/feature\nSource agent: ${agentId}\nSource task: ${parentId}\nRepository URL: ${repositories[0].source}` } : {}) })
     }
     if (route.endsWith(`/issues/${parentId}`)) return Response.json({ id: parentId, companyId, assigneeAgentId: agentId })
     if (route.endsWith("/agents")) return Response.json([{ id: inspectorId, companyId, name: "PR Inspector", status: "idle" }])
@@ -67,6 +81,20 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
     }
     const review = children.find(child => route.endsWith(`/issues/${child.id}`))
     if (review) return Response.json(review)
+    if (route.endsWith("/inspection-result")) {
+      const targetIssueId = route.split("/").at(-2)
+      if (options.method === "POST") {
+        const existing = receipts.get(targetIssueId)
+        if (existing && (existing.result.outcome !== body.outcome || existing.body !== body.body))
+          return new Response("Conflicting inspection result", { status: 409 })
+        if (!existing) receipts.set(targetIssueId, {
+          ...inspectionReceipt(), body: body.body,
+          result: { ...inspectionReceipt().result, schema: body.schema, outcome: body.outcome,
+            submissionId: body.submissionId, reviewedCommit: body.reviewedCommit },
+        })
+      }
+      return Response.json(receipts.get(targetIssueId) ?? null)
+    }
     if (route.endsWith("/work-products")) {
       const targetIssueId = route.split("/").at(-2)
       if (targetIssueId === parentId) return new Response("Agent cannot mutate another agent's issue", { status: 403 })
@@ -120,7 +148,7 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
     repositories, task, apiUrl: "https://paperclip.example.test", request,
   })
   return {
-    publication, publications, children, products, comments, task, repositories,
+    publication, publications, children, products, comments, task, repositories, receipts,
     tool: name => publication.tools.find(tool => tool.name === name),
     failHandoff: value => { failHandoff = value },
     failRegistration: value => { failRegistration = value },
@@ -199,7 +227,7 @@ test("missing assignment policy and newly created inspector prevent direct provi
 
 test("Devbox inspector records an external PR link without provider calls or provider credentials", async t => {
   const f = fixture(t, true)
-  assert.deepEqual(f.publication.tools.map(tool => tool.name), ["record_pull_request"])
+  assert.deepEqual(f.publication.tools.map(tool => tool.name), ["record_inspection_result", "record_pull_request"])
   const input = { url: "https://code.example.test/project/_git/main/pullrequest/12", title: "Feature", provider: "azure_devops" }
   const receipt = await f.tool("record_pull_request").execute(input)
   assert.equal(receipt.url, input.url)
@@ -246,7 +274,7 @@ test("external PR postback rejects unsafe links, credentials and task overrides"
   await assert.rejects(f.tool("record_pull_request").execute({ ...input, issueId: "other-task" }), /only a URL/)
   await assert.rejects(f.tool("record_pull_request").execute({ ...input, credentials: "secret" }), /only a URL/)
   const unassigned = createPrInspectorPostback({ task: { ...f.task, context: {} }, apiUrl: "https://paperclip.example.test" })
-  await assert.rejects(unassigned.tools[0].execute(input), /assigned Paperclip issue/)
+  await assert.rejects(unassigned.tools.find(tool => tool.name === "record_pull_request").execute(input), /assigned Paperclip issue/)
   assert.equal(f.publications.length, 0)
   assert.equal(f.products.length, 0)
 })
@@ -326,6 +354,13 @@ async function supersessionFixture(t) {
   f.children.push(rejected)
   f.comments.push({ id: "findings", issueId, authorAgentId: inspectorId,
     body: `Changes requested for ${previous}, reviewed commit ${rejectedCommit}.` })
+  f.receipts.set(accepted.id, inspectionReceipt({
+    inspectionIssueId: accepted.id, sourceIssueId: issueId, branch: "u/w01/feature",
+  }))
+  f.receipts.set(rejected.id, inspectionReceipt({
+    outcome: "changes_requested", inspectionIssueId: rejected.id, sourceIssueId: issueId,
+    submissionId: previous, reviewedCommit: rejectedCommit, branch: "u/w01/rejected-feature",
+  }))
   const url = "https://code.example.test/project/_git/main/pullrequest/12"
   f.products.push({ id: "accepted-pr", issueId: accepted.id, type: "pull_request", url,
     metadata: { submissionId, sourceAgentId: agentId, inspectionIssueId: accepted.id, reviewedCommit: remoteCommit } })
@@ -365,7 +400,7 @@ test("partial superseded cleanup remains an explicit failure and reconciles with
 })
 
 test("supersession never retires foreign, active, unpublished, or unconfirmed inspections", async t => {
-  for (const mismatch of ["parent", "company", "producer", "busy", "has-pr", "missing-report", "replacement-commit"]) {
+  for (const mismatch of ["parent", "company", "producer", "busy", "has-pr", "missing-receipt", "replacement-commit"]) {
     await t.test(mismatch, async t => {
       const f = await supersessionFixture(t)
       if (mismatch === "parent") f.rejected.parentId = parentId
@@ -373,9 +408,9 @@ test("supersession never retires foreign, active, unpublished, or unconfirmed in
       if (mismatch === "producer") f.rejected.createdByAgentId = inspectorId
       if (mismatch === "busy") f.rejected.executionRunId = "active-run"
       if (mismatch === "has-pr") f.products.push({ issueId: f.rejected.id, type: "pull_request", url: f.input.url })
-      if (mismatch === "missing-report") f.comments.find(comment => comment.id === "findings").authorAgentId = agentId
+      if (mismatch === "missing-receipt") f.receipts.delete(f.rejected.id)
       if (mismatch === "replacement-commit") f.products[0].metadata.reviewedCommit = commit
-      await assert.rejects(f.tool("retire_submission_branch").execute(f.input), /Supersession|Retain the earlier|invalid assigned-issue child list/)
+      await assert.rejects(f.tool("retire_submission_branch").execute(f.input), /Supersession|Retain the earlier|invalid assigned-issue child list|inspection receipt/)
       assert.equal(f.publications.filter(call => call.supersededBySubmissionId).length, 0)
       assert.equal(f.comments.filter(comment => comment.issueId === f.rejected.id).length, 0)
     })
@@ -389,4 +424,66 @@ test("read-only repositories and credential-bearing publication descriptors are 
   f.repositories[0].publication.pullRequestUrlTemplate = "https://secret@code.example.test/pull/{number}"
   await assert.rejects(f.tool("submit_branch_for_inspection").execute({ ...input, repository: "main" }), /HTTPS publication descriptor/)
   assert.equal(f.publications.length, 0)
+})
+
+test("structured rejection records arbitrary findings and reconciles failed parent delivery without another receipt", async t => {
+  const f = fixture(t, true, true, true)
+  f.receipts.clear()
+  const input = { ...inspectionInput, outcome: "changes_requested", body: "## Changes requested\n\nPlease preserve the blank line." }
+  f.failProducerNotification(true)
+  await assert.rejects(f.tool("record_inspection_result").execute(input), /HTTP 503/)
+  assert.match(f.publication.registrationError, /findings delivery is unconfirmed/)
+  assert.equal(f.receipts.size, 1)
+  assert.equal(f.comments.length, 1)
+  f.failProducerNotification(false)
+  const receipt = await f.tool("record_inspection_result").execute(input)
+  assert.equal(receipt.result.outcome, "changes_requested")
+  assert.equal(f.comments.length, 2)
+  assert.ok(f.comments.find(comment => comment.issueId === parentId).body.includes(input.body))
+  assert.equal(f.publication.registrationError, null)
+  await f.tool("record_inspection_result").execute(input)
+  assert.equal(f.comments.length, 2)
+  await assert.rejects(f.tool("record_inspection_result").execute({ ...input, outcome: "approved" }), /HTTP 409/)
+})
+
+test("inspection tools reject unknown schemas, actor overrides, wrong commits and missing approval receipts", async t => {
+  const f = fixture(t, true, true, true)
+  await assert.rejects(f.tool("record_inspection_result").execute({ ...inspectionInput, schema: "unknown" }), /versioned inspection/)
+  await assert.rejects(f.tool("record_inspection_result").execute({ ...inspectionInput, inspectorAgentId: agentId }), /versioned inspection/)
+  await assert.rejects(f.tool("record_inspection_result").execute({ ...inspectionInput, reviewedCommit: commit }), /original submission/)
+  f.receipts.clear()
+  await assert.rejects(f.tool("record_pull_request").execute({
+    url: "https://code.example.test/project/_git/main/pullrequest/12", title: "Feature",
+    provider: "azure_devops", submissionId, branch: "u/reviewer-one/feature", reviewedCommit: remoteCommit,
+  }), /server-validated inspection receipt/)
+  assert.equal(f.products.length, 0)
+  assert.equal(f.comments.length, 0)
+})
+
+test("supersession uses typed receipts, independent of Markdown, localization or absent parent findings", async t => {
+  for (const body of ["## Changes requested\n\nPlease fix this.", "Bitte die Leerzeile beibehalten.", ""]) {
+    await t.test(body || "no comment", async t => {
+      const f = await supersessionFixture(t)
+      f.comments.length = 0
+      if (body) f.comments.push({ issueId, authorAgentId: inspectorId, body })
+      assert.equal((await f.tool("retire_submission_branch").execute(f.input)).superseded.length, 1)
+    })
+  }
+})
+
+test("supersession rejects receipt provenance mismatches and never guesses a receipt from prose", async t => {
+  const mismatches = {
+    schema: "unknown", outcome: "approved", companyId: "foreign-company",
+    inspectionIssueId: "foreign-review", sourceIssueId: parentId, inspectorAgentId: agentId,
+    sourceAgentId: inspectorId, runId: "", submissionId, reviewedCommit: commit,
+    repositoryUrl: "https://other.example.test/repository", branch: "u/other/branch",
+  }
+  for (const [key, value] of Object.entries(mismatches)) {
+    await t.test(key, async t => {
+      const f = await supersessionFixture(t)
+      f.receipts.get(f.rejected.id).result[key] = value
+      await assert.rejects(f.tool("retire_submission_branch").execute(f.input), /server-validated inspection receipt/)
+      assert.equal(f.publications.filter(call => call.supersededBySubmissionId).length, 0)
+    })
+  }
 })

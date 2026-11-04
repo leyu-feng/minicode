@@ -336,7 +336,14 @@ rest, pairing is atomic and one-time, credentials are excluded from inventories
 and diagnostics. Existing heartbeat admission, assignment, approval, known-budget
 and cancellation gates remain authoritative. Offline/busy pools and process loss
 fail visibly with explicit retry; network resumption never replays the task.
-Every assignment requires `skill_bundle_v1`. The expected ZIP hash and file
+Every assignment requires `skill_bundle_v1`, `pr_inspector_v1` and
+`pr_inspection_result_v1`; older workers are neither reserved nor dispatched.
+Inspector harnesses share the versioned receipt recording tool and authoritative
+server decision contract. PR postback and superseded-submission cleanup require
+matching approved/rejected receipts rather than findings prose; existing
+ownership, stopped-run, branch-tip and provider verification gates remain.
+Upgrade workers before rolling out the server's receipt capability requirement.
+The expected ZIP hash and file
 manifest are server-supplied; Minicode rehashes the cached ZIP and freshly
 extracts verified files before model execution. Invalid archives, unsafe/linked
 or tracked caches, and failed authenticated downloads block the run. The

@@ -8,6 +8,26 @@ function handoffValue(issue, name) {
   return matches[0].slice(name.length + 2)
 }
 
+const INSPECTION_SCHEMA = "pr_inspection_result_v1"
+
+function assertInspectionReceipt(receipt, expected) {
+  const result = receipt?.result
+  if (!receipt?.id || result?.schema !== INSPECTION_SCHEMA
+    || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(result.runId ?? "")
+    || Object.entries(expected).some(([key, value]) => result[key] !== value))
+    throw new Error("A matching server-validated inspection receipt is required; comments are not inspection evidence")
+  return receipt
+}
+
+function inspectionBindings(issue, companyId, inspectorAgentId) {
+  return {
+    companyId, inspectorAgentId, inspectionIssueId: issue.id, sourceIssueId: issue.parentId,
+    sourceAgentId: handoffValue(issue, "Source agent"), submissionId: handoffValue(issue, "Submission ID"),
+    reviewedCommit: handoffValue(issue, "Remote commit"), repositoryUrl: handoffValue(issue, "Repository URL"),
+    branch: handoffValue(issue, "Branch"),
+  }
+}
+
 async function paperclipApi(task, apiUrl, path, method, body, signal) {
   if (!task.authToken || !task.runId || !task.agent?.companyId) throw new Error("Publication requires run-scoped Paperclip authentication")
   const response = await fetch(`${apiUrl.replace(/\/+$/, "")}/api${path}`, {
@@ -37,6 +57,56 @@ export function createPrInspectorPostback({ task, apiUrl, separateBranch = false
   const issueId = task.context.taskId ?? task.context.issueId
   const failures = new Map()
   const route = `/issues/${encodeURIComponent(issueId)}`
+  const inspectionTool = {
+    name: "record_inspection_result",
+    description: "Persist an immutable, server-validated pr_inspection_result_v1 for the exact submitted commit. Use approved or changes_requested, independently of findings formatting. Server-derived company, reviewer, run, repository and task bindings cannot be supplied. Records findings on the review and reports requested changes to its direct producer parent. Retry identical inputs after uncertainty. An inspection approval is not provider PR approval or verification.",
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["schema", "outcome", "submissionId", "reviewedCommit", "body"],
+      properties: {
+        schema: { type: "string", enum: [INSPECTION_SCHEMA] },
+        outcome: { type: "string", enum: ["approved", "changes_requested"] },
+        submissionId: { type: "string" }, reviewedCommit: { type: "string" },
+        body: { type: "string", description: "Human-readable findings; Markdown and language do not determine the outcome." },
+      },
+    },
+    async execute(input, options = {}) {
+      if (!input || input.schema !== INSPECTION_SCHEMA || !["approved", "changes_requested"].includes(input.outcome)
+        || Object.keys(input).some(key => !["schema", "outcome", "submissionId", "reviewedCommit", "body"].includes(key))
+        || !/^submission-publication-[a-f0-9]{64}$/.test(input.submissionId ?? "")
+        || !/^[a-f0-9]{40}$/.test(input.reviewedCommit ?? "")
+        || typeof input.body !== "string" || !input.body.trim() || input.body.trim().length > 32000)
+        throw new Error("Record a versioned inspection outcome, exact submission and reviewed commit, and findings")
+      const api = (suffix, method = "GET", body) => paperclipApi(task, apiUrl, `${route}${suffix}`, method, body, options.signal)
+      const issue = await api("")
+      if (issue.id !== issueId || issue.companyId !== task.agent.companyId || issue.assigneeAgentId !== task.agent.id)
+        throw new Error("Inspection results require the inspector's assigned issue in this company")
+      const expected = { ...inspectionBindings(issue, task.agent.companyId, task.agent.id),
+        outcome: input.outcome, submissionId: input.submissionId, reviewedCommit: input.reviewedCommit }
+      if (input.submissionId !== handoffValue(issue, "Submission ID") || input.reviewedCommit !== handoffValue(issue, "Remote commit"))
+        throw new Error("Inspection must identify the exact original submission and remote commit")
+      failures.set("inspection-result", "Inspection result or findings delivery is unconfirmed. Retry record_inspection_result with identical inputs.")
+      const receipt = assertInspectionReceipt(await api("/inspection-result", "POST", input), expected)
+      const marker = `<!-- inspection-result:${receipt.id} -->`
+      const body = `Inspection outcome: ${input.outcome}\nSubmission ID: ${input.submissionId}\nReviewed commit: ${input.reviewedCommit}\nReceipt: ${receipt.id}\n\n${input.body.trim()}\n\n${marker}`
+      const comments = await api("/comments")
+      if (!Array.isArray(comments)) throw new Error("Paperclip returned an invalid inspection comment list")
+      const comment = comments.find(entry => entry.authorAgentId === task.agent.id && entry.body === body)
+        ?? await api("/comments", "POST", { body })
+      if (!comment?.id || comment.issueId !== issueId || comment.authorAgentId !== task.agent.id || comment.body !== body)
+        throw new Error("Paperclip did not confirm the inspection findings")
+      let producer
+      if (input.outcome === "changes_requested") {
+        const tools = createPaperclipTaskTools({
+          apiUrl, authToken: task.authToken, runId: task.runId, issueId,
+          agentId: task.agent.id, companyId: task.agent.companyId,
+        })
+        producer = await tools.find(tool => tool.name === "paperclip_report_to_parent").execute({ body }, options)
+      }
+      failures.delete("inspection-result")
+      return { ...receipt, commentId: comment.id, ...(producer ? { producer } : {}) }
+    },
+  }
   const tool = {
     name: "record_pull_request",
     description: "Record the link of a PR you already created outside Paperclip using local Devbox user credentials, after inspecting another agent's branch. This tool is an API postback only: it never creates or verifies a provider PR and never receives provider credentials. Retry the same link to reconcile an uncertain postback."
@@ -66,6 +136,9 @@ export function createPrInspectorPostback({ task, apiUrl, separateBranch = false
       const issue = await api("")
       if (issue.id !== issueId || issue.companyId !== task.agent.companyId || issue.assigneeAgentId !== task.agent.id)
         throw new Error("PR postback requires the inspector's assigned issue in this company")
+      assertInspectionReceipt(await api("/inspection-result"), {
+        ...inspectionBindings(issue, task.agent.companyId, task.agent.id), outcome: "approved",
+      })
       let parent, metadata = { publicationMode: "external" }
       if (separateBranch) {
         const line = name => handoffValue(issue, name)
@@ -127,7 +200,7 @@ export function createPrInspectorPostback({ task, apiUrl, separateBranch = false
         paperclip: { issueId, workProductId: product.id, commentId: comment.id }, ...(producer ? { producer } : {}) }
     },
   }
-  return { tools: [tool], get registrationError() { return failures.values().next().value ?? null } }
+  return { tools: [inspectionTool, tool], get registrationError() { return failures.values().next().value ?? null } }
 }
 
 export function createHostedPublicationTool({ repositories, task, apiUrl, request }) {
@@ -188,9 +261,12 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
       && product.metadata?.inspectionIssueId === accepted.id
       && product.metadata?.reviewedCommit === handoffValue(accepted, "Remote commit"))
     if (matching.length !== 1) throw new Error("Supersession requires the replacement inspection's confirmed PR work product")
+    const readReceipt = async (review, outcome) => assertInspectionReceipt(
+      await paperclipApi(task, apiUrl, `/issues/${encodeURIComponent(review.id)}/inspection-result`, "GET", undefined, options?.signal),
+      { ...inspectionBindings(review, task.agent.companyId, task.prPolicy.inspectorAgentId), outcome },
+    )
+    await readReceipt(accepted, "approved")
     const retired = []
-    const reports = await paperclipApi(task, apiUrl, `/issues/${encodeURIComponent(issueId)}/comments?limit=100&order=desc`, "GET", undefined, options?.signal)
-    if (!Array.isArray(reports)) throw new Error("Paperclip returned an invalid producer report list")
     for (const child of reviews.filter(child => child.id !== accepted.id && !["done", "cancelled"].includes(child.status))) {
       const review = await readReview(child)
       const previous = handoffValue(review, "Submission ID")
@@ -201,11 +277,9 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
         || review.unblockDescriptor?.owner?.agentId !== task.prPolicy.inspectorAgentId
         || !Array.isArray(previousProducts) || previousProducts.some(product => product.type === "pull_request")
         || previous === input.submissionId || !/^submission-publication-[a-f0-9]{64}$/.test(previous)
-        || !/^[a-f0-9]{40}$/.test(reviewedCommit)
-        || !reports.some(report => report.authorAgentId === task.prPolicy.inspectorAgentId
-          && /^\s*Changes (?:requested|required)\b/i.test(report.body ?? "")
-          && report.body.includes(previous) && report.body.includes(reviewedCommit)))
+        || !/^[a-f0-9]{40}$/.test(reviewedCommit))
         throw new Error("Retain the earlier branch until its stopped inspection confirms rejection without a PR")
+      await readReceipt(review, "changes_requested")
       const receipt = await call(repo, "delete_submitted_branch", {
         submissionId: previous, supersededBySubmissionId: input.submissionId, pullRequestNumber: number,
       }, options)

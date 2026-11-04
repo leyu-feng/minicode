@@ -42,7 +42,7 @@ async function harness(reconnectMs = 1000) {
     socket.on("message", (data) => messages.push(JSON.parse(data.toString())));
     await once(socket, "open");
     const send = (value: object) => socket.send(JSON.stringify(value));
-    send({ type: "hello", protocolVersion: 1, instanceId, runId, capabilities: [...(inspectorCompatible ? ["pr_inspector_v1"] : []), ...capabilities] });
+    send({ type: "hello", protocolVersion: 1, instanceId, runId, capabilities: [...(inspectorCompatible ? ["pr_inspector_v1", "pr_inspection_result_v1"] : []), ...capabilities] });
     await vi.waitFor(() => expect(messages.length || socket.readyState === WebSocket.CLOSED).toBeTruthy());
     const welcome = messages.shift();
     if (welcome && !runId && ready) {
@@ -66,6 +66,15 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("does not reserve or dispatch workers that cannot use authenticated inspection receipts", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1", "pr_inspector_v1"], {}, false);
+    const ctx = context();
+    expect(broker.hasAvailableWorker(ctx)).toBe(false);
+    expect(broker.reserveAvailableWorker(ctx)).toBe(false);
+    await expect(broker.execute(ctx)).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
+    expect(client.messages).toEqual([]);
+  });
   it("does not dispatch to old workers that lack PR Inspector enforcement", async () => {
     const { broker, worker } = await harness();
     const client = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1"], {}, false);

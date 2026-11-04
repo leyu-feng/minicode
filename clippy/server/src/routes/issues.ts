@@ -1,4 +1,6 @@
 import { parseObject } from "../adapters/utils.js";
+import { recordPrInspectionResultSchema } from "@paperclipai/shared";
+import { prInspectionResultService } from "../services/pr-inspection-results.js";
 import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
 import { enqueueFastResponse } from "../services/fast-responses.js";
 import { hasRequiredWorkspaceRecovery, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "../services/workspace-restore-recovery-state.js";
@@ -11251,6 +11253,33 @@ export function issueRoutes(
     res.json({ ok: true });
   });
 
+  router.get("/issues/:id/inspection-result", async (req, res) => {
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const receipt = await prInspectionResultService(db).get(issue.companyId, issue.id);
+    res.json(await runRedactions.redactForIssue(issue.companyId, issue.id, receipt));
+  });
+
+  router.post("/issues/:id/inspection-result", validate(recordPrInspectionResultSchema), async (req, res) => {
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue || !(await assertAgentIssueMutationAllowed(req, res, issue))
+      || !(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    if (req.actor.type !== "agent" || !req.actor.agentId) throw forbidden("Inspector run authentication required");
+    const runId = requireAgentRunId(req, res);
+    if (!runId) return;
+    const receipt = await prInspectionResultService(db).record(issue.companyId, issue.id,
+      { agentId: req.actor.agentId, runId }, req.body);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+      agentId: actor.agentId, runId: actor.runId, agentApiKeyId: actor.agentApiKeyId,
+      action: "issue.inspection_result_recorded", entityType: "issue", entityId: issue.id,
+      details: { receiptId: receipt.id, schema: receipt.result.schema, outcome: receipt.result.outcome,
+        submissionId: receipt.result.submissionId, reviewedCommit: receipt.result.reviewedCommit },
+    });
+    res.json(await runRedactions.redactForIssue(issue.companyId, issue.id, receipt));
+  });
+
   router.post(
     "/issues/:id/work-products",
     validate(createIssueWorkProductSchema),
@@ -11275,7 +11304,7 @@ export function issueRoutes(
         sourceTrust: await sourceTrustForActorWrite(issue, actor),
       };
       if (req.actor.type === "agent" && createInput.type === "pull_request")
-        await prInspectorService(db).assertPrPostbackAllowed(issue.companyId, req.actor.agentId);
+        await prInspectorService(db).assertPrPostbackAllowed(issue.companyId, req.actor.agentId, issue.id);
       const createdByRunId = await resolveWorkProductCreatedByRunId(
         req,
         res,
@@ -11705,7 +11734,7 @@ export function issueRoutes(
       if (req.actor.type === "agent" && (patch.type === "pull_request"
         || (existing.type === "pull_request" && ["type", "provider", "url", "externalId", "metadata"]
           .some(key => Object.hasOwn(patch, key)))))
-        await prInspectorService(db).assertPrPostbackAllowed(issue.companyId, req.actor.agentId);
+        await prInspectorService(db).assertPrPostbackAllowed(issue.companyId, req.actor.agentId, issue.id);
       const createdByRunId = await resolveWorkProductCreatedByRunId(
         req,
         res,

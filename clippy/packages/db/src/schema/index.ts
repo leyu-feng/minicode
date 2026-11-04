@@ -1,6 +1,7 @@
 export { chatSlackRegistrations } from "./chat_slack_registrations.js";
 export { companies } from "./companies.js";
 export { companyPrInspectors } from "./company_pr_inspectors.js";
+export { prInspectionResults } from "./pr_inspection_results.js";
 export { companyLogos } from "./company_logos.js";
 export { companyTransferRuns } from "./company_transfer_runs.js";
 export { companyOnboardingSeeds } from "./company_onboarding_seeds.js";

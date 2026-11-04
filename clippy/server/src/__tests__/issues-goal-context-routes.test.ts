@@ -268,6 +268,28 @@ describe("issue goal context routes", () => {
     mockGoalService.getDefaultCompanyGoal.mockResolvedValue(null);
   });
 
+  it("allows authorized receipt reads without treating a missing receipt as prose evidence", async () => {
+    const res = await request(createApp()).get(`/api/issues/${legacyProjectLinkedIssue.id}/inspection-result`);
+    expect(res.status).toBe(200);
+    expect(res.body).toBeNull();
+  });
+
+  it("rejects board-authored inspection receipts and caller-supplied provenance", async () => {
+    const input = {
+      schema: "pr_inspection_result_v1", outcome: "approved",
+      submissionId: `submission-publication-${"a".repeat(64)}`, reviewedCommit: "b".repeat(40),
+      body: "Reviewed the exact diff.",
+    };
+    const endpoint = `/api/issues/${legacyProjectLinkedIssue.id}/inspection-result`;
+    const board = await request(createApp()).post(endpoint).send(input);
+    expect(board.status).toBe(403);
+    expect(board.body.error).toMatch(/Inspector run authentication/);
+    const forged = await request(createApp()).post(endpoint).send({
+      ...input, inspectorAgentId: legacyProjectLinkedIssue.assigneeAgentId,
+    });
+    expect(forged.status).toBe(400);
+  });
+
   it.each(["", "/heartbeat-context"])("reads historical review tasks without computed productivity fields: %s", async (suffix) => {
     mockIssueService.getById.mockResolvedValue({
       ...legacyProjectLinkedIssue,

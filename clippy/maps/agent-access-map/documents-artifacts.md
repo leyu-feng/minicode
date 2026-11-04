@@ -96,15 +96,28 @@ API: `present` — representative operation IDs:
 
 - `POST /api/issues/{id}/work-products`.
 - `PATCH /api/work-products/{id}`.
+- `GET /api/issues/{id}/inspection-result`.
+- `POST /api/issues/{id}/inspection-result`.
 
 Agent access: `available` — Native register_deliverable for file outputs; REST / native
 call_api for metadata.
+Pool inspector workers expose `record_inspection_result` for versioned decisions
+and findings; the dedicated REST endpoint is shared across their harnesses.
 
 Policy: Task/resource visibility, mutation/checkout ownership, revision/lock guards and
 permitted deliverable context.
+While a company inspector exists, agent PR registration and PR identity updates
+require that inspector's approved immutable receipt bound to the exact original
+submission. Recording a receipt requires the designated inspector's active,
+issue-owning run and checkout; board actors cannot author inspection evidence.
+Receipt reads retain task visibility and secret-redaction boundaries.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L10299) at
 the reviewed commit above.
+The receipt addition is supported by
+[receipt persistence regressions](../../server/src/__tests__/pr-inspection-results.test.ts)
+and [shared worker regressions](../../../minicode/test/hosted-publication.test.js);
+this is local fixture evidence, not deployed agent qualification.
 
 Verification: `not-run` — exercise a listed permitted operation with actual agent
 credentials/run context; inspect its result and applicable persistence/attribution.
@@ -113,6 +126,8 @@ remaining operations before qualifying the whole capability.
 
 Gaps: A registered reference does not prove uploaded bytes, external delivery, or
 accepted review.
+Inspection approval is not provider PR approval or verification. A dedicated native
+Runner receipt-tool binding is not qualified by the pool-worker implementation.
 
 ## `library`
 

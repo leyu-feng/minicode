@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { agents, agentPools, companyPrInspectors, type Db } from "@paperclipai/db";
 import { conflict, forbidden } from "../errors.js";
+import { prInspectionResultService } from "./pr-inspection-results.js";
 import { withAccountingTransaction } from "./accounting-transaction.js";
 import { requestAgentHireInTransaction, scheduleAgentLifecycle } from "./agent-lifecycle.js";
 
@@ -19,10 +20,11 @@ export function prInspectorService(db: Db) {
   }
   return {
     get,
-    async assertPrPostbackAllowed(companyId: string, agentId: string | undefined) {
+    async assertPrPostbackAllowed(companyId: string, agentId: string | undefined, issueId: string) {
       const policy = await get(companyId);
       if (policy.agentId && policy.agentId !== agentId)
         throw forbidden("Only this company's PR Inspector may record a PR while an inspector exists.");
+      if (policy.agentId) await prInspectionResultService(db).requireApproved(companyId, issueId, policy.agentId);
     },
     async create(companyId: string, userId: string | null) {
       const state = await withAccountingTransaction(db, companyId, async (tx, publications) => {

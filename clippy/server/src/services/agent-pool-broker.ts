@@ -8,6 +8,7 @@ import {
   AGENT_POOL_GITHUB_CREDENTIAL, agentPoolGitHubCredentialSchema, agentPoolRequiresGitHubLogin, type AgentPoolGitHubCredential,
   AGENT_POOL_GIT_IDENTITY, agentPoolGitIdentitySchema, type AgentPoolGitIdentity,
   AGENT_POOL_PR_INSPECTOR, type AgentPoolPrPolicy,
+  PR_INSPECTION_RESULT_SCHEMA,
   agentPoolHelloSchema, agentPoolInstructionsSchema, agentPoolNameSchema, agentPoolTaskSchema,
   agentPoolHarnessIdSchema,
   AGENT_POOL_CLAUDECODE_DEFAULT_MODEL,
@@ -86,7 +87,7 @@ export class AgentPoolBroker {
     const allRepositories = selection !== null && typeof selection === "object"
       && "mode" in selection && selection.mode === "all_repositories";
     const harness = agentPoolHarnessIdSchema.parse(ctx.config.harness ?? "default");
-    return [AGENT_POOL_SKILL_BUNDLE, AGENT_POOL_PR_INSPECTOR,
+    return [AGENT_POOL_SKILL_BUNDLE, AGENT_POOL_PR_INSPECTOR, PR_INSPECTION_RESULT_SCHEMA,
       ...(harness === "default" ? [] : [`harness_${harness}_v1`]),
       ...(agentPoolRequiresGitHubLogin(harness) ? [AGENT_POOL_GITHUB_CREDENTIAL, AGENT_POOL_GIT_IDENTITY] : []),
       ...(ctx.context.paperclipAgentInstructions ? [AGENT_POOL_INLINE_INSTRUCTIONS] : []),

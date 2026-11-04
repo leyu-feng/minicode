@@ -93,6 +93,29 @@ explicit native model is selected. Copilot CLI retains its `auto` default.
 
 ### Organization PR Inspector
 
+All harnesses use the shared `pr_inspection_result_v1` receipt contract, exported
+from `@paperclipai/shared/pr-inspection`. `POST /api/issues/{reviewId}/inspection-result`
+accepts only `{schema, outcome, submissionId, reviewedCommit, body}`. Outcomes reuse
+the existing `approved` / `changes_requested` decision vocabulary. The authenticated,
+active, checkout-owning company inspector records the exact submitted remote SHA.
+The server derives company, reviewer, run, source/review tasks, repository and branch.
+Receipts are durable, immutable, and unique per review; identical retries return
+the original receipt and conflicts require a new submission/review.
+The response is `{id, result, body, createdAt}`; `result` contains the versioned
+decision and its server-derived bindings. Authorized readers use GET on that same
+endpoint; a missing receipt returns null.
+Receipt bodies are human-readable findings, not authorization inputs.
+
+The shared `record_inspection_result` tool persists the receipt, publishes findings
+on the review, and returns requested changes to the producer's direct parent.
+Record `approved` before creating/posting a PR, or `changes_requested` before
+blocking the review. PR postback and superseded-branch guards consume the
+server-validated receipt, never Markdown or localized prose. Approval here is not
+provider review approval or provider verification. Existing stopped-run, ownership,
+unchanged-tip, replacement-PR and provider checks remain mandatory.
+Legacy comments are not migrated into receipts automatically: a fresh authenticated
+inspection or explicit audited reconciliation is required.
+
 The **New Agent** dropdown offers **Create PR Inspector Agent** and
 **Create Customized Agent**. Customized creation retains the existing name and
 adapter flow. Board-only `POST /api/companies/{companyId}/pr-inspector` accepts `{}`.
@@ -107,7 +130,9 @@ Assignments carry trusted `prPolicy: {inspectorAgentId, isInspector}`; absence
 of an inspector has a null inspector and false authority. Names, editable agent roles,
 task context and model inputs cannot confer this privilege. The provider
 snapshots the inspector ID into its authenticated company/agent/run claim.
-All dispatches require `pr_inspector_v1`, including organizations without an inspector.
+All dispatches require `pr_inspector_v1` and `pr_inspection_result_v1`, including
+organizations without an inspector. Upgrade workers before deploying this protocol;
+workers without receipt support are not reserved or assigned new work.
 
 When an inspector exists, ordinary Hosted agents receive only `submit_branch_for_inspection`. It saves a branch,
 then automatically creates an idempotent review child assigned to the inspector.
