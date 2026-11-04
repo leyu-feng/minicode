@@ -79,6 +79,44 @@ test("workspace root gives two workers independent clean worktrees without touch
   second.release()
 })
 
+test("Devbox worktree sources give workers independent checkouts while reference clones stay read-only", async t => {
+  const { root, config, save, options, git } = await fixture(t)
+  const application = config.repositories.find(repo => repo.id === "application")
+  application.checkout = "worktree"
+  await save()
+  const source = path.join(root, "application")
+  const original = path.join(root, ".application-original")
+  await fs.rename(source, original)
+  await fs.mkdir(source)
+  const common = path.join(source, ".git")
+  await git(root, ["clone", "--bare", original, common])
+  await git(root, [`--git-dir=${common}`, "remote", "set-url", "origin", application.source])
+  await git(root, [`--git-dir=${common}`, "worktree", "add", path.join(source, "main"), "main"])
+  await fs.writeFile(path.join(source, "main", "AGENTS.md"), "operator changes")
+  const first = await prepareWorkerWorkspace(options)
+  const second = await prepareWorkerWorkspace({ ...options, workerId: randomUUID(), workerName: "worker-two" })
+  const a = await first.prepare("agent-a", "run-a")
+  const b = await second.prepare("agent-a", "run-b")
+  const serviceA = a.repositories.find(repo => repo.name === "application")
+  const serviceB = b.repositories.find(repo => repo.name === "application")
+  assert.notEqual(serviceA.path, serviceB.path)
+  assert.notEqual(serviceA.path, path.join(source, "main"))
+  assert.equal(serviceA.readOnly, false)
+  assert.equal(await git(serviceA.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    common.replaceAll("\\", "/"))
+  assert.equal(await fs.readFile(path.join(serviceA.path, "AGENTS.md"), "utf8"), "application guidance")
+  assert.equal(await fs.readFile(path.join(source, "main", "AGENTS.md"), "utf8"), "operator changes")
+  for (const assignment of [a, b]) {
+    for (const name of ["supervisor", "reference"]) {
+      const repo = assignment.repositories.find(repo => repo.name === name)
+      assert.equal(repo.path, path.join(root, name))
+      assert.equal(repo.readOnly, true)
+    }
+  }
+  first.release()
+  second.release()
+})
+
 test("workspace supports full-length worker names and multi-digit agent slots across restarts", async t => {
   const { root, options } = await fixture(t)
   const settings = { ...options, workerName: "inspection-worker-123456" }

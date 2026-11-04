@@ -490,7 +490,7 @@ workspace root rather than one primary repository. The operator's
   "version": 1,
   "repositories": [
     { "id": "supervisor", "source": "https://example.com/Supervisor", "checkout": "clone", "branch": "dev", "supervisory": true },
-    { "id": "application", "source": "https://example.com/Application", "checkout": "clone", "branch": "main" },
+    { "id": "application", "source": "https://example.com/Application", "checkout": "worktree", "branch": "main" },
     { "id": "reference", "source": "https://example.com/Reference", "checkout": "clone", "branch": "main", "readOnly": true }
   ]
 }
@@ -501,6 +501,9 @@ must contain `AGENTS.md`. Its instructions and same-named skills override
 subordinate repository guidance, as in Hosted workspace-root mode. Supervisory
 and explicitly read-only checkouts are never reset or written by the worker;
 they are observed at their existing committed HEAD.
+`checkout` accepts `clone` or `worktree` for the source layout; access is still
+controlled by `supervisory` and `readOnly`. Mark reference clones `readOnly: true`;
+`checkout: "clone"` alone does not make a repository read-only.
 
 Existing sources resolve as `<root>\<id>`, or `<root>\<id>\<branch>` for the
 workspace's bare-repository/worktree layout. Their origin must exactly match

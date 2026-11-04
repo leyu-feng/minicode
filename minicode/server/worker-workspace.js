@@ -39,11 +39,11 @@ export async function prepareWorkerWorkspace({
   const names = new Set()
   for (const repo of config.repositories) {
     if (!repo || !/^[a-z][a-z0-9_-]{0,31}$/i.test(repo.id) || names.has(repo.id.toLowerCase())
-      || repo.checkout !== "clone" || typeof repo.branch !== "string" || !repo.branch
+      || !["clone", "worktree"].includes(repo.checkout) || typeof repo.branch !== "string" || !repo.branch
       || (repo.supervisory !== undefined && typeof repo.supervisory !== "boolean")
       || (repo.readOnly !== undefined && typeof repo.readOnly !== "boolean")
       || Object.keys(repo).some(key => !["id", "source", "checkout", "branch", "supervisory", "readOnly"].includes(key))) {
-      throw new Error("Invalid or duplicate workspace repository; require id, source, checkout: clone, and branch")
+      throw new Error("Invalid or duplicate workspace repository; require id, source, checkout: clone or worktree, and branch")
     }
     names.add(repo.id.toLowerCase())
     const url = new URL(repo.source)
