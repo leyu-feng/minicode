@@ -246,6 +246,7 @@ test("company lookup omits configuration and child creation confirms fixed scope
     title: childInput.title, description: childInput.description, priority: childInput.priority,
     assigneeAgentId: assignee.id, parentId: scope.issueId, status: "todo",
     idempotencyKey: `worker-child:${scope.issueId}:${childInput.idempotencyKey}`,
+    allowDuplicate: true,
   })
 })
 

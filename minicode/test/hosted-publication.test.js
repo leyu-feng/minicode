@@ -74,8 +74,11 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
       if (options.method === "GET") return Response.json(children)
       if (failHandoff) return new Response("Handoff failed", { status: 503 })
       const saved = children.find(child => child.idempotencyKey === body.idempotencyKey)
+        ?? (!body.allowDuplicate ? children.find(child => child.parentId === body.parentId
+          && child.title === body.title && !["done", "cancelled"].includes(child.status)) : undefined)
       if (saved) return Response.json(saved)
-      const child = { ...body, id: "review-task", companyId, createdByAgentId: agentId }
+      const child = { ...body, id: children.length ? `review-task-${children.length + 1}` : "review-task",
+        companyId, createdByAgentId: agentId }
       children.push(child)
       return Response.json(child)
     }
@@ -191,6 +194,46 @@ test("ordinary agents receive branch submission and owned retirement, handing of
     url: f.repositories[0].publication.pullRequestUrlTemplate.replace("{number}", "12"),
   })
   f.publication.assertCanComplete()
+})
+
+test("a corrected submission creates a separate same-title review and retries only that submission", async t => {
+  const f = fixture(t)
+  const rejected = {
+    id: "rejected-review", companyId, parentId: issueId, assigneeAgentId: inspectorId,
+    createdByAgentId: agentId, status: "blocked", priority: "medium",
+    title: "Review PR: Feature", description: "Review the rejected original submission.",
+    idempotencyKey: `worker-child:${issueId}:rejected-submission`,
+  }
+  f.children.push({ ...rejected })
+  const input = { repository: "main", commit, title: "Feature", body: "Review the corrected commit." }
+  const receipt = await f.tool("submit_branch_for_inspection").execute(input)
+  assert.notEqual(receipt.reviewIssueId, rejected.id)
+  assert.equal(f.children.length, 2)
+  assert.deepEqual(f.children[0], rejected)
+  assert.ok(f.children[1].description.includes(`Submission ID: ${submissionId}`))
+  assert.ok(f.children[1].description.includes(`Remote commit: ${remoteCommit}`))
+  assert.equal(f.children[1].assigneeAgentId, inspectorId)
+  assert.equal(f.sourceStatus, "blocked")
+  assert.equal((await f.tool("submit_branch_for_inspection").execute(input)).reviewIssueId, receipt.reviewIssueId)
+  assert.equal(f.children.length, 2)
+  assert.equal(f.publications.filter(call => call.mode === "submit_branch").length, 1)
+  assert.equal(f.publication.registrationError, null)
+})
+
+test("an existing submission key bound to a different review still requires explicit reconciliation", async t => {
+  const f = fixture(t)
+  const conflicting = {
+    id: "rejected-review", companyId, parentId: issueId, assigneeAgentId: inspectorId,
+    createdByAgentId: agentId, status: "blocked", priority: "medium",
+    title: "Review PR: Feature", description: "Review the rejected original submission.",
+    idempotencyKey: `worker-child:${issueId}:${submissionId}`,
+  }
+  f.children.push({ ...conflicting })
+  const input = { repository: "main", commit, title: "Feature", body: "Review the corrected commit." }
+  await assert.rejects(f.tool("submit_branch_for_inspection").execute(input), /did not confirm the requested child/)
+  assert.deepEqual(f.children, [conflicting])
+  assert.match(f.publication.registrationError, /handoff is incomplete/)
+  assert.throws(() => f.publication.assertCanComplete(), /not complete/)
 })
 
 test("no inspector allows direct PR publication and reconciles registration with identical inputs", async t => {

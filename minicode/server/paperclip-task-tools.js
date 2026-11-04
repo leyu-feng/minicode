@@ -109,7 +109,7 @@ export function createPaperclipTaskTools({ apiUrl, authToken, runId, issueId, ag
     },
     {
       name: "paperclip_create_issue",
-      description: "Create a child task of the assigned issue, assigned to a company agent. Use only when the task authorizes filing/delegating work. Inspect existing children first. Supply a stable idempotencyKey for each planned child (for example exception-01), unchanged across continuations. Returns the confirmed issue, or a server-deduplicated existing issue. No automatic retries or reassignment of existing issues." + guidance,
+      description: "Create a child task of the assigned issue, assigned to a company agent. Use only when the task authorizes filing/delegating work. Inspect existing children first. Supply a stable idempotencyKey for each planned child (for example exception-01), unchanged across continuations. The key, not the title, identifies the child; distinct children may share a title. Returns the confirmed issue, or the existing issue for that key. No automatic retries or reassignment of existing issues." + guidance,
       parameters: parameters({
         title: { type: "string", minLength: 1, maxLength: 240 },
         description: { type: "string", minLength: 1, maxLength: MAX_COMMENT },
@@ -136,6 +136,7 @@ export function createPaperclipTaskTools({ apiUrl, authToken, runId, issueId, ag
           title: input.title.trim(), description: input.description, priority: input.priority,
           assigneeAgentId: input.assigneeAgentId, parentId: issueId, status: "todo",
           idempotencyKey: `worker-child:${issueId}:${input.idempotencyKey}`,
+          allowDuplicate: true,
         }, signal)
         if (typeof saved?.id !== "string" || !saved.id.trim() || saved.companyId !== companyId
           || saved.parentId !== issueId || saved.assigneeAgentId !== input.assigneeAgentId
