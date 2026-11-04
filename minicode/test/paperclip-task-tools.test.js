@@ -66,6 +66,87 @@ test("task tools reject extra scope/auth arguments and invalid writes before mak
   ]) await assert.rejects(available.paperclip_update_issue.execute(input, context), /arguments|comment|status/)
 })
 
+test("blocked updates preserve an explicit unblock owner/action and reject unconfirmed waiting metadata", async t => {
+  let confirm = true
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    if (options.method === "GET") return Response.json(original)
+    const body = JSON.parse(options.body)
+    return Response.json({ ...original, status: body.status,
+      ...(confirm ? { unblockDescriptor: body.unblockDescriptor } : {}) })
+  })
+  for (const owner of ["board", { agentId: assignee.id }, { userId: "reviewer" }]) {
+    const descriptor = { owner, action: "Correct the reviewed submission and resubmit." }
+    const saved = await tools().paperclip_update_issue.execute({
+      status: "blocked", comment: "Waiting for correction.", unblockDescriptor: descriptor,
+    }, context)
+    assert.deepEqual(saved.unblockDescriptor, descriptor)
+  }
+  confirm = false
+  await assert.rejects(tools().paperclip_update_issue.execute({
+    status: "blocked", comment: "Waiting.", unblockDescriptor: { owner: "board", action: "Review findings." },
+  }, context), /did not confirm the requested unblock/)
+})
+
+test("invalid unblock descriptors cannot send mutations or scope overrides", async t => {
+  t.mock.method(globalThis, "fetch", () => assert.fail("Invalid descriptors must not reach Paperclip"))
+  for (const descriptor of [
+    {}, [], { owner: "board", action: " " }, { owner: "board", action: "x".repeat(2001) },
+    { owner: { agentId: [assignee.id] }, action: "Review." },
+    { owner: { agentId: assignee.id, userId: "reviewer" }, action: "Review." },
+    { owner: { agentId: "not-a-uuid" }, action: "Review." },
+    { owner: "other", action: "Review." },
+    { owner: "board", action: "Review.", companyId: "other" },
+  ]) await assert.rejects(tools().paperclip_update_issue.execute({
+    status: "blocked", comment: "Waiting.", unblockDescriptor: descriptor,
+  }, context), /arguments|action|owner/)
+  await assert.rejects(tools().paperclip_update_issue.execute({
+    status: "done", comment: "Complete.", unblockDescriptor: { owner: "board", action: "Review." },
+  }, context), /requires blocked/)
+})
+
+test("parent reports reconcile uncertain saves without delegating back or changing parent state", async t => {
+  const parentId = "23456789-1234-1234-1234-123456789abc"
+  const comments = []
+  let writes = 0, parentStatus = "blocked"
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    if (url.endsWith(`/${scope.issueId}`)) return Response.json({ ...original, parentId })
+    if (url.endsWith(`/${parentId}`)) return Response.json({ id: parentId, companyId: scope.companyId, status: parentStatus })
+    assert.equal(url, `${scope.apiUrl}/api/issues/${parentId}/comments`)
+    if (options.method === "GET") return Response.json(comments)
+    assert.equal(options.method, "POST")
+    writes++
+    comments.push({ id: "parent-report", issueId: parentId, authorAgentId: scope.agentId,
+      body: JSON.parse(options.body).body })
+    throw new Error("Response lost after save")
+  })
+  const report = tools().paperclip_report_to_parent
+  const input = { body: "Reviewed the exact submission. Correct the missing blank line and resubmit." }
+  await assert.rejects(report.execute(input, context), /outcome may be unknown/)
+  assert.equal(writes, 1)
+  const receipt = await report.execute(input, context)
+  assert.equal(receipt.commentId, "parent-report")
+  assert.equal(receipt.requiresOperatorReopen, false)
+  parentStatus = "done"
+  assert.equal((await report.execute(input, context)).requiresOperatorReopen, true)
+  assert.equal(writes, 1)
+})
+
+test("parent reporting refuses missing, foreign, or unconfirmed parents before any write", async t => {
+  const parentId = "23456789-1234-1234-1234-123456789abc"
+  let issue = { ...original }, parent = { id: parentId, companyId: "other" }
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    assert.equal(options.method, "GET")
+    return Response.json(url.endsWith(`/${scope.issueId}`) ? issue : parent)
+  })
+  const report = tools().paperclip_report_to_parent
+  await assert.rejects(report.execute({ body: "Findings." }, context), /no valid direct parent/)
+  issue = { ...original, parentId }
+  await assert.rejects(report.execute({ body: "Findings." }, context), /direct parent in this company/)
+  parent = { id: "different-parent", companyId: scope.companyId }
+  await assert.rejects(report.execute({ body: "Findings." }, context), /direct parent in this company/)
+  await assert.rejects(report.execute({ body: "Findings.", parentId }, context), /harness-owned/)
+})
+
 for (const field of ["id", "companyId", "assigneeAgentId"]) {
   test(`task tools refuse foreign ${field} before any mutation`, async t => {
     t.mock.method(globalThis, "fetch", async (_url, options) => {

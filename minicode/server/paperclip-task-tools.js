@@ -9,13 +9,13 @@ export function createPaperclipTaskTools({ apiUrl, authToken, runId, issueId, ag
   if (!issueId || !authToken || !runId || !agentId || !companyId) return []
   const route = `/issues/${encodeURIComponent(issueId)}`
   const companyRoute = `/companies/${encodeURIComponent(companyId)}`
-  const guidance = " Uses harness-owned run authentication and the run audit header. Task writes are limited to the assigned issue and creation of its children in this company; never supply credentials, company or parent overrides. Existing server authorization gates still apply. A transport failure can leave a write's outcome unknown: use paperclip_get_issue to inspect live state and children, never blindly replay a mutation."
-  const parameters = properties => ({
-    type: "object", properties, required: Object.keys(properties), additionalProperties: false,
+  const guidance = " Uses harness-owned run authentication and the run audit header. Task status writes and child creation are limited to the assigned issue in this company; only paperclip_report_to_parent may comment on its live direct parent. Never supply credentials, company or parent overrides. Existing server authorization gates still apply. A transport failure can leave a write's outcome unknown: inspect live state before another write, never blindly replay a mutation."
+  const parameters = (properties, required = Object.keys(properties)) => ({
+    type: "object", properties, required, additionalProperties: false,
   })
-  const validate = (input, keys) => {
+  const validate = (input, keys, optional = []) => {
     if (!input || typeof input !== "object" || Array.isArray(input)
-      || Object.keys(input).some(key => !keys.includes(key))
+      || Object.keys(input).some(key => !keys.includes(key) && !optional.includes(key))
       || keys.some(key => !Object.hasOwn(input, key))) {
       throw new Error("Supply only the advertised Paperclip tool arguments; task scope and authentication are harness-owned")
     }
@@ -162,21 +162,79 @@ export function createPaperclipTaskTools({ apiUrl, authToken, runId, issueId, ag
       },
     },
     {
+      name: "paperclip_report_to_parent",
+      description: "Report findings or request corrections on the assigned issue's direct parent, without creating a delegation cycle or changing its status/assignee. The parent is resolved from the live assignment, never supplied by the caller. Repeating an identical body reconciles an already-saved report before writing. A done/cancelled parent requires an operator to reopen it; a comment does not do that." + guidance,
+      parameters: parameters({ body: { type: "string", minLength: 1, maxLength: MAX_COMMENT } }),
+      async execute(input, { signal } = {}) {
+        validate(input, ["body"])
+        comment(input.body)
+        const issue = await read(signal)
+        if (!UUID.test(issue.parentId ?? "") || issue.parentId === issueId)
+          throw new Error("The assigned issue has no valid direct parent for reporting")
+        const parentRoute = `/issues/${encodeURIComponent(issue.parentId)}`
+        const parent = await api(parentRoute, "GET", undefined, signal)
+        if (parent?.id !== issue.parentId || parent.companyId !== companyId)
+          throw new Error("Paperclip did not confirm the direct parent in this company")
+        const comments = await api(`${parentRoute}/comments`, "GET", undefined, signal)
+        if (!Array.isArray(comments) || comments.some(entry => !entry || entry.issueId !== parent.id))
+          throw new Error("Paperclip returned an invalid parent comment list")
+        const saved = comments.find(entry => entry.authorAgentId === agentId && entry.body === input.body)
+          ?? await api(`${parentRoute}/comments`, "POST", { body: input.body }, signal)
+        if (!saved?.id || saved.issueId !== parent.id || saved.authorAgentId !== agentId || saved.body !== input.body)
+          throw new Error("Paperclip did not confirm the saved parent report; reconcile the same report before another write")
+        return { issueId: parent.id, commentId: saved.id, parentStatus: parent.status,
+          requiresOperatorReopen: ["done", "cancelled"].includes(parent.status) }
+      },
+    },
+    {
       name: "paperclip_update_issue",
-      description: "Save the assigned Paperclip issue's status with an explanatory comment. Use done only when the task acceptance criteria are met. Existing checkout, pause, approval and authorization gates remain enforced. A successful CLI exit or final message never changes task status." + guidance,
+      description: "Save the assigned Paperclip issue's status with an explanatory comment. Entering blocked requires unresolved blockers, a pending interaction/approval, or an unblockDescriptor naming who must act and what they must do. Use done only when the task acceptance criteria are met. Existing checkout, pause, approval and authorization gates remain enforced. A successful CLI exit or final message never changes task status." + guidance,
       parameters: parameters({
         status: { type: "string", enum: STATUSES },
         comment: { type: "string", minLength: 1, maxLength: MAX_COMMENT },
-      }),
+        unblockDescriptor: {
+          anyOf: [{ type: "null" }, {
+            type: "object", additionalProperties: false, required: ["owner", "action"],
+            properties: {
+              owner: { anyOf: [
+                { type: "string", enum: ["board"] },
+                { type: "object", additionalProperties: false, required: ["agentId"],
+                  properties: { agentId: { type: "string", pattern: UUID.source } } },
+                { type: "object", additionalProperties: false, required: ["userId"],
+                  properties: { userId: { type: "string", minLength: 1 } } },
+              ] },
+              action: { type: "string", minLength: 1, maxLength: 2000 },
+            },
+          }],
+        },
+      }, ["status", "comment"]),
       async execute(input, { signal } = {}) {
-        validate(input, ["status", "comment"])
+        validate(input, ["status", "comment"], ["unblockDescriptor"])
         if (!STATUSES.includes(input.status)) throw new Error("Unsupported Paperclip task status")
         comment(input.comment)
+        const descriptor = input.unblockDescriptor
+        if (descriptor !== undefined && descriptor !== null) {
+          validate(descriptor, ["owner", "action"])
+          if (input.status !== "blocked") throw new Error("An unblockDescriptor requires blocked status")
+          text(descriptor.action, "unblock action", 2000)
+          if (descriptor.owner !== "board") {
+            const owner = descriptor.owner
+            if (!owner || typeof owner !== "object" || Array.isArray(owner) || Object.keys(owner).length !== 1
+              || !(Object.hasOwn(owner, "agentId") && typeof owner.agentId === "string" && UUID.test(owner.agentId)
+                || Object.hasOwn(owner, "userId") && typeof owner.userId === "string" && owner.userId.trim()))
+              throw new Error("An unblock owner must be board, an agent UUID, or a company user ID")
+          }
+        }
         await read(signal)
-        const issue = assignedIssue(await api(route, "PATCH", { status: input.status, comment: input.comment }, signal))
+        const patch = { status: input.status, comment: input.comment,
+          ...(descriptor !== undefined ? { unblockDescriptor: descriptor } : {}) }
+        const issue = assignedIssue(await api(route, "PATCH", patch, signal))
         if (issue.status !== input.status) {
           throw new Error(`Paperclip returned status ${issue.status}; requested ${input.status} was not confirmed. Inspect the assigned issue and its gates before another write.`)
         }
+        if (descriptor && (issue.unblockDescriptor?.action !== descriptor.action.trim()
+          || JSON.stringify(issue.unblockDescriptor?.owner) !== JSON.stringify(descriptor.owner)))
+          throw new Error("Paperclip did not confirm the requested unblock owner and action; inspect the assigned issue before another write")
         return issue
       },
     },

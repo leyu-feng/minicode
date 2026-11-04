@@ -167,6 +167,9 @@ test("Devbox workspace-root sessions use supervisory guidance, isolated bundles 
   assert.ok(sessionOptions.instructions.includes(`Repository manifest: ${path.join(artifacts, "workspace.json")}`))
   assert.doesNotMatch(sessionOptions.instructions, /Hosted identity restrictions take precedence/)
   assert.ok(sessionOptions.tools.some(tool => tool.name === "record_pull_request"))
+  assert.ok(sessionOptions.tools.some(tool => tool.name === "paperclip_report_to_parent"))
+  assert.match(sessionOptions.instructions, /Never create a fix child assigned back to the producer/)
+  assert.match(sessionOptions.instructions, /unblockDescriptor/)
   assert.ok(!sessionOptions.tools.some(tool => ["provider_read", "provider_post", "publish_pull_request"].includes(tool.name)))
   assert.equal(await fs.readFile(path.join(artifacts, ".worker", "skills", "paperclip", "SKILL.md"), "utf8"),
     "# Paperclip skill\nPost progress with the issue comments API and verify task completion.")

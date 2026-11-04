@@ -79,6 +79,25 @@ test("workspace root gives two workers independent clean worktrees without touch
   second.release()
 })
 
+test("workspace supports full-length worker names and multi-digit agent slots across restarts", async t => {
+  const { root, options } = await fixture(t)
+  const settings = { ...options, workerName: "inspection-worker-123456" }
+  const workspace = await prepareWorkerWorkspace(settings)
+  const directories = []
+  for (let index = 0; index < 10; index++) {
+    const assignment = await workspace.prepare(`agent-${index}`, `run-${index}`)
+    const directory = assignment.repositories.find(repo => repo.name === "application").path
+    assert.notEqual(directory, path.join(root, "application"))
+    directories.push(directory)
+    workspace.release()
+  }
+  assert.equal(new Set(directories).size, directories.length)
+  const resumed = await prepareWorkerWorkspace(settings)
+  const assignment = await resumed.prepare("agent-9", "run-resumed")
+  assert.equal(assignment.repositories.find(repo => repo.name === "application").path, directories[9])
+  resumed.release()
+})
+
 test("workspace rejects changed config and source remote instead of reusing or redirecting checkouts", async t => {
   const { root, config, save, options, git } = await fixture(t)
   const workspace = await prepareWorkerWorkspace(options)

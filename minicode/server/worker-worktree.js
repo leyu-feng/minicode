@@ -13,6 +13,10 @@ export function siblingWorktreePath(source, name) {
     || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(name)) {
     throw new Error("--worker-name must be a safe folder name of 1-24 letters, digits, hyphens or underscores")
   }
+  return siblingPath(source, name)
+}
+
+function siblingPath(source, name) {
   const workspace = path.join(path.dirname(source), name)
   if (path.relative(source, workspace) === "") throw new Error("Worker worktree must not be the source checkout")
   return workspace
@@ -28,7 +32,9 @@ export async function prepareWorkerWorktrees({
   }
   const minimum = minFreeGiB * GIB
   const target = targetFreeGiB * GIB
-  siblingWorktreePath(source, `${path.basename(prefix)}a1`)
+  siblingWorktreePath(source, path.basename(prefix))
+  const workspaceFor = index => siblingPath(source, `${path.basename(prefix)}a${index + 1}`)
+  workspaceFor(0)
   const common = await fs.realpath(await git(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"]))
   if (!/^[a-f0-9-]{36}$/.test(workerId)) throw new Error("Invalid worker id for worktree registry")
   const file = path.join(common, `minicode-worker-${workerId}.json`)
@@ -58,7 +64,6 @@ export async function prepareWorkerWorktrees({
   let sweep = null
   let reclaiming = false
   let reportedState = null
-  const workspaceFor = index => siblingWorktreePath(source, `${path.basename(prefix)}a${index + 1}`)
   const report = (state, message) => {
     if (reportedState !== state) log(`[minicode] ${message}`)
     reportedState = state

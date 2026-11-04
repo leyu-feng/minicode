@@ -29,6 +29,7 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
   let failHandoff = false, failRegistration = false
   let failProducerNotification = false, failCleanup = false
   let failWaiting = false, sourceStatus = "in_progress", waitingWrites = 0
+  let sourceUnblockDescriptor
   let liveInspector = inspectorExists
   let submitted = false
   t.mock.method(globalThis, "fetch", async (url, options) => {
@@ -40,11 +41,15 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
     if (route.endsWith(`/issues/${issueId}`)) {
       if (options.method === "PATCH") {
         if (failWaiting) return new Response("Waiting state failed", { status: 503 })
+        if (body.status === "blocked" && !body.unblockDescriptor)
+          return Response.json({ error: "Entering blocked requires an unblockDescriptor" }, { status: 422 })
         sourceStatus = body.status
+        sourceUnblockDescriptor = body.unblockDescriptor
         waitingWrites++
         comments.push({ body: body.comment, id: `comment-${comments.length + 1}`, issueId, authorAgentId: task.agent.id })
       }
       return Response.json({ id: issueId, companyId, assigneeAgentId: task.agent.id, status: sourceStatus,
+        unblockDescriptor: sourceUnblockDescriptor,
         ...(separateBranch ? { parentId, description: `Submission ID: ${submissionId}\nRemote commit: ${remoteCommit}\nBranch: u/producer-one/feature\nSource agent: ${agentId}` } : {}) })
     }
     if (route.endsWith(`/issues/${parentId}`)) return Response.json({ id: parentId, companyId, assigneeAgentId: agentId })
@@ -116,6 +121,7 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
     failWaiting: value => { failWaiting = value },
     get sourceStatus() { return sourceStatus },
     get waitingWrites() { return waitingWrites },
+    get sourceUnblockDescriptor() { return sourceUnblockDescriptor },
   }
 }
 
@@ -127,6 +133,8 @@ test("ordinary agents receive branch submission and owned retirement, handing of
   assert.equal(receipt.reviewIssueId, "review-task")
   assert.equal(receipt.waitingForInspection, true)
   assert.equal(f.sourceStatus, "blocked")
+  assert.deepEqual(f.sourceUnblockDescriptor.owner, { agentId: inspectorId })
+  assert.ok(f.sourceUnblockDescriptor.action.includes("review-task"))
   assert.equal(f.children[0].assigneeAgentId, inspectorId)
   assert.ok(f.children[0].description.includes(submissionId))
   assert.ok(f.children[0].description.includes(`Repository URL: ${f.repositories[0].source}`))

@@ -249,6 +249,8 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
           if (source.status !== "blocked" || !comments.some(entry => entry.authorAgentId === task.agent.id && entry.body?.includes(marker))) {
             await update.execute({
               status: "blocked",
+              unblockDescriptor: { owner: { agentId: inspector },
+                action: `Review submission ${receipt.submissionId} in task ${review.id} and return its PR link or correction findings.` },
               comment: `Waiting for inspection task ${review.id} to return a separate PR link for branch ${receipt.branch}.\n\nResume to provider-verify that PR and retire only this original submission. The submitted branch is not a PR and this source task is not complete.\n\n${marker}`,
             }, options)
           }
