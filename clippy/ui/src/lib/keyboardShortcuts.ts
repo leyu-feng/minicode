@@ -9,6 +9,7 @@ export const KEYBOARD_SHORTCUT_TEXT_INPUT_SELECTOR = [
 ].join(", ");
 
 const PAGE_SEARCH_SHORTCUT_SELECTOR = "[data-page-search-target='true']";
+const BLOCKING_SHORTCUT_DIALOG_SELECTOR = "[role='dialog'][aria-modal='true'], [role='alertdialog'][aria-modal='true']";
 const MODIFIER_ONLY_KEYS = new Set(["Shift", "Meta", "Control", "Alt"]);
 
 export type InboxQuickArchiveKeyAction = "ignore" | "archive" | "disarm";
@@ -29,14 +30,14 @@ export function isKeyboardShortcutTextInputTarget(target: EventTarget | null): b
 }
 
 export function hasBlockingShortcutDialog(root: ParentNode = document): boolean {
-  return !!root.querySelector("[role='dialog'][aria-modal='true']");
+  return !!root.querySelector(BLOCKING_SHORTCUT_DIALOG_SELECTOR);
 }
 
 function isVisibleShortcutTarget(element: HTMLElement): boolean {
   if (!element.isConnected) return false;
   if ("disabled" in element && typeof element.disabled === "boolean" && element.disabled) return false;
   if (element.closest("[hidden], [aria-hidden='true'], [inert]")) return false;
-  if (element.closest("[role='dialog'][aria-modal='true']")) return false;
+  if (element.closest(BLOCKING_SHORTCUT_DIALOG_SELECTOR)) return false;
 
   const style = window.getComputedStyle(element);
   if (style.display === "none" || style.visibility === "hidden") return false;

@@ -24,6 +24,10 @@ import { PluginLauncherProvider } from "./plugins/launchers";
 import { startPerfMeasureReaper } from "./lib/perf-measure-reaper";
 import { getOrCreatePaperclipReactRoot } from "./lib/react-root";
 import { startServiceWorkerUpdates } from "./lib/service-worker-updates";
+import { createEasyAuthFetchRecovery, startEasyAuthSessionChecks } from "./lib/easy-auth-fetch";
+import { EasyAuthRecoveryNotice } from "./components/EasyAuthRecoveryNotice";
+import { queryKeys } from "./lib/queryKeys";
+import type { HealthStatus } from "./api/health";
 import "@mdxeditor/editor/style.css";
 import "./index.css";
 
@@ -55,6 +59,20 @@ const queryClient = new QueryClient({
   },
 });
 
+const originalFetch = window.fetch;
+const isEasyAuthEnabled = () => queryClient.getQueryData<HealthStatus>(queryKeys.health)?.authProvider === "azure_easy_auth";
+const easyAuthRecovery = createEasyAuthFetchRecovery({
+  fetch: originalFetch.bind(window),
+  origin: window.location.origin,
+  isEnabled: isEasyAuthEnabled,
+});
+window.fetch = easyAuthRecovery.fetch;
+const stopEasyAuthSessionChecks = startEasyAuthSessionChecks(easyAuthRecovery, isEasyAuthEnabled);
+import.meta.hot?.dispose(() => {
+  stopEasyAuthSessionChecks();
+  if (window.fetch === easyAuthRecovery.fetch) window.fetch = originalFetch;
+});
+
 function CompanyAwareBreadcrumbProvider({ children }: { children: React.ReactNode }) {
   const { selectedCompany } = useCompany();
   return <BreadcrumbProvider companyName={selectedCompany?.name ?? null}>{children}</BreadcrumbProvider>;
@@ -75,6 +93,7 @@ getOrCreatePaperclipReactRoot(window, rootElement).render(
       <QueryClientProvider client={queryClient}>
         <SentryGate />
         <ThemeProvider>
+          <EasyAuthRecoveryNotice recovery={easyAuthRecovery} />
           <BrowserRouter>
             <CompanyProvider>
               <EditorAutocompleteProvider>

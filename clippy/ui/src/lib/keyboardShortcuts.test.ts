@@ -63,9 +63,9 @@ describe("keyboardShortcuts helpers", () => {
     expect(isKeyboardShortcutTextInputTarget(button)).toBe(false);
   });
 
-  it("reports when a modal dialog is open", () => {
+  it.each(["dialog", "alertdialog"])("reports when a modal %s is open", (role) => {
     const root = document.createElement("div");
-    root.innerHTML = `<div role="dialog" aria-modal="true"></div>`;
+    root.innerHTML = `<div role="${role}" aria-modal="true"></div>`;
 
     expect(hasBlockingShortcutDialog(root)).toBe(true);
     expect(hasBlockingShortcutDialog(document.createElement("div"))).toBe(false);
