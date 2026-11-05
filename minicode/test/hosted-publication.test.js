@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { createPrInspectorPostback, createHostedPublicationTool } from "../server/hosted-publication.js"
+import { createPaperclipTaskTools } from "../server/paperclip-task-tools.js"
 
 const agentId = "11111111-1111-4111-8111-111111111111"
 const companyId = "22222222-2222-4222-8222-222222222222"
@@ -57,7 +58,7 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
         if (failWaiting) return new Response("Waiting state failed", { status: 503 })
         if (body.status === "blocked" && !body.unblockDescriptor)
           return Response.json({ error: "Entering blocked requires an unblockDescriptor" }, { status: 422 })
-        if (body.unblockDescriptor?.owner?.agentId !== task.agent.id)
+        if (body.unblockDescriptor && body.unblockDescriptor.owner?.agentId !== task.agent.id)
           return Response.json({ error: "Agents may only name themselves as an unblock owner" }, { status: 403 })
         sourceStatus = body.status
         sourceUnblockDescriptor = body.unblockDescriptor
@@ -102,6 +103,8 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
       const targetIssueId = route.split("/").at(-2)
       if (targetIssueId === parentId) return new Response("Agent cannot mutate another agent's issue", { status: 403 })
       if (options.method === "GET") return Response.json(products.filter(product => product.issueId === targetIssueId))
+      if (inspectorExists && !isInspector)
+        return new Response("Only the PR Inspector may register a PR", { status: 403 })
       if (failRegistration) return new Response("Registration failed", { status: 503 })
       const product = { ...body, id: `product-${products.length + 1}`, issueId: targetIssueId }
       products.push(product)
@@ -131,7 +134,11 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
         if (failCleanup) throw new Error("Provider verification failed")
         return { submissionId: input.submissionId,
           branch: input.supersededBySubmissionId ? "u/w01/rejected-feature" : "u/w01/feature",
-          state: "DELETED", ...(input.supersededBySubmissionId ? { supersededBySubmissionId: input.supersededBySubmissionId } : {}) }
+          state: "DELETED", ...(input.supersededBySubmissionId ? { supersededBySubmissionId: input.supersededBySubmissionId } : {}),
+          pullRequest: { verification: "provider_verified", number: input.pullRequestNumber, state: "active",
+            url: repositories[0].publication.pullRequestUrlTemplate.replace("{number}", String(input.pullRequestNumber)),
+            branch: "u/reviewer-one/feature", target: "refs/heads/main", remoteCommit,
+            commitMessage: "Feature\n\nCo-Authored-By: Paperclip <noreply@paperclip.ing>\n" } }
       }
       if (input.mode === "publish_pull_request") return {
         submissionId, commit, remoteCommit, branch: "u/w01/feature", provider: "azure_devops",
@@ -151,7 +158,7 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
     repositories, task, apiUrl: "https://paperclip.example.test", request,
   })
   return {
-    publication, publications, children, products, comments, task, repositories, receipts,
+    publication, publications, children, products, comments, task, repositories, receipts, request,
     tool: name => publication.tools.find(tool => tool.name === name),
     failHandoff: value => { failHandoff = value },
     failRegistration: value => { failRegistration = value },
@@ -379,6 +386,38 @@ test("producer retirement is repository-bound, fails explicitly and reconciles o
   assert.equal((await tool.execute(input)).state, "DELETED")
   assert.equal(f.publications.at(-1).pullRequestNumber, 12)
   assert.equal(f.publication.registrationError, null)
+})
+
+test("a producer continuation can complete with provider commit evidence and the inspector's existing PR registration", async t => {
+  const f = fixture(t)
+  await f.tool("submit_branch_for_inspection").execute({ repository: "main", commit, title: "Feature", body: "Review." })
+  const review = f.children[0]
+  review.status = "done"
+  const url = "https://code.example.test/project/_git/main/pullrequest/12"
+  f.products.push({ id: "inspector-pr", issueId: review.id, type: "pull_request", url,
+    metadata: { submissionId, sourceAgentId: agentId, inspectionIssueId: review.id, reviewedCommit: remoteCommit } })
+  const continuation = createHostedPublicationTool({
+    repositories: f.repositories, task: f.task, apiUrl: "https://paperclip.example.test",
+    request: f.request,
+  })
+  const retired = await continuation.tools.find(tool => tool.name === "retire_submission_branch").execute({
+    repository: "main", submissionId, url,
+  })
+  assert.equal(retired.pullRequest.verification, "provider_verified")
+  assert.equal(retired.pullRequest.url, url)
+  assert.equal(retired.pullRequest.remoteCommit, remoteCommit)
+  assert.equal(retired.pullRequest.commitMessage, "Feature\n\nCo-Authored-By: Paperclip <noreply@paperclip.ing>\n")
+  const tools = createPaperclipTaskTools({
+    apiUrl: "https://paperclip.example.test", authToken: f.task.authToken, runId: f.task.runId,
+    issueId, agentId, companyId, assertCanComplete: () => continuation.assertCanComplete(),
+  })
+  const done = await tools.find(tool => tool.name === "paperclip_update_issue").execute({
+    status: "done", comment: `Provider verified ${url} at ${remoteCommit}, including the required trailer; original branch retired.`,
+  })
+  assert.equal(done.status, "done")
+  assert.equal(f.children.length, 1, "The existing provider evidence needs no extra verification task")
+  assert.equal(f.products.length, 1)
+  assert.equal(f.products[0].issueId, review.id, "The producer must not duplicate the inspector's PR registration")
 })
 
 async function supersessionFixture(t) {
