@@ -2,6 +2,22 @@ import { getPageVisibilitySnapshot, subscribePageVisibility } from "./page-visib
 
 const REFRESH_TIMEOUT_MS = 15_000;
 const FAILURE_COOLDOWN_MS = 30_000;
+// With preserveUrlFragmentsForLogins, Easy Auth answers unauthenticated
+// requests with HTTP 200 and a script page that redirects to the sign-in URL.
+const LOGIN_PAGE_MARKER = /\/\.auth\/login\/|\.auth%2Flogin%2F|<title>\s*Redirecting to login page/i;
+
+async function isEasyAuthLoginPage(response: Response): Promise<boolean> {
+  if (!response.headers.get("content-type")?.toLowerCase().includes("text/html")) return false;
+  try {
+    return LOGIN_PAGE_MARKER.test(await response.clone().text());
+  } catch {
+    return false;
+  }
+}
+
+function signInRequired(): Response {
+  return Response.json({ error: "Sign-in required" }, { status: 401 });
+}
 
 function waitForRefresh(promise: Promise<boolean>, signal: AbortSignal): Promise<boolean> {
   signal.throwIfAborted();
@@ -79,7 +95,8 @@ export function createEasyAuthFetchRecovery({
     // Retain an unconsumed request so JSON, multipart, and binary bodies can
     // be replayed once if Easy Auth rejects them before application handling.
     const response = await rawFetch(request.clone());
-    if (response.status !== 401) {
+    const loginPage = await isEasyAuthLoginPage(response);
+    if (response.status !== 401 && !loginPage) {
       if (response.ok && !response.redirected && /^\/api\/auth\/get-session\/?$/.test(url.pathname)
         && response.headers.get("content-type")?.includes("application/json")) {
         retryAfter = 0;
@@ -92,17 +109,19 @@ export function createEasyAuthFetchRecovery({
     // Application JSON errors (including local/Cloud auth and rejected
     // credentials) are not evidence that the gateway rejected this request.
     const isApplicationError = /(?:\/|\+)json(?:;|$)/i.test(response.headers.get("content-type") ?? "");
-    if (!isEasyAuthChallenge && (!isEnabled() || isApplicationError)) return response;
+    if (!loginPage && !isEasyAuthChallenge && (!isEnabled() || isApplicationError)) return response;
 
     const recovered = generation !== startedGeneration || await waitForRefresh(refresh(), request.signal);
     request.signal.throwIfAborted();
-    if (!recovered) return response;
+    // Callers expect API responses, never the gateway's sign-in page.
+    if (!recovered) return loginPage ? signInRequired() : response;
     const retried = await rawFetch(request);
-    if (retried.status === 401) {
+    const retriedLoginPage = await isEasyAuthLoginPage(retried);
+    if (retried.status === 401 || retriedLoginPage) {
       retryAfter = Date.now() + FAILURE_COOLDOWN_MS;
       setNeedsSignIn(true);
     }
-    return retried;
+    return retriedLoginPage ? signInRequired() : retried;
   };
 
   return {

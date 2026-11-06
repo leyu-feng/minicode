@@ -11,6 +11,14 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+// Shape of the page Easy Auth serves (HTTP 200) when preserveUrlFragmentsForLogins is on.
+function loginPage() {
+  return new Response(
+    `<html><head><title>Redirecting to login page...</title></head></html><script>window.location.replace('https://login.microsoftonline.com/t/oauth2/v2.0/authorize?redirect_uri=https%3A%2F%2Fclippy.example.com%2F.auth%2Flogin%2Faad%2Fcallback');</script>`,
+    { headers: { "content-type": "text/html; charset=utf-8" } },
+  );
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
@@ -216,6 +224,47 @@ describe("Easy Auth fetch recovery", () => {
     expect(await recovery.fetch(url, init)).toBe(original);
     expect(rawFetch).toHaveBeenCalledOnce();
     expect(recovery.getSnapshot()).toBe(false);
+  });
+
+  it("treats Easy Auth's HTTP 200 login page as a challenge, even before health metadata loads", async () => {
+    const success = new Response('{"ok":true}', { headers: { "content-type": "application/json" } });
+    const rawFetch = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(loginPage())
+      .mockResolvedValueOnce(new Response(null))
+      .mockResolvedValueOnce(success);
+    const recovery = createEasyAuthFetchRecovery({ fetch: rawFetch, origin: ORIGIN, isEnabled: () => false });
+
+    expect(await recovery.fetch("/api/companies/c/issues")).toBe(success);
+    expect(rawFetch.mock.calls[1][0]).toBe(`${ORIGIN}/.auth/refresh`);
+    expect(recovery.getSnapshot()).toBe(false);
+  });
+
+  it.each(["refresh fails", "retry is still the login page"] as const)(
+    "returns a JSON 401 instead of the login page when %s",
+    async (scenario) => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const rawFetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+        if (String(input) === `${ORIGIN}/.auth/refresh`) {
+          return new Response(null, { status: scenario === "refresh fails" ? 401 : 200 });
+        }
+        return loginPage();
+      });
+      const recovery = createEasyAuthFetchRecovery({ fetch: rawFetch, origin: ORIGIN, isEnabled: () => true });
+
+      const response = await recovery.fetch("/api/companies/c/issues");
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: "Sign-in required" });
+      expect(recovery.getSnapshot()).toBe(true);
+    },
+  );
+
+  it("does not treat ordinary HTML responses as a sign-in challenge", async () => {
+    const html = new Response("<html><title>Docs</title></html>", { headers: { "content-type": "text/html" } });
+    const rawFetch = vi.fn<typeof fetch>().mockResolvedValue(html);
+    const recovery = createEasyAuthFetchRecovery({ fetch: rawFetch, origin: ORIGIN, isEnabled: () => true });
+
+    expect(await recovery.fetch("/api/tasks")).toBe(html);
+    expect(rawFetch).toHaveBeenCalledOnce();
   });
 
   it("can recover an explicit gateway challenge before health metadata has loaded", async () => {
