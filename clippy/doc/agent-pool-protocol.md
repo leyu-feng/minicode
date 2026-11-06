@@ -26,6 +26,10 @@ Legacy `--workspace-mode clone` retains persistent independent per-agent clones.
 The canonical TypeScript schemas and types are exported from
 `@paperclipai/shared/agent-pools`. Non-TypeScript workers implement the same JSON
 contract. Do not depend on Minicode's internal session or prompt representation.
+The assignment's top-level `continuation` carries the full server-authored
+history. Identical copies in `context.executionContinuation` and
+`context.paperclipWake.executionContinuation` are omitted from transport;
+distinct context remains intact and the 256 KiB frame limit still applies.
 
 Authentication is token-only. The AgentPool protocol must never introduce
 username/password credentials, HTTP Basic authentication, or password fallbacks.

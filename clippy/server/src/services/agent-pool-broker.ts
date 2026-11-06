@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { WebSocket } from "ws";
 import { z } from "zod";
 import {
@@ -357,6 +358,17 @@ export class AgentPoolBroker {
     const peer = eligible.find(candidate => required.every(capability => candidate.capabilities.includes(capability)));
     if (!peer) return unavailable(`AgentPool '${name}' has no available worker supporting ${required.join(", ")}; upgrade or connect a compatible worker and retry`);
     const { paperclipAgentInstructions: _instructions, paperclipHostedRepositories: repositories, ...context } = ctx.context;
+    if (ctx.executionContinuation != null) {
+      if (isDeepStrictEqual(context.executionContinuation, ctx.executionContinuation))
+        delete context.executionContinuation;
+      const wake = context.paperclipWake;
+      if (wake && typeof wake === "object" && !Array.isArray(wake)
+        && "executionContinuation" in wake
+        && isDeepStrictEqual(wake.executionContinuation, ctx.executionContinuation)) {
+        const { executionContinuation: _wakeContinuation, ...wakeContext } = wake;
+        context.paperclipWake = wakeContext;
+      }
+    }
     const harnessModel = ctx.config.harnessModel
       ?? (ctx.config.harness === "claudecode" ? AGENT_POOL_CLAUDECODE_DEFAULT_MODEL : undefined);
     const task = JSON.stringify(agentPoolTaskSchema.parse({

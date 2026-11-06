@@ -401,6 +401,53 @@ describe("AgentPool execution channel", () => {
     expect(client.messages).toEqual([]);
   });
 
+  it("sends full continuation history once without changing saved context or removing distinct history", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker();
+    const ctx = context();
+    const continuation: NonNullable<AdapterExecutionContext["executionContinuation"]> = {
+      version: 1, companyId: ctx.agent.companyId, issueId: "issue",
+      trigger: { reason: "issue_commented", interactionId: null, sourceRunId: "prior-run" },
+      originCommentIds: ["comment"], objective: "Complete only remaining work",
+      messages: [{
+        id: "comment", authorType: "user", authorId: "operator", body: "x".repeat(90 * 1024),
+        createdAt: "2026-11-06T00:00:00Z", updatedAt: "2026-11-06T00:00:00Z",
+        deleted: false, sourceTrust: "human",
+      }],
+      interactionOutcomes: [], completedWork: "Submission published",
+      completedActions: [{ runId: "prior-run", receiptId: "receipt", operationId: "publish", result: { confirmed: true } }],
+      unresolvedInteractionIds: [],
+      coverage: { kind: "full_task_history", throughCommentId: "comment", summaryThroughCommentId: null },
+    };
+    ctx.executionContinuation = continuation;
+    ctx.context.executionContinuation = structuredClone(continuation);
+    ctx.context.paperclipWake = {
+      reason: "issue_commented", comments: [{ id: "latest", body: "New correction" }],
+      executionContinuation: structuredClone(continuation),
+    };
+    const savedContext = structuredClone(ctx.context);
+    const result = broker.execute(ctx);
+    const task = await client.take("task");
+    expect(task.continuation).toEqual(continuation);
+    expect(task.context).not.toHaveProperty("executionContinuation");
+    expect(task.context).toHaveProperty("paperclipWake", { reason: "issue_commented", comments: [{ id: "latest", body: "New correction" }] });
+    expect(ctx.context).toEqual(savedContext);
+    client.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await client.take("ack");
+    client.send({ type: "ready" });
+    await result;
+    await vi.waitFor(() => expect(broker.status(client.id)).toBe("idle"));
+
+    const distinct = context();
+    distinct.executionContinuation = continuation;
+    distinct.context.executionContinuation = { ...continuation, objective: "Different context objective" };
+    distinct.context.paperclipWake = { executionContinuation: { ...continuation, completedWork: "Different recorded work" } };
+    await expect(broker.execute(distinct)).rejects.toThrow("256 KiB frame limit");
+    expect(distinct.onDispatch).not.toHaveBeenCalled();
+    expect(client.messages).toEqual([]);
+    expect(broker.status(client.id)).toBe("idle");
+  });
+
   it("checks company-scoped pool readiness while idle or busy, but not during handshake or reconnect", async () => {
     const { broker, worker } = await harness();
     expect(broker.hasConnectedWorker("company-a", "default")).toBe(false);
