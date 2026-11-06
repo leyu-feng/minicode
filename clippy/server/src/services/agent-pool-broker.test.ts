@@ -35,14 +35,15 @@ async function harness(reconnectMs = 1000) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
   async function worker(id = randomUUID(), instanceId = randomUUID(), runId: string | null = null, ready = true, capabilities: string[] = ["skill_bundle_v1"],
-    identity: { executionId?: string; poolName?: string } = {}, inspectorCompatible = true) {
+    identity: { executionId?: string; poolName?: string } = {}, inspectorCompatible = true, largeFrames = true) {
     identities.set(id, identity);
     const socket = new WebSocket(`ws://127.0.0.1:${port}?id=${id}`);
     const messages: Array<Record<string, unknown>> = [];
     socket.on("message", (data) => messages.push(JSON.parse(data.toString())));
     await once(socket, "open");
     const send = (value: object) => socket.send(JSON.stringify(value));
-    send({ type: "hello", protocolVersion: 1, instanceId, runId, capabilities: [...(inspectorCompatible ? ["pr_inspector_v1", "pr_inspection_result_v1"] : []), ...capabilities] });
+    send({ type: "hello", protocolVersion: 1, instanceId, runId,         capabilities: [...(inspectorCompatible ? ["pr_inspector_v1", "pr_inspection_result_v1"] : []),
+      ...(largeFrames ? ["task_frame_512k_v1"] : []), ...capabilities] });
     await vi.waitFor(() => expect(messages.length || socket.readyState === WebSocket.CLOSED).toBeTruthy());
     const welcome = messages.shift();
     if (welcome && !runId && ready) {
@@ -387,15 +388,47 @@ describe("AgentPool execution channel", () => {
     await result;
   });
 
+  it("dispatches assignments above 256 KiB only to workers advertising the larger bound", async () => {
+    const { broker, worker } = await harness();
+    const legacy = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1"], {}, true, false);
+    const ctx = context();
+    ctx.context.task = "x".repeat(300 * 1024);
+    await expect(broker.execute(ctx)).resolves.toMatchObject({
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      errorMessage: expect.stringContaining("task_frame_512k_v1"),
+    });
+    expect(ctx.onDispatch).not.toHaveBeenCalled();
+    expect(legacy.messages).toEqual([]);
+    expect(broker.status(legacy.id)).toBe("idle");
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    const compatible = await worker();
+    await expect(broker.execute(ctx)).resolves.toMatchObject({
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+    });
+    expect(ctx.onDispatch).not.toHaveBeenCalled();
+    expect(legacy.messages).toEqual([]);
+    expect(compatible.messages).toEqual([]);
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    expect(broker.reservedWorker(ctx.runId)?.id).toBe(compatible.id);
+    const result = broker.execute(ctx);
+    const task = await compatible.take("task");
+    expect(task.context).toEqual(ctx.context);
+    expect(legacy.messages).toEqual([]);
+    compatible.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await compatible.take("ack");
+    compatible.send({ type: "ready" });
+    await expect(result).resolves.toMatchObject({ exitCode: 0 });
+  });
+
   it("rejects oversized instructions without reserving or dispatching the worker", async () => {
     const { broker, worker } = await harness();
     const client = await worker(randomUUID(), randomUUID(), null, true, ["inline_instructions_v1", "skill_bundle_v1"]);
     const ctx = context();
     ctx.context.paperclipAgentInstructions = {
-      version: 1, format: "markdown", content: "x".repeat(256 * 1024),
+      version: 1, format: "markdown", content: "x".repeat(512 * 1024),
       revisionId: "large-revision", contentSha256: "a".repeat(64),
     };
-    await expect(broker.execute(ctx)).rejects.toThrow("256 KiB frame limit");
+    await expect(broker.execute(ctx)).rejects.toThrow("512 KiB frame limit");
     expect(broker.status(client.id)).toBe("idle");
     expect(ctx.onDispatch).not.toHaveBeenCalled();
     expect(client.messages).toEqual([]);
@@ -410,7 +443,7 @@ describe("AgentPool execution channel", () => {
       trigger: { reason: "issue_commented", interactionId: null, sourceRunId: "prior-run" },
       originCommentIds: ["comment"], objective: "Complete only remaining work",
       messages: [{
-        id: "comment", authorType: "user", authorId: "operator", body: "x".repeat(90 * 1024),
+        id: "comment", authorType: "user", authorId: "operator", body: "x".repeat(180 * 1024),
         createdAt: "2026-11-06T00:00:00Z", updatedAt: "2026-11-06T00:00:00Z",
         deleted: false, sourceTrust: "human",
       }],
@@ -442,7 +475,7 @@ describe("AgentPool execution channel", () => {
     distinct.executionContinuation = continuation;
     distinct.context.executionContinuation = { ...continuation, objective: "Different context objective" };
     distinct.context.paperclipWake = { executionContinuation: { ...continuation, completedWork: "Different recorded work" } };
-    await expect(broker.execute(distinct)).rejects.toThrow("256 KiB frame limit");
+    await expect(broker.execute(distinct)).rejects.toThrow("512 KiB frame limit");
     expect(distinct.onDispatch).not.toHaveBeenCalled();
     expect(client.messages).toEqual([]);
     expect(broker.status(client.id)).toBe("idle");

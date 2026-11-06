@@ -882,7 +882,7 @@ test("inline instructions are agent-scoped snapshots applied without workspace i
   }
   const fixture = await harness(t, (options) => { sessions.push(options); return new Session() })
   const peer = await fixture.welcome(0)
-  assert.deepEqual(peer.messages.find(message => message.type === "hello").capabilities, ["inline_instructions_v1", "skill_bundle_v1", "pr_inspector_v1", "pr_inspection_result_v1"])
+  assert.deepEqual(peer.messages.find(message => message.type === "hello").capabilities, ["inline_instructions_v1", "skill_bundle_v1", "pr_inspector_v1", "pr_inspection_result_v1", "task_frame_512k_v1"])
   for (const [index, content] of ["Keep reports concise.", "Updated instructions: include evidence."].entries()) {
     const runId = `inline-${index}`
     peer.send({ type: "task", protocolVersion: 1, runId, agent, context: {}, instructions: inlineInstructions(content, `revision-${index}`) })
@@ -897,6 +897,33 @@ test("inline instructions are agent-scoped snapshots applied without workspace i
   assert.ok(!sessions[0].instructions.includes("Updated instructions:"))
   assert.ok(!sessions[1].instructions.includes("Keep reports concise."))
   assert.ok(!peer.messages.some(message => message.data?.includes("Keep reports concise.")))
+})
+
+test("worker accepts task frames between 256 and 512 KiB without losing UTF-8 context", async t => {
+  let received
+  class Session extends EventEmitter {
+    async write(prompt) { received = prompt; return { exitCode: 0 } }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, () => new Session())
+  const peer = await fixture.welcome(0)
+  const body = "\u20ac".repeat(100_000)
+  await executeTask(peer, { runId: "large-frame", agent, context: { task: body } })
+  assert.ok(received.includes(body))
+})
+
+test("worker rejects task frames above 512 KiB before model work", async t => {
+  let sessions = 0
+  const fixture = await harness(t, () => { sessions++; throw new Error("Must not start a session") })
+  const peer = await fixture.welcome(0)
+  await waitUntil(() => peer.messages.some(message => message.type === "ready"))
+  const closed = once(peer.socket, "close")
+  peer.send({ type: "task", runId: "oversized-frame", agent, context: { task: "x".repeat(512 * 1024) } })
+  const [code] = await closed
+  assert.equal(code, 1009)
+  assert.equal(sessions, 0)
+  assert.ok(!peer.messages.some(message => message.type === "result"))
 })
 
 test("bundled skills download once, repair extracted files each assignment, and refresh changed archives", async (t) => {

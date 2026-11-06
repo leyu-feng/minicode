@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { WebSocket } from "ws";
 import { z } from "zod";
 import {
-  AGENT_POOL_INLINE_INSTRUCTIONS, AGENT_POOL_PROTOCOL_VERSION, AGENT_POOL_SKILL_BUNDLE,
+  AGENT_POOL_INLINE_INSTRUCTIONS, AGENT_POOL_PROTOCOL_VERSION, AGENT_POOL_SKILL_BUNDLE, AGENT_POOL_FRAME_512K,
   AGENT_POOL_HOSTED_REPOSITORIES,
   AGENT_POOL_HOSTED_WORKSPACE,
   AGENT_POOL_GITHUB_CREDENTIAL, agentPoolGitHubCredentialSchema, agentPoolRequiresGitHubLogin, type AgentPoolGitHubCredential,
@@ -19,7 +19,7 @@ import { readAgentPoolSkills } from "./agent-pool-skills.js";
 import { AGENT_POOL_STOP_SCHEMA } from "./agent-pool-execution-stop.js";
 
 export const AGENT_POOL_RECONNECT_MS = 60_000;
-export const AGENT_POOL_MAX_FRAME = 256 * 1024;
+export const AGENT_POOL_MAX_FRAME = 512 * 1024;
 const MAX_RUN_OUTPUT = 2 * 1024 * 1024;
 const readySchema = z.object({ type: z.literal("ready"), retiring: z.boolean().optional() });
 const eventSchema = z.discriminatedUnion("type", [
@@ -104,11 +104,12 @@ export class AgentPoolBroker {
   }
 
   reserveAvailableWorker(ctx: AdapterExecutionContext): boolean {
-    const peer = [...this.peers.values()].find((candidate) => candidate.identity.companyId === ctx.agent.companyId
+    const available = [...this.peers.values()].filter((candidate) => candidate.identity.companyId === ctx.agent.companyId
       && candidate.identity.poolName === (ctx.config.name ?? "default") && candidate.ready && !candidate.run
       && candidate.socket?.readyState === WebSocket.OPEN
       && this.executionAvailable(candidate, ctx.runId)
       && this.requiredCapabilities(ctx).every((capability) => candidate.capabilities.includes(capability)));
+    const peer = available.find(candidate => candidate.capabilities.includes(AGENT_POOL_FRAME_512K)) ?? available[0];
     if (!peer) return false;
     peer.ready = false;
     peer.reservedRunId = ctx.runId;
@@ -355,7 +356,9 @@ export class AgentPoolBroker {
     const eligible = available.filter(candidate => this.executionAvailable(candidate, ctx.runId));
     if (!eligible.length) return unavailable(`AgentPool '${name}' has no available connected worker; connect a worker and retry`);
     const required = this.requiredCapabilities(ctx);
-    const peer = eligible.find(candidate => required.every(capability => candidate.capabilities.includes(capability)));
+    const compatible = eligible.filter(candidate => required.every(capability => candidate.capabilities.includes(capability)));
+    const peer = compatible.find(candidate => candidate.reservedRunId === ctx.runId)
+      ?? compatible.find(candidate => candidate.capabilities.includes(AGENT_POOL_FRAME_512K)) ?? compatible[0];
     if (!peer) return unavailable(`AgentPool '${name}' has no available worker supporting ${required.join(", ")}; upgrade or connect a compatible worker and retry`);
     const { paperclipAgentInstructions: _instructions, paperclipHostedRepositories: repositories, ...context } = ctx.context;
     if (ctx.executionContinuation != null) {
@@ -386,7 +389,10 @@ export class AgentPoolBroker {
       ...(harnessModel ? { harnessModel } : {}),
       ...(repositories ? { repositories } : {}),
     }));
-    if (Buffer.byteLength(task) > AGENT_POOL_MAX_FRAME) throw new Error("AgentPool task exceeds the 256 KiB frame limit; reduce instructions or task context");
+    const taskBytes = Buffer.byteLength(task);
+    if (taskBytes > AGENT_POOL_MAX_FRAME) throw new Error("AgentPool task exceeds the 512 KiB frame limit; reduce instructions or task context");
+    if (taskBytes > 256 * 1024 && !peer.capabilities.includes(AGENT_POOL_FRAME_512K))
+      return unavailable(`AgentPool '${name}' requires a worker supporting ${AGENT_POOL_FRAME_512K} for assignments above 256 KiB; upgrade a worker and retry`);
     return new Promise((resolve, reject) => {
       let cancelTimer: ReturnType<typeof setTimeout> | undefined;
       const cancel = () => {

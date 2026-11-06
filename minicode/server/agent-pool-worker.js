@@ -21,7 +21,7 @@ import { prepareWorkerGitSync } from "./worker-git-sync.js"
 import { prepareWorkerWorkspace } from "./worker-workspace.js"
 import { createRunLogWriter } from "./run-log.js"
 
-const MAX_FRAME = 256 * 1024
+const MAX_FRAME = 512 * 1024
 const PROTOCOL_VERSION = 1
 const INLINE_INSTRUCTIONS = "inline_instructions_v1"
 const MAX_OUTPUT = 2 * 1024 * 1024
@@ -922,7 +922,7 @@ export async function startAgentPoolWorker({
       }, 15_000)
       pingTimer.unref()
       send({ type: "hello", protocolVersion: PROTOCOL_VERSION,
-        capabilities: [INLINE_INSTRUCTIONS, SKILL_BUNDLE, "pr_inspector_v1", "pr_inspection_result_v1", ...(prepareHostedRepositories
+        capabilities: [INLINE_INSTRUCTIONS, SKILL_BUNDLE, "pr_inspector_v1", "pr_inspection_result_v1", "task_frame_512k_v1", ...(prepareHostedRepositories
           ? [hostedRoot ? "hosted_workspace_v2" : "hosted_repositories_v1", "retiring_ready_v1"] : []),
           ...(hostedRoot && hostedProviderTool ? ["provider_read_v1"] : []),
           ...(hostedRoot && hostedProviderPostTool ? ["provider_post_v1"] : []),

@@ -29,7 +29,7 @@ contract. Do not depend on Minicode's internal session or prompt representation.
 The assignment's top-level `continuation` carries the full server-authored
 history. Identical copies in `context.executionContinuation` and
 `context.paperclipWake.executionContinuation` are omitted from transport;
-distinct context remains intact and the 256 KiB frame limit still applies.
+distinct context remains intact and the 512 KiB frame limit still applies.
 
 Authentication is token-only. The AgentPool protocol must never introduce
 username/password credentials, HTTP Basic authentication, or password fallbacks.
@@ -513,10 +513,15 @@ in `welcome`, then replay only events above the acknowledged sequence. Lost
 processes, lost server state, revoked credentials, or expired reconnect leases
 require an explicit retry; never adopt or replay an old task.
 
-Frames are limited to 256 KiB of serialized UTF-8 JSON, including instructions,
+Frames are limited to 512 KiB of serialized UTF-8 JSON, including instructions,
 task context, and credentials. Total public run output is limited to 2 MiB.
 Oversized assignments fail before dispatch; instructions are never silently
 truncated. Keep instruction entry documents concise.
+
+Workers advertising `task_frame_512k_v1` accept the larger frame bound. The
+server prefers these workers and requires the capability for assignments above
+256 KiB; older workers may still receive smaller assignments. Upgrade workers
+before delivering larger tasks.
 
 Unversioned legacy hellos mean protocol 1 with no capabilities. Updated servers
 skip workers without `skill_bundle_v1` and `pr_inspector_v1`; tasks with instructions additionally

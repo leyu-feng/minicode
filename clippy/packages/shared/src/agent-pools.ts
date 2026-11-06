@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const AGENT_POOL_PROTOCOL_VERSION = 1;
 export const AGENT_POOL_INLINE_INSTRUCTIONS = "inline_instructions_v1";
+export const AGENT_POOL_FRAME_512K = "task_frame_512k_v1";
 export const AGENT_POOL_SKILL_BUNDLE = "skill_bundle_v1";
 export const AGENT_POOL_HOSTED_REPOSITORIES = "hosted_repositories_v1";
 export const AGENT_POOL_HOSTED_WORKSPACE = "hosted_workspace_v2";

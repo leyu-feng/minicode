@@ -1103,7 +1103,9 @@ acknowledged; the assignment prompt is never replayed. Process restarts, an
 expired reconnect lease, or revocation fail affected work and require an explicit
 retry. Stop/ Ctrl+C cancels the active operation; server cancellation waits for
 the worker's operation to unwind before accepting its result. Output is limited
-to 2 MiB per run and task frames to 256 KiB; overflow fails explicitly.
+to 2 MiB per run and task frames to 512 KiB; overflow fails explicitly.
+Workers advertise `task_frame_512k_v1`; larger-than-256-KiB tasks require an
+upgraded worker, while older workers can still receive smaller assignments.
 
 Worker-side file changes stay on the worker; this transport does not synchronize
 workspaces. Provider usage/cost is not reported by this worker. Existing known
