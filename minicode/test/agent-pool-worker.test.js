@@ -1425,6 +1425,56 @@ test("network reconnect resumes the same session and replays only unacknowledged
   await waitUntil(() => resumed.messages.some((message) => message.type === "ready"))
 })
 
+for (const finishWhileReconnecting of [false, true]) test(`reconnect replays buffered events before live output with completion during reconnect=${finishWhileReconnecting}`, async t => {
+  let calls = 0, busyReports = 0, complete, session, assignmentEnded = false, releaseReconnect
+  const reconnectGate = new Promise(resolve => { releaseReconnect = resolve })
+  t.after(() => releaseReconnect())
+  class Session extends EventEmitter {
+    write() { calls++; return new Promise(resolve => { complete = resolve }) }
+    interrupt() { complete?.({ exitCode: 130 }) }
+    dispose() {}
+  }
+  const { welcome, connections } = await harness(t, () => { session = new Session(); return session }, {
+    onStateChange: async ({ state }) => {
+      if (state === "busy" && ++busyReports === 2) await reconnectGate
+    },
+    onActivity: value => {
+      if (value.summary === "[framework] Assignment end | succeeded") assignmentEnded = true
+    },
+  })
+  const first = await welcome(0)
+  await waitUntil(() => first.messages.some(message => message.type === "ready"))
+  first.send({ type: "task", runId: "ordered-reconnect", agent, context: {} })
+  await waitUntil(() => calls === 1)
+  session.emit("output", { stream: "stdout", data: "before\n" })
+  await waitUntil(() => first.messages.some(message => message.data === "[minicode] before\n"))
+  const before = first.messages.find(message => message.data === "[minicode] before\n")
+  first.send({ type: "ack", runId: "ordered-reconnect", seq: before.seq, completed: false })
+  first.socket.terminate()
+  await waitUntil(() => connections.length === 2)
+  session.emit("output", { stream: "stdout", data: "while offline\n" })
+  const resumed = await welcome(1, before.seq)
+  await waitUntil(() => busyReports === 2)
+  session.emit("output", { stream: "stdout", data: "while reconnecting\n" })
+  if (finishWhileReconnecting) {
+    complete({ exitCode: 0 })
+    await waitUntil(() => assignmentEnded)
+  }
+  releaseReconnect()
+  if (!finishWhileReconnecting) complete({ exitCode: 0 })
+  await waitUntil(() => resumed.messages.some(message => message.type === "result"))
+  const events = resumed.messages.filter(message => message.runId === "ordered-reconnect" && message.seq !== undefined)
+  assert.deepEqual(events.map(message => message.seq), events.map((_, index) => before.seq + index + 1))
+  assert.equal(events.filter(message => message.type === "log").map(message => message.data).join(""),
+    "[minicode] while offline\n[minicode] while reconnecting\n<< [minicode] Turn end | succeeded\n<< [framework] Assignment end | succeeded\n")
+  const result = events.at(-1)
+  assert.equal(result.type, "result")
+  assert.equal(result.exitCode, 0)
+  resumed.send({ type: "ack", runId: "ordered-reconnect", seq: result.seq, completed: true })
+  await waitUntil(() => resumed.messages.some(message => message.type === "ready"))
+  assert.equal(calls, 1)
+})
+
 test("cancellation waits for the active operation, not the immediate done event", async (t) => {
   let release, interrupted = false
   class Session extends EventEmitter {

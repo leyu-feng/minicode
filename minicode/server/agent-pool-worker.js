@@ -953,13 +953,15 @@ export async function startAgentPoolWorker({
           previousServer = message.serverInstanceId
           clearTimeout(leaseTimer)
           leaseTimer = null
-          connected = true
-          log("AgentPool worker connected")
           if (active) {
             if (!message.completed) await onStateChange({ state: "busy", runId: active.id, agentId: active.agentId })
             await ack(message.ack, message.completed)
-            for (const event of active?.events ?? []) send(event)
           } else await enterIdle()
+          if (stopped || current !== socket || current.readyState !== WebSocket.OPEN) return
+          // Keep live output buffered until every unacknowledged event has been replayed.
+          for (const event of active?.events ?? []) send(event)
+          connected = true
+          log("AgentPool worker connected")
           monitorDisk()
         } else if (!connected) throw new Error("AgentPool welcome required")
         else if (message.type === "task") execute(message)
