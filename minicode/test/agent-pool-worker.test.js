@@ -179,11 +179,24 @@ test("Devbox workspace-root sessions use supervisory guidance, isolated bundles 
   assert.match(sessionOptions.instructions, /changes_requested against the original SHA, never the proposal SHA/)
   assert.match(sessionOptions.instructions, /attach a reviewable diff\/patch with the existing artifact tools/)
   assert.match(sessionOptions.instructions, /git reset --keep <submitted-sha>, only after verifying that this listed writable worktree is clean/)
+  assert.match(sessionOptions.instructions, /Devbox inspector diagnostic publication exception/)
+  assert.match(sessionOptions.instructions, /explicit human task message or operator-authored continuation/)
+  assert.match(sessionOptions.instructions, /source branch under u\/pi1\//)
+  assert.match(sessionOptions.instructions, /old commit is an ancestor of the tested new commit/)
+  assert.match(sessionOptions.instructions, /--force-with-lease=refs\/heads\/<verified-source>:<expected-old-sha>/)
+  assert.match(sessionOptions.instructions, /never use unrestricted --force or a non-fast-forward rewrite/)
+  assert.match(sessionOptions.instructions, /human-authorized create-only fallback/)
+  assert.match(sessionOptions.instructions, /Managed CI\/PostAnalysis\/source-SDL checks explicitly assigned to the operator are subsequent validation gates/)
   assert.doesNotMatch(sessionOptions.instructions, /without editing its files or adding commits|Do not edit or publish rejected code/)
   assert.ok(!sessionOptions.tools.some(tool => ["provider_read", "provider_post", "publish_pull_request"].includes(tool.name)))
   assert.equal(await fs.readFile(path.join(artifacts, ".worker", "skills", "paperclip", "SKILL.md"), "utf8"),
     "# Paperclip skill\nPost progress with the issue comments API and verify task completion.")
   await assert.rejects(fs.stat(path.join(root, ".worker")), { code: "ENOENT" })
+  await executeTask(peer, { runId: "run-root-producer", agent: { ...agent, companyId: randomUUID() },
+    context: { issueId: randomUUID() }, authToken: "private-run-token", skills: bundle.skills,
+    prPolicy: { isInspector: false, inspectorAgentId: randomUUID() } })
+  assert.doesNotMatch(sessionOptions.instructions, /Devbox inspector diagnostic publication exception/)
+  assert.match(sessionOptions.instructions, /never push or create PRs through shell commands/)
 })
 
 for (const selectedHarness of ["claudecode", "copilotcli"]) {
@@ -581,6 +594,7 @@ for (const explicitRole of [true, false]) for (const [providerEnabled, postEnabl
       assert.match(this.options.instructions, /Shared catalog guidance wins/)
       assert.match(this.options.instructions, /there is no primary repository/)
       assert.match(this.options.instructions, /Hosted identity restrictions take precedence over skill helper permission/)
+      assert.doesNotMatch(this.options.instructions, /Devbox inspector diagnostic publication exception/)
       assert.doesNotMatch(this.options.instructions, /human task message or human response explicitly authorizes a named provider CLI/)
       assert.ok(this.options.instructions.includes("Post progress with the issue comments API"))
       assert.match(this.options.instructions, /worker_shared guidance and same-named skills override every repository/)
