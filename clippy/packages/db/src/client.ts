@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { resolvePostgresAuthOptions } from "./postgres-auth.js";
 import { installDatabaseWorkSignals } from "./work-signals.js";
+import { databasePoolDiagnosticsEnabled, installDatabasePoolDiagnostics } from "./pool-diagnostics.js";
+import { createTransactionDiagnostics, DEFAULT_TRANSACTION_WARN_AFTER_MS } from "./transaction-diagnostics.js";
 import * as schema from "./schema/index.js";
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
@@ -156,6 +158,8 @@ export interface DatabaseClientOptions {
    * `postgres.js`).
    */
   applicationName?: string;
+  /** Warn once when a transaction attempt exceeds this duration; 0 disables diagnostics. */
+  transactionWarnAfterMs?: number;
 }
 
 /**
@@ -224,6 +228,8 @@ export function databaseClientOptionsFromEnv(env: NodeJS.ProcessEnv = process.en
   if (maxLifetimeSeconds !== undefined) options.maxLifetimeSeconds = maxLifetimeSeconds;
   const applicationName = envNonEmptyString(env, "DATABASE_APPLICATION_NAME");
   if (applicationName !== undefined) options.applicationName = applicationName;
+  const transactionWarnAfterMs = envNonNegativeInteger(env, "DATABASE_TRANSACTION_WARN_AFTER_MS");
+  if (transactionWarnAfterMs !== undefined) options.transactionWarnAfterMs = transactionWarnAfterMs;
   return options;
 }
 
@@ -279,13 +285,22 @@ export function createDb(url: string, options?: DatabaseClientOptions) {
 
 function createDbClient(url: string, resolved: DatabaseClientOptions, owner?: object) {
   const sql = postgres(url, { ...postgresJsOptions(resolved), ...resolvePostgresAuthOptions(url) });
+  if (databasePoolDiagnosticsEnabled()) installDatabasePoolDiagnostics(sql, sql.options.max);
+  const diagnostics = createTransactionDiagnostics({
+    warnAfterMs: resolved.transactionWarnAfterMs ?? DEFAULT_TRANSACTION_WARN_AFTER_MS,
+    applicationName: resolved.applicationName,
+    poolMax: sql.options.max,
+  });
   const key = hostPortKeyOrNull(url);
   if (key) registerClient(key, sql);
   // A disconnect can lose the response after a statement has committed.
   // postgres.js calls that error "write CONNECTION_CLOSED" too, so the
   // message cannot establish that replay is safe. Leave retries to callers
   // that know the complete operation is idempotent.
-  const db = installDatabaseWorkSignals(drizzlePg(sql, { schema }), owner);
+  const db = installDatabaseWorkSignals(drizzlePg(sql, { schema, logger: diagnostics.logger }), owner);
+  const transaction = db.transaction.bind(db);
+  db.transaction = (callback, config) =>
+    diagnostics.transaction(runCallback => transaction(runCallback, config), callback);
   dedicatedDbFactories.set(db, (applicationName) => createDbClient(url, {
     ...resolved, maxConnections: 1, applicationName: applicationName ?? "paperclip-workspace-finalization-lock",
   }, db));

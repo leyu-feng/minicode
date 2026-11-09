@@ -16,6 +16,51 @@ const support = await getEmbeddedPostgresTestSupport();
   }, 90_000);
   afterAll(async () => { await temporary?.cleanup(); });
 
+  it("reports the root-pool query call site when a transaction holds the only connection", async () => {
+    const database = createDb(temporary.connectionString, { maxConnections: 1, transactionWarnAfterMs: 100 });
+    await database.execute(sql`select 1`);
+    const warnings = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    let rootQuery: Promise<unknown> | undefined;
+    const transaction = database.transaction(async tx => {
+      await tx.execute(sql`select 1`);
+      rootQuery = database.execute(sql`select 'diagnostic-secret'::text`).then(rows => rows);
+      started();
+      await gate;
+    });
+    try {
+      await ready;
+      await vi.waitFor(() => {
+        expect(warnings).toHaveBeenCalledWith(
+          "Database transaction exceeded warning threshold",
+          expect.objectContaining({ code: "PAPERCLIP_DATABASE_TRANSACTION_STALLED" }),
+        );
+      });
+      const options = warnings.mock.calls[0]?.[1];
+      if (typeof options !== "object" || !options?.detail) throw new Error("Missing warning details");
+      expect(JSON.parse(options.detail)).toMatchObject({
+        phase: "callback",
+        activeTransactionCount: 1,
+        poolMax: 1,
+        origin: expect.stringContaining("work-signals.test.ts"),
+        lastQuery: { operation: "select", origin: expect.stringContaining("work-signals.test.ts") },
+      });
+      expect(options.detail).not.toContain("diagnostic-secret");
+    } finally {
+      release();
+      try {
+        await transaction;
+        await rootQuery;
+      } finally {
+        warnings.mockRestore();
+        await database.$client.end({ timeout: 1 });
+      }
+    }
+  });
+
   it("defers nested savepoint notifications until the outer commit and preserves return values", async () => {
     const events: string[] = [];
     const unsubscribe = subscribeDatabaseWork(db, "nested", event => events.push(event));

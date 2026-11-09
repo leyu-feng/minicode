@@ -9,6 +9,7 @@ import {
 import { conflict, notFound, unprocessable } from "../errors.js";
 
 type AgentAssignmentKind = "work" | "routine";
+type DbReader = Pick<Db, "select">;
 
 type AssignabilityAgent = AgentEligibilityAgent;
 
@@ -67,7 +68,7 @@ function conflictDetails(input: {
   };
 }
 
-async function getAgent(db: Db, agentId: string): Promise<AssignabilityAgent | null> {
+async function getAgent(db: DbReader, agentId: string): Promise<AssignabilityAgent | null> {
   return db
     .select({
       id: agents.id,
@@ -81,7 +82,7 @@ async function getAgent(db: Db, agentId: string): Promise<AssignabilityAgent | n
     .then((rows) => rows[0] ?? null);
 }
 
-async function listCompanyAgents(db: Db, companyId: string): Promise<AssignabilityAgent[]> {
+async function listCompanyAgents(db: DbReader, companyId: string): Promise<AssignabilityAgent[]> {
   return db
     .select({
       id: agents.id,
@@ -102,7 +103,7 @@ function assignmentReasonFromHealth(health: AgentOrgChainHealth): AgentAssignmen
 }
 
 export async function assertAssignableAgent(
-  db: Db,
+  db: DbReader,
   companyId: string,
   agentId: string | null | undefined,
   options: { kind?: AgentAssignmentKind } = {},

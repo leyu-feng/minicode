@@ -37,6 +37,7 @@ describe("databaseClientOptionsFromEnv", () => {
         DATABASE_CONNECT_TIMEOUT_SECONDS: "10",
         DATABASE_MAX_LIFETIME_SECONDS: "1800",
         DATABASE_APPLICATION_NAME: " paperclip-web ",
+        DATABASE_TRANSACTION_WARN_AFTER_MS: "15000",
       }),
     ).toEqual({
       maxConnections: 25,
@@ -44,11 +45,23 @@ describe("databaseClientOptionsFromEnv", () => {
       connectTimeoutSeconds: 10,
       maxLifetimeSeconds: 1800,
       applicationName: "paperclip-web",
+      transactionWarnAfterMs: 15000,
     });
   });
 
   it("accepts DATABASE_IDLE_TIMEOUT_SECONDS=0 as an explicit opt-out of idle reaping", () => {
     expect(databaseClientOptionsFromEnv({ DATABASE_IDLE_TIMEOUT_SECONDS: "0" })).toEqual({ idleTimeoutSeconds: 0 });
+  });
+
+  it("can disable transaction diagnostics and rejects invalid warning thresholds", () => {
+    expect(databaseClientOptionsFromEnv({ DATABASE_TRANSACTION_WARN_AFTER_MS: "0" })).toEqual({
+      transactionWarnAfterMs: 0,
+    });
+    for (const value of ["-1", "abc", "1.5"]) {
+      expect(() => databaseClientOptionsFromEnv({ DATABASE_TRANSACTION_WARN_AFTER_MS: value })).toThrow(
+        /DATABASE_TRANSACTION_WARN_AFTER_MS/,
+      );
+    }
   });
 
   it("rejects malformed values instead of silently ignoring them", () => {

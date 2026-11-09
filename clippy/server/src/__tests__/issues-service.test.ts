@@ -35,10 +35,12 @@ import {
   toolOauthStates,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { instanceSettingsService } from "../services/instance-settings.ts";
+import { executionWorkspaceService } from "../services/execution-workspaces.js";
 import {
   clampIssueListLimit,
   deriveIssueCommentRunLogAttribution,
@@ -3196,7 +3198,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     db = createDb(tempDb.connectionString);
     svc = issueService(db);
     await ensureIssueRelationsTable(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(issueComments);
@@ -3212,11 +3214,75 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await db.delete(agents);
     await db.delete(environments);
     await db.delete(instanceSettings);
+    await db.delete(companyMemberships);
     await db.delete(companies);
   });
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  async function withSingleConnection<T>(run: (database: typeof db) => Promise<T>): Promise<T> {
+    if (!tempDb) throw new Error("Test database is not initialized");
+    const database = createDb(tempDb.connectionString, { maxConnections: 1 });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        run(database),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Single-connection transaction did not finish")), 5_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      await database.$client.end({ timeout: 1 });
+    }
+  }
+
+  it.each(["agent", "user"] as const)("creates an issue with a transaction-local %s assignee on one connection", async assignee => {
+    const companyId = randomUUID();
+    const assigneeId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Single connection", issuePrefix: "ONE" });
+    const created = await withSingleConnection(database => database.transaction(async tx => {
+      if (assignee === "agent") {
+        await tx.insert(agents).values({
+          id: assigneeId, companyId, name: "Agent", role: "engineer", status: "active", adapterType: "codex_local",
+        });
+      } else {
+        await tx.insert(companyMemberships).values({
+          companyId, principalType: "user", principalId: assigneeId, status: "active", membershipRole: "member",
+        });
+      }
+      return issueService(database).create(companyId, {
+        title: "Transaction-local assignment",
+        ...(assignee === "agent" ? { assigneeAgentId: assigneeId } : { assigneeUserId: assigneeId }),
+      }, tx);
+    }));
+    expect(assignee === "agent" ? created.assigneeAgentId : created.assigneeUserId).toBe(assigneeId);
+    expect(await db.select().from(issues).where(eq(issues.id, created.id))).toHaveLength(1);
+  });
+
+  it("rejects an unavailable user assignee and rolls back an outer transaction on one connection", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Single connection", issuePrefix: "ONE" });
+    await expect(withSingleConnection(database => database.transaction(async tx => {
+      await tx.insert(issues).values({ companyId, title: "Must roll back" });
+      await issueService(database).create(companyId, { title: "Invalid assignment", assigneeUserId: randomUUID() }, tx);
+    }))).rejects.toThrow("Assignee user not found");
+    expect(await db.select().from(issues).where(eq(issues.companyId, companyId))).toHaveLength(0);
+    expect(await db.select().from(instanceSettings)).toHaveLength(0);
+  });
+
+  it("resolves source workspace settings inside the supplied single-connection transaction", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Single connection", issuePrefix: "ONE" });
+    const strategy = await withSingleConnection(database => database.transaction(async tx => {
+      await tx.insert(instanceSettings).values({});
+      return executionWorkspaceService(database).resolveSourceWorkspaceStrategy({
+        companyId, executionWorkspacePolicy: null,
+      }, tx);
+    }));
+    expect(strategy).toBe("project_primary");
   });
 
   it("inherits the parent issue workspace linkage when child workspace fields are omitted", async () => {
