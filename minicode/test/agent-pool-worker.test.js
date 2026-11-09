@@ -860,10 +860,13 @@ test("default Devbox inspector needs no GitHub login and exposes only external P
       super()
       assert.equal(options.tools.find(tool => tool.name === "record_pull_request")?.name, "record_pull_request")
       assert.equal(options.tools.find(tool => tool.name === "record_inspection_result")?.name, "record_inspection_result")
+      assert.equal(options.tools.find(tool => tool.name === "record_inspection_blocked")?.name, "record_inspection_blocked")
       assert.equal(options.tools.find(tool => tool.name === "publish_pull_request"), undefined)
       assert.match(options.instructions, /existing local user credentials/)
       assert.match(options.instructions, /API postback only/)
-      assert.match(options.instructions, /Every harness must call record_inspection_result/)
+      assert.match(options.instructions, /For a final verdict, every harness must call record_inspection_result/)
+      assert.match(options.instructions, /blocked, inspector retains ownership/)
+      assert.match(options.instructions, /does not notify or resume the original developer/)
       assert.match(options.instructions, /Markdown headings and language are never inspection evidence/)
       assert.match(options.instructions, /Missing required validation, failures or timeouts block approval/)
       assert.match(options.instructions, /Reinspect and rerun all required validation on the producer's new exact submitted SHA/)
@@ -894,7 +897,7 @@ test("inline instructions are agent-scoped snapshots applied without workspace i
   }
   const fixture = await harness(t, (options) => { sessions.push(options); return new Session() })
   const peer = await fixture.welcome(0)
-  assert.deepEqual(peer.messages.find(message => message.type === "hello").capabilities, ["inline_instructions_v1", "skill_bundle_v1", "pr_inspector_v1", "pr_inspection_result_v1", "task_frame_512k_v1"])
+  assert.deepEqual(peer.messages.find(message => message.type === "hello").capabilities, ["inline_instructions_v1", "skill_bundle_v1", "pr_inspector_v1", "pr_inspection_result_v1", "pr_inspection_checkpoint_v1", "task_frame_512k_v1"])
   for (const [index, content] of ["Keep reports concise.", "Updated instructions: include evidence."].entries()) {
     const runId = `inline-${index}`
     peer.send({ type: "task", protocolVersion: 1, runId, agent, context: {}, instructions: inlineInstructions(content, `revision-${index}`) })

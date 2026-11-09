@@ -549,6 +549,27 @@ releasing the assignment. The inspector's parent-task comment returns the PR
 link through the existing continuation/wakeup path, without cross-agent
 work-product writes.
 
+Inspectors own the complete in-scope correction loop, including newly discovered
+issues. If a fix or required validation cannot be completed, save durable patches,
+exact base/proposal SHA/tree, comparison evidence and logs, then call
+`record_inspection_blocked` with the original submission ID/commit, the blocker
+and the inspector's next unblock action. This saves the review as **blocked,
+inspector retains ownership**, with a self-owned unblock descriptor. It is a
+normal successful waiting turn, not an immutable verdict or a producer wakeup.
+Unconfirmed publications/postbacks still fail; this checkpoint cannot hide them.
+The operator monitor resolves the dependency and resumes the same inspector
+through normal task admission, without interrupting active runs, clearing holds
+or retrying unchanged blockers.
+
+Only a fully corrected, validated consolidated proposal may be handed back using
+`record_inspection_result` with `changes_requested`; required external validation
+remains unwaived. A blocked checkpoint does not authorize a PR or replace an
+immutable verdict. Before further integration, the producer compares the exact
+original and inspector proposal trees and accounts for all cumulative changes.
+Missing exact-source recovery is a blocker, not permission to rebuild from main.
+Workers advertise `pr_inspection_checkpoint_v1` when this tool is available;
+restart idle workers after updating the runtime to load the new contract.
+
 This matches Hosted's non-Git root, simultaneous repository manifest and
 supervisory instruction layout, **not** its managed-identity provider tools.
 Devbox credentials remain local; pairing and model authentication are separate.

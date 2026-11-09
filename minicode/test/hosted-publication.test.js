@@ -43,7 +43,7 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
   const receipts = new Map(isInspector || separateBranch ? [[issueId, inspectionReceipt()]] : [])
   let failHandoff = false, failRegistration = false
   let failProducerNotification = false, failCleanup = false, failSupersededNotification = false
-  let failWaiting = false, sourceStatus = "in_progress", waitingWrites = 0
+  let failWaiting = false, failWaitingAfterCommit = false, sourceStatus = "in_progress", waitingWrites = 0
   let sourceUnblockDescriptor
   let liveInspector = inspectorExists
   let submitted = false
@@ -64,6 +64,7 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
         sourceUnblockDescriptor = body.unblockDescriptor
         waitingWrites++
         comments.push({ body: body.comment, id: `comment-${comments.length + 1}`, issueId, authorAgentId: task.agent.id })
+        if (failWaitingAfterCommit) return new Response("Waiting response lost", { status: 503 })
       }
       return Response.json({ id: issueId, companyId, assigneeAgentId: task.agent.id, status: sourceStatus,
         unblockDescriptor: sourceUnblockDescriptor,
@@ -167,6 +168,8 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
     failCleanup: value => { failCleanup = value },
     failSupersededNotification: value => { failSupersededNotification = value },
     failWaiting: value => { failWaiting = value },
+    failWaitingAfterCommit: value => { failWaitingAfterCommit = value },
+    reviewStatus: value => { sourceStatus = value },
     get sourceStatus() { return sourceStatus },
     get waitingWrites() { return waitingWrites },
     get sourceUnblockDescriptor() { return sourceUnblockDescriptor },
@@ -282,7 +285,7 @@ test("missing assignment policy and newly created inspector prevent direct provi
 
 test("Devbox inspector records an external PR link without provider calls or provider credentials", async t => {
   const f = fixture(t, true)
-  assert.deepEqual(f.publication.tools.map(tool => tool.name), ["record_inspection_result", "record_pull_request"])
+  assert.deepEqual(f.publication.tools.map(tool => tool.name), ["record_inspection_result", "record_inspection_blocked", "record_pull_request"])
   const input = { url: "https://code.example.test/project/_git/main/pullrequest/12", title: "Feature", provider: "azure_devops" }
   const receipt = await f.tool("record_pull_request").execute(input)
   assert.equal(receipt.url, input.url)
@@ -548,6 +551,114 @@ test("structured rejection returns a correction proposal to the producer and rec
     provider: "azure_devops", submissionId, branch: "u/reviewer-one/inspection-fix-feature", reviewedCommit: proposalSha,
   }), /server-validated inspection receipt/)
   assert.equal(f.products.length, 0)
+})
+
+const blockedInput = {
+  submissionId, reviewedCommit: remoteCommit,
+  body: "Guardian integration unavailable. Exact-source comparison and saved patch: artifact://checkpoint.",
+  unblockAction: "After supported Guardian integration is supplied, resume this inspection and run all required validation.",
+}
+
+test("blocked inspection retains ownership without a verdict or producer wakeup and resumes the same review", async t => {
+  const f = fixture(t, true, true, true)
+  f.receipts.clear()
+  const checkpoint = await f.tool("record_inspection_blocked").execute(blockedInput)
+  assert.equal(checkpoint.outcome, "blocked")
+  assert.equal(checkpoint.inspectorRetainsOwnership, true)
+  assert.equal(checkpoint.waiting, true)
+  assert.equal(checkpoint.reviewedCommit, remoteCommit)
+  assert.equal(f.sourceStatus, "blocked")
+  assert.deepEqual(f.sourceUnblockDescriptor, { owner: { agentId: inspectorId }, action: blockedInput.unblockAction })
+  assert.equal(f.receipts.size, 0)
+  assert.equal(f.comments.length, 1)
+  assert.equal(f.comments[0].issueId, issueId)
+  assert.match(f.comments[0].body, /inspector retains ownership/)
+  assert.equal(f.publications.length, 0)
+  assert.equal(f.products.length, 0)
+  assert.equal(f.publication.registrationError, null)
+  assert.deepEqual(await f.tool("record_inspection_blocked").execute(blockedInput), checkpoint)
+  assert.equal(f.waitingWrites, 1)
+  assert.equal(f.comments.length, 1)
+  await assert.rejects(f.tool("record_pull_request").execute({
+    url: "https://code.example.test/project/_git/main/pullrequest/12", title: "Feature",
+    provider: "azure_devops", submissionId, branch: "u/reviewer-one/feature", reviewedCommit: remoteCommit,
+  }), /server-validated inspection receipt/)
+  // Use a fresh assignment after dependency resolution, without the failed PR attempt above.
+  const resumed = createPrInspectorPostback({
+    task: f.task, apiUrl: "https://paperclip.example.test", separateBranch: true, workerName: "reviewer-one",
+  })
+  f.reviewStatus("in_progress")
+  const verdict = await resumed.tools.find(tool => tool.name === "record_inspection_result").execute(inspectionInput)
+  assert.equal(verdict.result.outcome, "approved")
+  assert.equal(f.receipts.size, 1)
+})
+
+test("blocked checkpoint failures remain unresolved until the identical waiting state is confirmed", async t => {
+  const f = fixture(t, true, true, true)
+  f.receipts.clear()
+  f.failWaiting(true)
+  await assert.rejects(f.tool("record_inspection_blocked").execute(blockedInput), /HTTP 503/)
+  assert.match(f.publication.registrationError, /checkpoint is unconfirmed/)
+  assert.equal(f.comments.length, 0)
+  await assert.rejects(f.tool("record_inspection_blocked").execute({
+    ...blockedInput, body: "A different blocker.",
+  }), /identical inputs/)
+  f.failWaiting(false)
+  await f.tool("record_inspection_blocked").execute(blockedInput)
+  assert.equal(f.publication.registrationError, null)
+  assert.equal(f.comments.length, 1)
+  assert.equal(f.receipts.size, 0)
+})
+
+test("an uncertain saved checkpoint is recovered without duplicating its comment or blocked write", async t => {
+  const f = fixture(t, true, true, true)
+  f.receipts.clear()
+  f.failWaitingAfterCommit(true)
+  await assert.rejects(f.tool("record_inspection_blocked").execute(blockedInput), /HTTP 503/)
+  assert.equal(f.sourceStatus, "blocked")
+  assert.equal(f.waitingWrites, 1)
+  assert.equal(f.comments.length, 1)
+  assert.match(f.publication.registrationError, /checkpoint is unconfirmed/)
+  f.failWaitingAfterCommit(false)
+  const checkpoint = await f.tool("record_inspection_blocked").execute(blockedInput)
+  assert.equal(checkpoint.waiting, true)
+  assert.equal(f.waitingWrites, 1)
+  assert.equal(f.comments.length, 1)
+  assert.equal(f.publication.registrationError, null)
+  assert.equal(f.receipts.size, 0)
+})
+
+test("blocked checkpoints reject foreign provenance, lost inspector designation and terminal or immutable reviews", async t => {
+  const f = fixture(t, true, true, true)
+  f.receipts.clear()
+  for (const input of [
+    { ...blockedInput, reviewedCommit: commit },
+    { ...blockedInput, submissionId: `submission-publication-${"e".repeat(64)}` },
+    { ...blockedInput, unblockAction: "" },
+    { ...blockedInput, owner: { agentId } },
+  ]) await assert.rejects(f.tool("record_inspection_blocked").execute(input), /original submission|Inspection blocking/)
+  f.liveInspector(false)
+  await assert.rejects(f.tool("record_inspection_blocked").execute(blockedInput), /designated/)
+  f.liveInspector(true)
+  f.reviewStatus("done")
+  await assert.rejects(f.tool("record_inspection_blocked").execute(blockedInput), /active assigned/)
+  f.reviewStatus("in_progress")
+  f.receipts.set(issueId, inspectionReceipt())
+  await assert.rejects(f.tool("record_inspection_blocked").execute(blockedInput), /immutable/)
+  assert.equal(f.waitingWrites, 0)
+  assert.equal(f.comments.length, 0)
+})
+
+test("a blocked checkpoint cannot conceal an uncertain producer handback", async t => {
+  const f = fixture(t, true, true, true)
+  f.receipts.clear()
+  f.failProducerNotification(true)
+  await assert.rejects(f.tool("record_inspection_result").execute({
+    ...inspectionInput, outcome: "changes_requested",
+  }), /HTTP 503/)
+  await assert.rejects(f.tool("record_inspection_blocked").execute(blockedInput), /Reconcile pending/)
+  assert.match(f.publication.registrationError, /findings delivery is unconfirmed/)
+  assert.equal(f.waitingWrites, 0)
 })
 
 test("inspection tools reject unknown schemas, actor overrides, wrong commits and missing approval receipts", async t => {
