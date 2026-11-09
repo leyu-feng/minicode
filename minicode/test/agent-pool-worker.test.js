@@ -171,6 +171,15 @@ test("Devbox workspace-root sessions use supervisory guidance, isolated bundles 
   assert.ok(sessionOptions.tools.some(tool => tool.name === "paperclip_report_to_parent"))
   assert.match(sessionOptions.instructions, /Never create a fix child assigned back to the producer/)
   assert.match(sessionOptions.instructions, /unblockDescriptor/)
+  assert.match(sessionOptions.instructions, /local build and run all unit tests/)
+  assert.match(sessionOptions.instructions, /Run onebox tests when the repository has them and the original task requires them/)
+  assert.match(sessionOptions.instructions, /u\/pi1\/inspection-fix-<readable-feature-title>/)
+  assert.match(sessionOptions.instructions, /original developer must review and explicitly confirm/)
+  assert.match(sessionOptions.instructions, /Never publish a PR from your proposal/)
+  assert.match(sessionOptions.instructions, /changes_requested against the original SHA, never the proposal SHA/)
+  assert.match(sessionOptions.instructions, /attach a reviewable diff\/patch with the existing artifact tools/)
+  assert.match(sessionOptions.instructions, /git reset --keep <submitted-sha>, only after verifying that this listed writable worktree is clean/)
+  assert.doesNotMatch(sessionOptions.instructions, /without editing its files or adding commits|Do not edit or publish rejected code/)
   assert.ok(!sessionOptions.tools.some(tool => ["provider_read", "provider_post", "publish_pull_request"].includes(tool.name)))
   assert.equal(await fs.readFile(path.join(artifacts, ".worker", "skills", "paperclip", "SKILL.md"), "utf8"),
     "# Paperclip skill\nPost progress with the issue comments API and verify task completion.")
@@ -856,6 +865,9 @@ test("default Devbox inspector needs no GitHub login and exposes only external P
       assert.match(options.instructions, /API postback only/)
       assert.match(options.instructions, /Every harness must call record_inspection_result/)
       assert.match(options.instructions, /Markdown headings and language are never inspection evidence/)
+      assert.match(options.instructions, /Missing required validation, failures or timeouts block approval/)
+      assert.match(options.instructions, /Reinspect and rerun all required validation on the producer's new exact submitted SHA/)
+      assert.match(options.instructions, /empty expected-old-ref lease/)
     }
     async write() { return { exitCode: 0 } }
     interrupt() {}

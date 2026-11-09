@@ -188,6 +188,11 @@ test("ordinary agents receive branch submission and owned retirement, handing of
   assert.ok(f.children[0].description.includes(`Repository URL: ${f.repositories[0].source}`))
   assert.ok(f.children[0].description.includes("Branch: u/w01/feature"))
   assert.ok(f.children[0].description.includes(`Remote commit: ${remoteCommit}`))
+  assert.match(f.children[0].description, /local build and run all unit tests/)
+  assert.match(f.children[0].description, /onebox tests when available, task-required and authorized/)
+  assert.match(f.children[0].description, /u\/<your-worker-name>\/inspection-fix-<readable-feature-title>/)
+  assert.match(f.children[0].description, /original developer must review and explicitly confirm/)
+  assert.match(f.children[0].description, /Never publish a PR from the proposal/)
   assert.equal(f.publications.find(call => call.mode === "submit_branch").readableBranchNames, true)
   await f.tool("submit_branch_for_inspection").execute(input)
   assert.equal(f.children.length, 1)
@@ -508,10 +513,20 @@ test("read-only repositories and credential-bearing publication descriptors are 
   assert.equal(f.publications.length, 0)
 })
 
-test("structured rejection records arbitrary findings and reconciles failed parent delivery without another receipt", async t => {
+test("structured rejection returns a correction proposal to the producer and reconciles failed delivery without another receipt", async t => {
   const f = fixture(t, true, true, true)
   f.receipts.clear()
-  const input = { ...inspectionInput, outcome: "changes_requested", body: "## Changes requested\n\nPlease preserve the blank line." }
+  const proposalSha = "c".repeat(40)
+  const input = { ...inspectionInput, outcome: "changes_requested", body: [
+    "## Changes requested", "",
+    `Repository: ${f.repositories[0].source}`,
+    `Base SHA: ${remoteCommit}`,
+    "Proposal branch: u/reviewer-one/inspection-fix-feature",
+    `Proposal SHA: ${proposalSha}`,
+    `Original ${remoteCommit}: build passed; full unit suite failed.`,
+    `Proposal ${proposalSha}: build and full unit suite passed. Onebox not required by task.`,
+    "Review and explicitly confirm accepted corrections, rework on your own branch, and resubmit.",
+  ].join("\n") }
   f.failProducerNotification(true)
   await assert.rejects(f.tool("record_inspection_result").execute(input), /HTTP 503/)
   assert.match(f.publication.registrationError, /findings delivery is unconfirmed/)
@@ -520,12 +535,19 @@ test("structured rejection records arbitrary findings and reconciles failed pare
   f.failProducerNotification(false)
   const receipt = await f.tool("record_inspection_result").execute(input)
   assert.equal(receipt.result.outcome, "changes_requested")
+  assert.equal(receipt.result.reviewedCommit, remoteCommit)
   assert.equal(f.comments.length, 2)
   assert.ok(f.comments.find(comment => comment.issueId === parentId).body.includes(input.body))
   assert.equal(f.publication.registrationError, null)
   await f.tool("record_inspection_result").execute(input)
   assert.equal(f.comments.length, 2)
   await assert.rejects(f.tool("record_inspection_result").execute({ ...input, outcome: "approved" }), /HTTP 409/)
+  await assert.rejects(f.tool("record_inspection_result").execute({ ...input, reviewedCommit: proposalSha }), /original submission/)
+  await assert.rejects(f.tool("record_pull_request").execute({
+    url: "https://code.example.test/project/_git/main/pullrequest/12", title: "Feature",
+    provider: "azure_devops", submissionId, branch: "u/reviewer-one/inspection-fix-feature", reviewedCommit: proposalSha,
+  }), /server-validated inspection receipt/)
+  assert.equal(f.products.length, 0)
 })
 
 test("inspection tools reject unknown schemas, actor overrides, wrong commits and missing approval receipts", async t => {

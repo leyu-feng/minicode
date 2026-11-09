@@ -143,9 +143,38 @@ then automatically creates an idempotent review child assigned to the inspector.
 Retries first recover the saved submission without depending on local files or
 pushing again. The handoff includes repository URL, branch and exact remote
 commit. The Devbox inspector reviews the complete change list and affected
-contents with local user credentials, requests fixes when necessary, then
-creates the PR outside Paperclip. The bundled `pr-inspector` skill describes
-this workflow for all harnesses.
+contents with local user credentials, performs a local build and runs all unit
+tests for that repository before approval. It also runs onebox tests when they
+exist and the original task requires them, in an authorized environment only.
+Missing required checks, failures and timeouts block approval; the findings
+identify the exact tested SHA, commands, results and durable logs. Inspect
+validation scripts before executing documented commands in the worker-owned
+writable worktree; validation does not authorize deployment or provisioning.
+
+For code failures the inspector may commit and publish a minimal correction
+proposal, based on the submitted SHA, to a new
+`u/<worker-name>/inspection-fix-<readable-feature-title>` branch. This private
+proposal is review-only and inherits repository access controls; it is not
+branch-level confidentiality. The inspector must not modify the producer's
+branch or overwrite an existing ref. Create-only leases, bounded collision
+suffixes and provider reads after uncertain pushes apply to proposal branches
+as well as PR branches. The `changes_requested` receipt remains bound to the
+original submission SHA; its findings include proposal branch/base/SHA and
+separate original/proposal validation evidence. Environment-only failures
+require a blocker report, not a fabricated code change.
+Attach and link a reviewable diff/patch using the existing artifact tools so
+producers without arbitrary-ref fetch access can still review and apply it.
+
+The original producer reviews and explicitly confirms accepted corrections on
+its existing source task, applies or reworks them on its own branch, and makes
+a new managed submission/review. The inspector never creates a fix child back
+to the producer, approves its own proposal, or publishes a PR directly from it.
+It reinspects and repeats required validation on the new producer submission.
+Only that exact approved SHA may become the separate PR branch, with no
+inspector-only changes. Existing immutable receipt and exact-commit postback
+guards are unchanged. The bundled `pr-inspector` skill describes this workflow
+for all harnesses; confirmation and validation evidence are workflow
+requirements, not new machine-verified receipt fields.
 
 The inspector uses `record_pull_request` to post the external PR link to the
 existing `POST /api/issues/{reviewIssueId}/work-products` API and task chat.
