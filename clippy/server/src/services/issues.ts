@@ -1967,7 +1967,7 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId" | "title" |
   trustExplicitResponsibleUserId?: boolean;
   idempotencyKey?: string | null;
   allowDuplicate?: boolean;
-  assertCanReuseIssue?: (issue: typeof issues.$inferSelect) => Promise<void>;
+  assertCanReuseIssue?: (issue: typeof issues.$inferSelect, dbOrTx: Db | DbTransaction) => Promise<void>;
   onDeduplicated?: (reason: "idempotency_key" | "recent_open_title") => void;
 };
 type IssueChildCreateInput = IssueCreateInput & {
@@ -7188,8 +7188,8 @@ export function issueService(db: Db) {
     });
   }
 
-  async function assertAssignableUser(companyId: string, userId: string) {
-    const membership = await db
+  async function assertAssignableUser(companyId: string, userId: string, dbOrTx: DbReader = db) {
+    const membership = await dbOrTx
       .select({ id: companyMemberships.id })
       .from(companyMemberships)
       .where(
@@ -9370,7 +9370,7 @@ export function issueService(db: Db) {
               "Child creation idempotency key belongs to another parent issue",
             );
           }
-          await data.assertCanReuseIssue?.(existingChild);
+          await data.assertCanReuseIssue?.(existingChild, db);
           data.onDeduplicated?.("idempotency_key");
           const [enriched] = await withIssueLabels(db, [existingChild]);
           const [withRelations] = await withIssueRelationSummaries(
@@ -9892,7 +9892,7 @@ export function issueService(db: Db) {
       const deduplicateByTitle = allowDuplicate === false && !titleNeedsGeneration;
       issueData.title = resolvedTitle;
       const isolatedWorkspacesEnabled = (
-        await instanceSettings.getExperimental()
+        await instanceSettings.getExperimental({ db: dbOrTx })
       ).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
@@ -9903,12 +9903,12 @@ export function issueService(db: Db) {
         throw unprocessable("Issue can only have one assignee");
       }
       if (data.assigneeAgentId) {
-        await assertAssignableAgent(db, companyId, data.assigneeAgentId, {
+        await assertAssignableAgent(dbOrTx, companyId, data.assigneeAgentId, {
           kind: "work",
         });
       }
       if (data.assigneeUserId) {
-        await assertAssignableUser(companyId, data.assigneeUserId);
+        await assertAssignableUser(companyId, data.assigneeUserId, dbOrTx);
       }
       if (
         data.status === "in_progress" &&
@@ -10007,7 +10007,7 @@ export function issueService(db: Db) {
         }
         if (existingIssue) {
           // A duplicate may have a different scope or assignee than the proposed task.
-          await assertCanReuseIssue?.(existingIssue);
+          await assertCanReuseIssue?.(existingIssue, tx);
           if (idempotencyKey) {
             await tx
               .insert(issueCreateIdempotencyKeys)

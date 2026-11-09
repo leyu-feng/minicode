@@ -1,6 +1,6 @@
 import { voiceSessionRoutes, voiceWebhookRoutes } from "./routes/voice-sessions.js";
 import { eq } from "drizzle-orm";
-import { chatEndpoints } from "@paperclipai/db";
+import { chatEndpoints, withDatabaseDiagnosticRequest } from "@paperclipai/db";
 import { fastResponseRoutes } from "./routes/fast-responses.js";
 import { fastResponseService } from "./services/fast-responses.js";
 import { createDeliveryWorkCoordinator } from "./services/delivery-work-coordinator.js";
@@ -596,6 +596,7 @@ export async function createApp(
   app.use((req, res, next) => ["/mcp/files/upload", "/mcp/runner/files/upload"].includes(req.path) ? next() : jsonBodyParser(req, res, next));
   app.use("/api", apiCompression());
   app.use(httpLogger);
+  app.use((req, _res, next) => withDatabaseDiagnosticRequest(String(req.id), next));
   const privateHostnameGateEnabled = shouldEnablePrivateHostnameGuard({
     deploymentMode: opts.deploymentMode,
     deploymentExposure: opts.deploymentExposure,

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { resolvePostgresAuthOptions } from "./postgres-auth.js";
 import { installDatabaseWorkSignals } from "./work-signals.js";
+import { databasePoolDiagnosticsEnabled, installDatabasePoolDiagnostics } from "./pool-diagnostics.js";
 import * as schema from "./schema/index.js";
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
@@ -279,6 +280,7 @@ export function createDb(url: string, options?: DatabaseClientOptions) {
 
 function createDbClient(url: string, resolved: DatabaseClientOptions, owner?: object) {
   const sql = postgres(url, { ...postgresJsOptions(resolved), ...resolvePostgresAuthOptions(url) });
+  if (databasePoolDiagnosticsEnabled()) installDatabasePoolDiagnostics(sql, resolved.maxConnections ?? 10);
   const key = hostPortKeyOrNull(url);
   if (key) registerClient(key, sql);
   // A disconnect can lose the response after a statement has committed.

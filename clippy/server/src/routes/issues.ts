@@ -304,6 +304,7 @@ import {
   type IssuePostCommitAction,
 } from "../services/issues.js";
 import {
+  authorizationService,
   authorizationDeniedDetails,
   issueReadSqlCondition,
   projectReadSqlCondition,
@@ -4914,9 +4915,10 @@ export function issueRoutes(
     req: Request,
     companyId: string,
     assignmentScope?: TaskAssignmentAuthorizationScope,
+    assignmentAccess: Pick<typeof access, "decide"> = access,
   ) {
     assertCompanyAccess(req, companyId);
-    const decision = await access.decide({
+    const decision = await assignmentAccess.decide({
       actor: req.actor,
       action: "tasks:assign",
       resource: {
@@ -4934,7 +4936,11 @@ export function issueRoutes(
     throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
   }
 
-  async function assertCanReuseCreatedIssue(req: Request, issue: typeof issueRows.$inferSelect) {
+  async function assertCanReuseCreatedIssue(
+    req: Request,
+    issue: typeof issueRows.$inferSelect,
+    assignmentAccess: Pick<typeof access, "decide"> = access,
+  ) {
     if (req.actor.type !== "agent") return;
     await assertCanAssignTasks(req, issue.companyId, {
       issueId: issue.id,
@@ -4942,7 +4948,7 @@ export function issueRoutes(
       parentIssueId: issue.parentId,
       assigneeAgentId: issue.assigneeAgentId,
       assigneeUserId: issue.assigneeUserId,
-    });
+    }, assignmentAccess);
   }
 
   function isTaskBridgeKeyActor(req: Request) {
@@ -12476,7 +12482,8 @@ export function issueRoutes(
         actorResponsibleUserId: authenticatedActorResponsibleUserId(req),
         trustExplicitResponsibleUserId: actor.actorType === "user",
         watchdogActorRunId: actor.runId,
-        assertCanReuseIssue: (existing: typeof issueRows.$inferSelect) => assertCanReuseCreatedIssue(req, existing),
+        assertCanReuseIssue: (existing: typeof issueRows.$inferSelect, dbOrTx: Parameters<typeof authorizationService>[0]) =>
+          assertCanReuseCreatedIssue(req, existing, authorizationService(dbOrTx)),
         onDeduplicated: (reason: "idempotency_key" | "recent_open_title") => {
           deduplicationReason = reason;
         },
@@ -12850,7 +12857,7 @@ export function issueRoutes(
         actorAgentId: actor.agentId,
         actorUserId: actor.actorType === "user" ? actor.actorId : null,
         watchdogActorRunId: actor.runId,
-        assertCanReuseIssue: (existing) => assertCanReuseCreatedIssue(req, existing),
+        assertCanReuseIssue: (existing, dbOrTx) => assertCanReuseCreatedIssue(req, existing, authorizationService(dbOrTx)),
       });
       await externalObjectsSvc.syncIssueSafely(issue.id);
 

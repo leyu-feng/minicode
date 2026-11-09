@@ -229,7 +229,24 @@ DATABASE_IDLE_TIMEOUT_SECONDS=60     # close idle pooled connections; default: 6
 DATABASE_CONNECT_TIMEOUT_SECONDS=10  # default: 30
 DATABASE_MAX_LIFETIME_SECONDS=1800   # recycle a pooled connection after this long; default: 30-60 min (random)
 DATABASE_APPLICATION_NAME=paperclip  # application_name in pg_stat_activity; default: paperclip
+DATABASE_POOL_DIAGNOSTICS=true       # opt-in, bounded local pool-wait diagnostics; default: disabled
 ```
+
+Pool diagnostics capture JavaScript call sites for Drizzle queries and transaction
+acquisition, with the server-generated HTTP request ID when available. After a
+five-second wait, `database_pool_wait_snapshot` records the oldest operations,
+transaction ownership, and PostgreSQL PID when the driver has assigned a
+connection. A root query's `samePoolTransaction: true` identifies a possible
+cross-connection dependency while `enclosingTransactionState` is `held`; it is
+not itself proof of deadlock. Missing PIDs
+mean no driver connection has been observed, not necessarily pool exhaustion.
+The diagnostics do not capture retroactive promise stacks, raw tagged `$client`
+queries, SQL text, parameters, credentials, or request content. They do not
+replay, cancel, or time out operations. Tracking is limited to 128 operations
+per pool and 20 entries per snapshot, at most once every 30 seconds; `dropped`
+reports tracking overflow. Logs remain in the instance's normal console-log
+pipeline, not first-party telemetry. Disable the flag and restart to remove
+the instrumentation overhead.
 
 Routine row-lock transactions use separate, short-lived connections so they do
 not occupy the shared pool needed for issue creation and heartbeat enqueueing.
