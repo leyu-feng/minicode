@@ -13,6 +13,21 @@ packages:
   - ui
   - cli
 
+onlyBuiltDependencies:
+  - "@embedded-postgres/darwin-arm64"
+  - "@embedded-postgres/darwin-x64"
+  - "@embedded-postgres/linux-arm"
+  - "@embedded-postgres/linux-arm64"
+  - "@embedded-postgres/linux-ia32"
+  - "@embedded-postgres/linux-ppc64"
+  - "@embedded-postgres/linux-x64"
+  - "@embedded-postgres/windows-x64"
+  - cpu-features
+  - esbuild
+  - opencode-ai
+  - protobufjs
+  - ssh2
+
 # Keep in sync with package.json#pnpm.patchedDependencies. Newer pnpm
 # versions read patch configuration only from the workspace manifest.
 patchedDependencies:
@@ -47,3 +62,16 @@ overrides:
   # Parsers and highlighters must share NodeProp IDs from one Lezer instance.
   # Mixed copies can interpret unrelated node metadata as highlighting tags.
   "@lezer/common": "^1.5.2"
+  body-parser@<2.3.0: "^2.3.0"
+  brace-expansion@>=2 <3: "^2.1.6"
+  brace-expansion@>=5 <6: "^5.0.11"
+  fast-uri@>=3 <3.1.7: "^3.1.7"
+  form-data@>=4 <4.0.6: "^4.0.6"
+  js-yaml@>=4 <4.3.2: "^4.3.2"
+  path-to-regexp@>=8 <8.4.0: "^8.4.0"
+  proxy-addr@>=2 <2.0.8: "^2.0.8"
+  qs@>=6 <6.15.2: "^6.15.2"
+  source-map-js@<1.2.2: "^1.2.2"
+  undici@>=5 <7: "^6.29.1"
+  undici@>=8 <8.10.2: "^8.10.2"
+  uuid@>=10 <11: "^11.1.1"

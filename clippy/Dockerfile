@@ -9,9 +9,10 @@ RUN apt-get update \
 # npm honors the registry and authentication in the optional BuildKit secret.
 # Corepack's bootstrap download bypasses that npm configuration.
 COPY package.json /tmp/paperclip-package.json
+ARG NPM_VERSION=11.21.1
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
   --mount=type=cache,target=/root/.npm \
-  npm install --global "$(node -p "require('/tmp/paperclip-package.json').packageManager")" \
+  npm install --global "npm@${NPM_VERSION}" "$(node -p "require('/tmp/paperclip-package.json').packageManager")" \
   && rm /tmp/paperclip-package.json
 
 # Modify the existing node user/group to have the specified UID/GID to match host user
@@ -60,6 +61,17 @@ COPY scripts/link-plugin-dev-sdk.mjs scripts/
 # private build tree, then install from that exact generated lock.
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
   pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile && pnpm install --frozen-lockfile
+
+FROM deps AS runtime-deps
+COPY scripts/prepare-image-runtime.mjs scripts/sanitize-image-package-metadata.mjs scripts/
+# Resolve without development manifests: otherwise optional peers can keep
+# drizzle-kit, Vitest and their older native binaries in a --prod install.
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+  node scripts/prepare-image-runtime.mjs /app /runtime \
+  && cd /runtime \
+  && pnpm install --lockfile-only --offline --ignore-scripts --no-frozen-lockfile \
+  && pnpm install --prod --offline --frozen-lockfile \
+  && node /app/scripts/sanitize-image-package-metadata.mjs /runtime
 
 FROM base AS rust-toolchain
 WORKDIR /app
@@ -205,7 +217,8 @@ RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-COPY --chown=node:node --from=build /app /app
+COPY --chown=node:node --exclude=**/node_modules --from=build /app /app
+COPY --chown=node:node --from=runtime-deps /runtime /app
 
 COPY --from=runner-provider-pack /provider-pack /opt/paperclip-runner/provider-pack
 # Managed deployments can remap node's UID at startup. This immutable pack

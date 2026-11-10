@@ -107,7 +107,7 @@
   "engines": {
     "node": ">=24.11.0"
   },
-  "packageManager": "pnpm@9.15.4",
+  "packageManager": "pnpm@10.34.9",
   "pnpm": {
     "patchedDependencies": {
       "embedded-postgres@18.1.0-beta.16": "patches/embedded-postgres@18.1.0-beta.16.patch",
@@ -131,7 +131,20 @@
       "react-dom": "^19.2.8",
       "@codemirror/state": "^6.7.2",
       "@codemirror/view": "^6.43.11",
-      "@lezer/common": "^1.5.2"
+      "@lezer/common": "^1.5.2",
+      "body-parser@<2.3.0": "^2.3.0",
+      "brace-expansion@>=2 <3": "^2.1.6",
+      "brace-expansion@>=5 <6": "^5.0.11",
+      "fast-uri@>=3 <3.1.7": "^3.1.7",
+      "form-data@>=4 <4.0.6": "^4.0.6",
+      "js-yaml@>=4 <4.3.2": "^4.3.2",
+      "path-to-regexp@>=8 <8.4.0": "^8.4.0",
+      "proxy-addr@>=2 <2.0.8": "^2.0.8",
+      "qs@>=6 <6.15.2": "^6.15.2",
+      "source-map-js@<1.2.2": "^1.2.2",
+      "undici@>=5 <7": "^6.29.1",
+      "undici@>=8 <8.10.2": "^8.10.2",
+      "uuid@>=10 <11": "^11.1.1"
     }
   }
 }

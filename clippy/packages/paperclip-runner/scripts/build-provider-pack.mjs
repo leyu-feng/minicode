@@ -110,6 +110,7 @@ try {
       "--filter",
       "@paperclipai/paperclip-runner",
       "deploy",
+      "--legacy",
       "--prod",
       temporaryRoot,
     ],
