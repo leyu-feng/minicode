@@ -1,6 +1,6 @@
 {
   "name": "@paperclipai/plugin-workspace-diff",
-  "version": "0.1.0",
+  "version": "2026.1014.0-clippy.1",
   "description": "First-party execution workspace Changes tab powered by plugin-local workspace metadata",
   "license": "MIT",
   "homepage": "https://github.com/paperclipai/paperclip",

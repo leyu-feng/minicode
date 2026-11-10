@@ -1,6 +1,6 @@
 {
   "name": "@paperclipai/plugin-e2b",
-  "version": "0.1.0",
+  "version": "2026.1014.0-clippy.1",
   "description": "E2B sandbox provider plugin for Paperclip environments",
   "license": "MIT",
   "homepage": "https://github.com/paperclipai/paperclip",

@@ -64,6 +64,28 @@ require Developer Mode or administrator privileges.
 Building the Windows runner does not add support for provider execution paths
 that explicitly require Linux or macOS.
 
+## Fork Versioning
+
+The coordinated release packages use `2026.1014.0-clippy.1`. The calendar
+prefix dates the imported upstream snapshot, not an upstream release or the
+latest upstream code. Increment the `clippy` revision for subsequent fork cuts
+on the same snapshot.
+
+The root `package.json` records upstream provenance in `paperclipFork`:
+`paperclipai/paperclip` commit `aec80cbc8c1ddd91043110dbb27aed1914ca9c52`,
+dated October 14, 2026. That snapshot's server manifest declares `0.3.1`;
+the fork calendar version is our own identifier, not an upstream release tag.
+
+Keep the root version and packages marked `publishFromCi: true` in
+`scripts/release-package-manifest.json` synchronized. Packages outside that
+coordinated release retain their independent versions. Preserve `workspace:`
+dependency references during source version updates; the upstream release
+script's `set-version` command also rewrites them to registry versions for
+publication and must not be used for a source-only fork version bump.
+
+Version metadata does not establish advisory remediation. Retain source-fix
+evidence and validate the exact image digest with the vulnerability scanner.
+
 ## Dependency Lockfile Policy
 
 GitHub Actions owns `pnpm-lock.yaml`.

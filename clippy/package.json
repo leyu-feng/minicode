@@ -1,6 +1,14 @@
 {
   "name": "paperclip",
+  "version": "2026.1014.0-clippy.1",
   "private": true,
+  "paperclipFork": {
+    "versionScheme": "upstream-snapshot-date",
+    "upstreamRepository": "https://github.com/paperclipai/paperclip",
+    "upstreamCommit": "aec80cbc8c1ddd91043110dbb27aed1914ca9c52",
+    "upstreamSnapshotDate": "2026-10-14",
+    "upstreamManifestVersion": "0.3.1"
+  },
   "type": "module",
   "scripts": {
     "postinstall": "node scripts/link-plugin-dev-sdk.mjs",
