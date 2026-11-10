@@ -23,6 +23,7 @@ import { parseProviderPackArguments, materializeCandidateProviderPack, providerP
 import { buildNodeStartupTimeout } from "./build-node-startup-timeout.mjs";
 import { writePortableExecutableShim, writePortableCopilotShims } from "./provider-pack-executable-shims.mjs";
 import { sanitizeImagePackageMetadata } from "../../../scripts/sanitize-image-package-metadata.mjs";
+import { installImageEsbuild } from "../../../scripts/install-image-esbuild.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const workspaceRoot = resolve(packageRoot, "../..");
@@ -118,6 +119,9 @@ try {
   );
   if (deployed.status !== 0) {
     throw new Error(`pnpm deploy failed with exit code ${deployed.status}`);
+  }
+  if (process.env.PAPERCLIP_ESBUILD_REBUILD_DIR) {
+    installImageEsbuild(temporaryRoot, process.env.PAPERCLIP_ESBUILD_REBUILD_DIR);
   }
 
   // Fail the image build if a bridge silently brings back an older/private

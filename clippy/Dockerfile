@@ -62,6 +62,20 @@ COPY scripts/link-plugin-dev-sdk.mjs scripts/
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
   pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile && pnpm install --frozen-lockfile
 
+FROM --platform=$BUILDPLATFORM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS esbuild-build
+ARG TARGETARCH
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local
+WORKDIR /src
+ADD --checksum=sha256:04cb2d38fb6af093577aa8bf174add7286099b65ef7854480cbbb8ff061cef1f \
+  https://codeload.github.com/evanw/esbuild/tar.gz/609683d892977362a0f99026cb74b96263d728a9 /tmp/esbuild-source.tar.gz
+RUN tar -xzf /tmp/esbuild-source.tar.gz --strip-components=1 \
+  && test "$(cat version.txt)" = "0.28.2" \
+  && test "$(go env GOVERSION)" = "go1.26.9" \
+  && GOOS=linux GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -buildvcs=false -ldflags="-s -w" -o /out/esbuild ./cmd/esbuild \
+  && go version -m /out/esbuild > /out/go-build-info.txt \
+  && printf '{"version":"0.28.2","goVersion":"go1.26.9","goarch":"%s","sourceCommit":"609683d892977362a0f99026cb74b96263d728a9","sourceArchiveSha256":"04cb2d38fb6af093577aa8bf174add7286099b65ef7854480cbbb8ff061cef1f","binarySha256":"%s"}\n' \
+    "$TARGETARCH" "$(sha256sum /out/esbuild | cut -d ' ' -f 1)" > /out/provenance.json
+
 FROM deps AS runtime-deps
 COPY scripts/prepare-image-runtime.mjs scripts/sanitize-image-package-metadata.mjs scripts/
 # Resolve without development manifests: otherwise optional peers can keep
@@ -72,6 +86,11 @@ RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
   && pnpm install --lockfile-only --offline --ignore-scripts --no-frozen-lockfile \
   && pnpm install --prod --offline --frozen-lockfile \
   && node /app/scripts/sanitize-image-package-metadata.mjs /runtime
+
+COPY --from=esbuild-build /out /tmp/esbuild-rebuild
+COPY scripts/install-image-esbuild.mjs scripts/
+RUN node scripts/install-image-esbuild.mjs /runtime /tmp/esbuild-rebuild \
+  && node -e 'const {createRequire}=require("node:module"); const serverRequire=createRequire("/runtime/server/package.json"); const esbuild=createRequire(serverRequire.resolve("tsx"))("esbuild"); if (esbuild.version !== "0.28.2") throw new Error("Unexpected esbuild version"); esbuild.transformSync("const value: number = 1", {loader:"ts"});'
 
 FROM base AS rust-toolchain
 WORKDIR /app
@@ -176,12 +195,14 @@ RUN rm -rf packages/paperclip-runner/runner/target \
 # Grok's native executable stays an external sandbox prerequisite; this pack
 # contains only its launcher.
 FROM build AS runner-provider-pack
+COPY --from=esbuild-build /out /opt/paperclip-build/esbuild
 ARG PROVIDER_PACK_EXCLUDE=""
 # Unstamped local builds remain usable, but cannot qualify a remote pack.
 # Never invent a source revision to make an unqualified pack look verified.
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=true \
   mkdir -p /provider-pack \
   && if [ -n "${PAPERCLIP_BUILD_COMMIT}" ]; then \
+    PAPERCLIP_ESBUILD_REBUILD_DIR=/opt/paperclip-build/esbuild \
     PAPERCLIP_RUNNER_SOURCE_REVISION="${PAPERCLIP_BUILD_COMMIT}" \
     PAPERCLIP_RUNNER_BUILD_NPM_REGISTRY="$(cd /tmp && npm config get registry)" \
     PAPERCLIP_RUNNER_BUILD_NPMRC=/root/.npmrc \
