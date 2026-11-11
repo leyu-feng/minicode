@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { spawn } from "node:child_process"
+import { readFileSync } from "node:fs"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -10,8 +11,22 @@ import { HostedHarnessSession } from "../server/hosted-harness-session.js"
 import { startHostedHarnessBridge } from "../server/hosted-harness-bridge.js"
 import { createHostedHarnessWorkspaceTools } from "../server/agent-session.js"
 import { createPaperclipTaskTools } from "../server/paperclip-task-tools.js"
+import { createHostedProviderPostTool } from "../server/hosted-provider.js"
 
 const endpoint = "https://model.example/openai/v1/responses"
+const providerPostBodySchema = {
+  type: "object",
+  properties: {
+    expectedAttempt: { type: "integer", minimum: 1, maximum: 5 },
+    sourceBranch: { type: "string", maxLength: 512 },
+    enableDebugOutput: { type: "boolean" },
+  },
+  oneOf: [
+    { required: ["expectedAttempt"], maxProperties: 1 },
+    { not: { required: ["expectedAttempt"] } },
+  ],
+  additionalProperties: false,
+}
 
 test("native workspace tools edit files explicitly and strip inherited credentials from shell execution", async t => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "native-tools-"))
@@ -762,28 +777,82 @@ for (const scenario of ["invalid event", "spawn failure"]) {
   })
 }
 
+test("Pi extension preserves composed provider and assigned-task schemas and calls only the trusted bridge", async t => {
+  const calls = []
+  const tools = [
+    ...createPaperclipTaskTools({ apiUrl: "https://paperclip.example", authToken: "private-paperclip-token",
+      runId: "schema-run", issueId: "issue", agentId: "agent", companyId: "company" }),
+    createHostedProviderPostTool({
+      task: { runId: "schema-run" }, baseUrl: "https://provider.example",
+      routes: ["/v1/pipelines/{id}/runs"], bodySchema: providerPostBodySchema,
+      request: async (name, input) => { calls.push([name, input]); return { statusCode: 202 } },
+    }),
+  ]
+  const session = new HostedHarnessSession({
+    harness: "pi", id: "schema-run", cwd: process.cwd(), env: {}, instructions: "Policy", tools,
+    modelConfig: { endpoint, model: "deployment", getAccessToken: async () => assert.fail("No model request expected") },
+    prepare: async () => ({ harness: "pi", command: "trusted-shim", version: "offline-fixture" }),
+    spawnProcess: (_command, args, options) => spawn(process.execPath, ["--input-type=module", "-e", `
+      import assert from "node:assert/strict";
+      import configure from ${JSON.stringify(`data:text/javascript,${encodeURIComponent(readFileSync(args[args.indexOf("--extension") + 1], "utf8"))}`)};
+      const configuration = JSON.parse(process.env.HOSTED_HARNESS_CONFIG);
+      const registered = new Map();
+      let provider;
+      configure({
+        registerProvider(name) { provider = name; },
+        registerTool(tool) { registered.set(tool.name, tool); },
+      });
+      assert.equal(provider, "hosted");
+      assert.equal(registered.size, configuration.tools.length);
+      for (const tool of configuration.tools) {
+        assert.deepEqual(registered.get(tool.name).parameters, tool.parameters);
+      }
+      const result = await registered.get("provider_post").execute("schema-call",
+        { path: "/v1/pipelines/123/runs", body: {} });
+      assert.deepEqual(result.content, [{ type: "text", text: '{"statusCode":202}' }]);
+      console.log(JSON.stringify({ type: "agent_end", messages: [] }));
+    `], options),
+  })
+  t.after(() => session.dispose())
+  const output = []
+  session.on("output", event => output.push(event.data))
+  assert.deepEqual(await session.write("Offline schema regression"), { exitCode: 0 }, output.join(""))
+  assert.deepEqual(calls, [["provider_post",
+    { runId: "schema-run", path: "/v1/pipelines/123/runs", body: {} }]])
+})
+
 for (const harness of ["opencode", "pi"]) {
-test(`installed ${harness} completes a trusted tool call through the private model bridge`, {
+test(`installed ${harness} validates and completes a trusted tool call through the private model bridge`, {
   skip: !process.env[`HOSTED_${harness.toUpperCase()}_TEST_EXECUTABLE`], timeout: 45_000,
 }, async t => {
   const fetchOriginal = globalThis.fetch
+  const toolName = harness === "pi" ? "provider_post" : "provider_read"
   let requested = false
   let toolCalled = false
   let codeMode = false
+  let toolAttempts = 0
+  const calls = []
   t.mock.method(globalThis, "fetch", async (url, options) => {
     if (!String(url).startsWith("https://model.example")) return fetchOriginal(url, options)
     const input = JSON.parse(options.body)
-    const directTool = input.tools?.find(tool => tool.name.endsWith("provider_read"))
+    const directTool = input.tools?.find(tool => tool.name.endsWith(toolName))
     const tool = directTool ?? input.tools?.find(tool => tool.name === "execute")
     const respondWithText = toolCalled || !input.tools?.length
     if (!respondWithText) assert.ok(tool, "The real harness must expose the trusted worker tool")
     if (tool) requested = true
     if (!respondWithText && !directTool) codeMode = true
+    if (harness === "pi" && directTool) {
+      assert.deepEqual(directTool.parameters.properties.body, providerPostBodySchema)
+    }
+    const args = harness === "pi" ? {
+      path: "/v1/pipelines/123/runs",
+      body: !respondWithText && ++toolAttempts === 1 ? { expectedAttempt: 1, enableDebugOutput: true } : {},
+    } : { route: "approved" }
     const message = respondWithText ?
       { id: "msg_smoke", type: "message", role: "assistant", status: "completed",
         content: [{ type: "output_text", text: "READY", annotations: [] }] } :
       { id: "fc_smoke", type: "function_call", call_id: "call_smoke", name: tool.name,
-        status: "completed", arguments: JSON.stringify(directTool ? { route: "approved" }
+        status: "completed", arguments: JSON.stringify(directTool ? args
           : { code: 'return await tools.hosted.provider_read({route:"approved"})' }) }
     const response = { id: "resp_smoke", object: "response", created_at: 1, model: "deployment", status: "completed",
       output: [message], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }
@@ -806,8 +875,16 @@ test(`installed ${harness} completes a trusted tool call through the private mod
       { headers: { "Content-Type": "text/event-stream" } })
   })
   const session = new HostedHarnessSession({
-    harness, id: "smoke", cwd: process.cwd(), env: {}, instructions: "Use provider_read, then reply READY.",
-    tools: [{ name: "provider_read", description: "Read the approved route",
+    harness, id: "smoke", cwd: process.cwd(), env: {}, instructions: `Use ${toolName}, then reply READY.`,
+    tools: harness === "pi" ? [
+      ...createPaperclipTaskTools({ apiUrl: "https://paperclip.example", authToken: "private-paperclip-token",
+        runId: "smoke", issueId: "issue", agentId: "agent", companyId: "company" }),
+      createHostedProviderPostTool({
+        task: { runId: "smoke" }, baseUrl: "https://provider.example",
+        routes: ["/v1/pipelines/{id}/runs"], bodySchema: providerPostBodySchema,
+        request: async (_name, input) => { calls.push(input); toolCalled = true; return { statusCode: 202 } },
+      }),
+    ] : [{ name: "provider_read", description: "Read the approved route",
       parameters: { type: "object", properties: { route: { type: "string" } }, required: ["route"] },
       execute: async input => { assert.deepEqual(input, { route: "approved" }); toolCalled = true; return "read result" } }],
     modelConfig: { endpoint, model: "deployment", getAccessToken: async () => "smoke-only-token" },
@@ -829,8 +906,13 @@ test(`installed ${harness} completes a trusted tool call through the private mod
   assert.equal(result.exitCode, 0, `${result.error ?? ""}\n${output.join("")}`)
   assert.ok(requested)
   assert.ok(toolCalled)
+  if (harness === "pi") {
+    assert.deepEqual(calls, [{ runId: "smoke", path: "/v1/pipelines/123/runs", body: {} }])
+    assert.equal(toolAttempts, 2)
+  }
   assert.ok(output.join("").includes("READY"))
-  assert.deepEqual(activities.filter(event => event.action === "provider_read").map(event => event.kind), ["model_action", "tool_result"])
+  assert.deepEqual(activities.filter(event => event.action === toolName).map(event => event.kind),
+    harness === "pi" ? ["model_action", "error", "model_action", "tool_result"] : ["model_action", "tool_result"])
   assert.ok(activities.some(event => event.action === "model_request"))
   const starts = activities.filter(event => event.action === "round_start").map(event => event.turn)
   assert.ok(starts.length >= 2, "The real harness must report both tool and final-response rounds")

@@ -31,23 +31,6 @@ function clip(value, max = MAX_LOG_CHARS) {
 // No credentials are persisted in this extension. Its capability is assignment-scoped
 // and only permits model requests and the existing trusted worker tools.
 const PI_EXTENSION = `
-import { Type } from "@sinclair/typebox";
-
-function schema(value) {
-  if (value.enum) return Type.Union(value.enum.map(item => Type.Literal(item)));
-  if (value.anyOf || value.oneOf) return Type.Union((value.anyOf || value.oneOf).map(schema));
-  const { type, properties, required, items, ...options } = value;
-  if (type === "object") return Type.Object(Object.fromEntries(Object.entries(properties || {}).map(([key, field]) =>
-    [key, (required || []).includes(key) ? schema(field) : Type.Optional(schema(field))])), options);
-  if (type === "array") return Type.Array(schema(items), options);
-  if (type === "string") return Type.String(options);
-  if (type === "integer") return Type.Integer(options);
-  if (type === "number") return Type.Number(options);
-  if (type === "boolean") return Type.Boolean(options);
-  if (type === "null") return Type.Null(options);
-  throw new Error("Unsupported Hosted tool schema");
-}
-
 export default function(pi) {
   const configuration = JSON.parse(process.env.HOSTED_HARNESS_CONFIG);
   pi.registerProvider("hosted", {
@@ -61,7 +44,7 @@ export default function(pi) {
     }]
   });
   for (const tool of configuration.tools) pi.registerTool({
-    name: tool.name, label: tool.name, description: tool.description, parameters: schema(tool.parameters),
+    name: tool.name, label: tool.name, description: tool.description, parameters: tool.parameters,
     async execute(toolCallId, args, signal) {
       const response = await fetch(configuration.baseUrl + "/mcp", {
         method: "POST", signal,
