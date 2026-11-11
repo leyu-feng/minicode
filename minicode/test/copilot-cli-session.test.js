@@ -138,6 +138,12 @@ test("Copilot executable discovery handles PATH entries with spaces and rejects 
 
 test("worker harness CLI rejects invalid or mismatched options before pairing", async () => {
   await assert.rejects(runAgentPoolWorkerCli(["--harness", "unknown"]), /--harness must be/)
-  await assert.rejects(runAgentPoolWorkerCli(["--copilot-path", process.execPath]), /requires --harness copilotcli/)
+  await assert.rejects(runAgentPoolWorkerCli(["--harness", "default", "--copilot-path", process.execPath]), /requires --harness copilotcli/)
   await assert.rejects(runAgentPoolWorkerCli(["--harness", "copilotcli", "--copilot-path", "relative.exe"]), /absolute executable path/)
+})
+
+test("paired worker CLI defaults to native Copilot before pairing", async () => {
+  await assert.rejects(runAgentPoolWorkerCli(["--copilot-path", "relative.exe"]), /absolute executable path/)
+  await assert.rejects(runAgentPoolWorkerCli(["--copilot-path", process.execPath]), /Worker requires --worker-id/)
+  await assert.rejects(runAgentPoolWorkerCli(["--harness", "default"]), /Worker requires --worker-id/)
 })

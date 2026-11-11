@@ -62,7 +62,7 @@ Options:
   --clippy-auth <cli.js>  Override the Easy Auth helper (with 'worker' only)
   --tool-azure-config-dir <absolute-dir>  Azure CLI context for worker shell tools
   --no-secret-store       Disable process-memory secrets for paired workers
-  --harness <name>       Devbox worker engine: default (Minicode) or copilotcli (native CLI)
+  --harness <name>       Devbox worker engine: copilotcli (default) or default (Minicode)
   --copilot-path <file>  Absolute Copilot executable; otherwise discover it on PATH
   --worker-shared <dir>   Worker read-only shared folder (default: sibling worker_shared)
   --reference-repo [<branch>@]<name>=<dir>  Attach a synced read-only reference checkout (repeatable)

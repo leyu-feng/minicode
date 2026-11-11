@@ -481,16 +481,17 @@ opened.
 
 ### Use native Copilot CLI on a devbox
 
-The normal worker still uses Minicode. Opt into the installed Copilot CLI with
-`--harness copilotcli`; Minicode then handles pairing, assignment isolation,
-workspace preparation, task tools and reporting, while Copilot performs inference.
-No Minicode model profile is needed:
+New Devbox workers use the installed Copilot CLI by default. Minicode handles
+pairing, assignment isolation, workspace preparation, task tools and reporting,
+while Copilot performs inference.
+No Minicode model profile is needed. Use `--harness default` to explicitly select
+the original Minicode engine; Hosted worker defaults are unchanged:
 
 ```powershell
 node .\minicode\cli.js worker --server https://clippy.example.test `
   --worker-id <paired-worker-id> --repo-root E:\Code `
   --workspace-mode workspace --worker-name windows-one `
-  --entra-user operator@example.test --harness copilotcli --model gpt-5.6-sol
+  --entra-user operator@example.test --model gpt-5.6-sol
 ```
 
 Install Copilot CLI and sign in under the worker's OS account before starting.

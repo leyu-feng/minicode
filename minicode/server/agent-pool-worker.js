@@ -1100,7 +1100,7 @@ export function parseWorkerCliOptions(argv) {
 export async function runAgentPoolWorkerCli(argv, repoRoot, { model } = {}) {
   const { options, referenceRepos, secretStore } = parseWorkerCliOptions(argv)
   parseWorkerReferences(referenceRepos)
-  const harness = options.harness ?? "default"
+  const harness = options.harness ?? "copilotcli"
   if (!["default", "copilotcli"].includes(harness)) throw new Error("--harness must be default or copilotcli")
   if (options["copilot-path"] !== undefined && harness !== "copilotcli") throw new Error("--copilot-path requires --harness copilotcli")
   let sessionFactory

@@ -2406,6 +2406,7 @@ test("worker CLI forwards workspace mode and short name to workspace validation"
   ]) {
     await assert.rejects(execFileAsync(process.execPath, [
       fileURLToPath(new URL("../cli.js", import.meta.url)), "worker",
+      "--harness", "default",
       "--server", fixture.serverUrl,
       "--worker-id", randomUUID(), "--repo-root", fixture.source,
       "--workspace-mode", mode, "--worker-name", name, ...extra,
@@ -2429,6 +2430,7 @@ test("worker CLI accepts repeated reference options and validates every supplied
   ]) {
     await assert.rejects(execFileAsync(process.execPath, [
       fileURLToPath(new URL("../cli.js", import.meta.url)), "worker",
+      "--harness", "default",
       "--server", fixture.serverUrl, "--worker-id", randomUUID(), "--repo-root", fixture.source,
       "--workspace-mode", "clone",
       ...references.flatMap(value => ["--reference-repo", value]),
@@ -2439,6 +2441,7 @@ test("worker CLI accepts repeated reference options and validates every supplied
   }
   await assert.rejects(execFileAsync(process.execPath, [
     fileURLToPath(new URL("../cli.js", import.meta.url)), "worker",
+    "--harness", "default",
     "--server", fixture.serverUrl, "--worker-id", randomUUID(), "--repo-root", `main@${fixture.source}`,
     "--workspace-mode", "clone",
   ], { env: { ...process.env, MINICODE_CONFIG_HOME: config }, windowsHide: true }), error => {
