@@ -928,13 +928,24 @@ port, and path still match. A changed authority or path remains stale. This comp
 health display; it does not trust forwarded headers or alter Slack signature verification.
 
 
-## Docker Quickstart (No local Node install)
+## Podman Quickstart (No local Node install)
 
-Build and run Paperclip in Docker:
+Install Podman Desktop and start its Linux machine (`podman machine start`).
+Local build, install-verification, and smoke scripts default to Podman; shared
+scripts retain Docker when `GITHUB_ACTIONS=true`. Set `CONTAINER_ENGINE=podman`
+or `CONTAINER_ENGINE=docker` to select explicitly. A missing selected engine is
+an error, not a fallback. Dockerfiles, Compose files, and existing script names
+remain compatible. Compose commands require a Compose provider configured in
+Podman Desktop (`podman compose version`).
+
+On Windows, run shell scripts in Git Bash with `podman` on PATH. The npm
+consumer verifiers still require an unprivileged Linux host.
+
+Build and run Paperclip in Podman:
 
 ```sh
-docker build -t paperclip-local .
-docker run --name paperclip \
+podman build -t paperclip-local .
+podman run --name paperclip \
   -p 3100:3100 \
   -e HOST=0.0.0.0 \
   -e PAPERCLIP_HOME=/paperclip \
@@ -945,7 +956,7 @@ docker run --name paperclip \
 Or use Compose:
 
 ```sh
-docker compose -f docker/docker-compose.quickstart.yml up --build
+podman compose -f docker/docker-compose.quickstart.yml up --build
 ```
 
 See `doc/DOCKER.md` for API key wiring (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) and persistence details.
@@ -2313,9 +2324,9 @@ Run the focused harness checks without contacting Paperclip or PostHog:
 node --test scripts/smoke/posthog-live.test.mjs
 ```
 
-## OpenClaw Docker UI One-Command Script
+## OpenClaw Container UI One-Command Script
 
-To boot OpenClaw in Docker and print a host-browser dashboard URL in one command:
+To boot OpenClaw in Podman and print a host-browser dashboard URL in one command:
 
 ```sh
 pnpm smoke:openclaw-docker-ui
@@ -2339,9 +2350,9 @@ State behavior for this smoke script:
 
 Networking behavior for this smoke script:
 
-- auto-detects and prints a Paperclip host URL reachable from inside OpenClaw Docker
-- default container-side host alias is `host.docker.internal` (override with `PAPERCLIP_HOST_FROM_CONTAINER` / `PAPERCLIP_HOST_PORT`)
-- if Paperclip rejects container hostnames in authenticated/private mode, allow `host.docker.internal` via `npx paperclipai allowed-hostname host.docker.internal` and restart Paperclip
+- auto-detects and prints a Paperclip host URL reachable from inside OpenClaw
+- default container-side host alias is `host.containers.internal` (`host.docker.internal` when Docker is selected; override with `PAPERCLIP_HOST_FROM_CONTAINER` / `PAPERCLIP_HOST_PORT`)
+- if Paperclip rejects container hostnames in authenticated/private mode, allow the selected hostname via `npx paperclipai allowed-hostname host.containers.internal` and restart Paperclip
 
 ### GitHub identity for shared agents
 

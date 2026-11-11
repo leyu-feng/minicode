@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/container-engine.sh"
 
 log() {
   echo "[hermes-gateway-e2e] $*"
@@ -53,7 +54,7 @@ HERMES_SMOKE_MODEL_PROVIDER="${HERMES_SMOKE_MODEL_PROVIDER:-}"
 HERMES_SMOKE_MODEL_DEFAULT="${HERMES_SMOKE_MODEL_DEFAULT:-}"
 HERMES_SMOKE_MODEL_BASE_URL="${HERMES_SMOKE_MODEL_BASE_URL:-}"
 HERMES_AGENT_NAME="${HERMES_AGENT_NAME:-Hermes Gateway Smoke Agent ${RUN_SUFFIX}}"
-PAPERCLIP_API_URL_FOR_HERMES="${PAPERCLIP_API_URL_FOR_HERMES:-http://host.docker.internal:3100}"
+PAPERCLIP_API_URL_FOR_HERMES="${PAPERCLIP_API_URL_FOR_HERMES:-http://${CONTAINER_HOST_INTERNAL}:3100}"
 RUN_TIMEOUT_SEC="${RUN_TIMEOUT_SEC:-420}"
 CASE_TIMEOUT_SEC="${CASE_TIMEOUT_SEC:-420}"
 GATEWAY_READY_TIMEOUT_SEC="${GATEWAY_READY_TIMEOUT_SEC:-90}"
@@ -69,12 +70,12 @@ HERMES_PROVIDER_ENV_KEYS=(
 
 print_usage() {
   cat <<'EOF'
-Hermes gateway Docker E2E smoke
+Hermes gateway container E2E smoke (Podman locally, Docker in GitHub Actions)
 
 Builds a fresh Hermes gateway container, verifies the gateway API directly,
 joins it to Paperclip as a hermes_gateway agent, wakes that agent on a smoke
 issue, verifies the issue result, captures redacted diagnostics, and cleans up
-Paperclip and Docker state unless HERMES_SMOKE_KEEP=1.
+Paperclip and container state unless HERMES_SMOKE_KEEP=1.
 
 Required:
   PAPERCLIP_API_URL=http://127.0.0.1:3100
@@ -87,9 +88,10 @@ Common flags:
   HERMES_GATEWAY_PORT=8642
   HERMES_GATEWAY_API_BASE_URL=http://127.0.0.1:8642
   HERMES_GATEWAY_PROBE_URL=http://127.0.0.1:8642
-  PAPERCLIP_API_URL_FOR_HERMES=http://host.docker.internal:3100
+  PAPERCLIP_API_URL_FOR_HERMES=http://host.containers.internal:3100
   HERMES_GATEWAY_ALLOW_INSECURE_HTTP=1             # dev-only non-loopback HTTP
-  HERMES_SMOKE_NETWORK=<docker-network>
+  HERMES_SMOKE_NETWORK=<container-network>
+  CONTAINER_ENGINE=podman|docker
   HERMES_DOCKER_ADD_HOST=0|1
   HERMES_SMOKE_KEEP=1                              # keep diagnostics/container
   HERMES_SMOKE_DIAG_DIR=/tmp/hermes-gateway-diag
@@ -100,7 +102,7 @@ Common flags:
 Mode notes:
   HERMES_GATEWAY_API_BASE_URL is the URL stored on the Paperclip adapter and
   must be reachable by the Paperclip server. HERMES_GATEWAY_PROBE_URL is the URL
-  this operator shell uses for direct gateway checks. They can differ for Docker
+  this operator shell uses for direct gateway checks. They can differ for container
   network and reverse-proxy smoke runs.
 
   Raw Hermes and Paperclip API keys are redacted from logs and diagnostic files.
@@ -110,7 +112,7 @@ Mode notes:
   The generated/claimed key material is kept only in the per-run state directory,
   which is deleted on success unless HERMES_SMOKE_KEEP=1.
 
-See doc/HERMES_GATEWAY_SMOKE.md for Docker Desktop, Linux, same-network,
+See doc/HERMES_GATEWAY_SMOKE.md for Podman Desktop, Linux, same-network,
 LAN/private-network, and reverse-proxy/TLS examples.
 EOF
 }
@@ -341,7 +343,7 @@ resolve_company_id() {
 
 capture_container_logs() {
   mkdir -p "$HERMES_SMOKE_DIAG_DIR"
-  docker logs --tail=2000 "$HERMES_CONTAINER_NAME" > "${HERMES_SMOKE_DIAG_DIR}/hermes-container.log" 2>&1 || true
+  container logs --tail=2000 "$HERMES_CONTAINER_NAME" > "${HERMES_SMOKE_DIAG_DIR}/hermes-container.log" 2>&1 || true
   if [[ -s "${HERMES_SMOKE_DIAG_DIR}/hermes-container.log" ]]; then
     local redacted_tmp
     redacted_tmp="$(mktemp)"
@@ -444,7 +446,7 @@ cleanup_paperclip_state() {
 cleanup_local_state() {
   [[ "$KEEP_ON_EXIT" != "1" ]] || return 0
 
-  docker rm -f "$HERMES_CONTAINER_NAME" >/dev/null 2>&1 || true
+  container rm -f "$HERMES_CONTAINER_NAME" >/dev/null 2>&1 || true
   rm -rf "$HERMES_SMOKE_STATE_DIR"
   rm -f "$JOIN_OUTPUT_FILE"
 }
@@ -475,7 +477,7 @@ build_image() {
     return
   fi
   log "building Hermes gateway image ${HERMES_IMAGE} (HERMES_VERSION=${HERMES_VERSION})"
-  docker build --build-arg "HERMES_VERSION=${HERMES_VERSION}" -t "$HERMES_IMAGE" "$HERMES_DOCKER_CONTEXT"
+  container build --build-arg "HERMES_VERSION=${HERMES_VERSION}" -t "$HERMES_IMAGE" "$HERMES_DOCKER_CONTEXT"
 }
 
 prepare_fresh_state() {
@@ -539,7 +541,7 @@ write_hermes_model_config() {
 }
 
 start_container() {
-  docker rm -f "$HERMES_CONTAINER_NAME" >/dev/null 2>&1 || true
+  container rm -f "$HERMES_CONTAINER_NAME" >/dev/null 2>&1 || true
 
   local args=(
     run -d
@@ -571,28 +573,28 @@ start_container() {
     args+=(--network "$HERMES_SMOKE_NETWORK")
   fi
   if [[ "$HERMES_DOCKER_ADD_HOST" == "1" ]]; then
-    args+=(--add-host=host.docker.internal:host-gateway)
+    args+=("--add-host=${CONTAINER_HOST_INTERNAL}:host-gateway")
   fi
   args+=("$HERMES_IMAGE")
 
   log "starting container ${HERMES_CONTAINER_NAME}"
-  docker "${args[@]}" >/dev/null
+  container "${args[@]}" >/dev/null
 }
 
 assert_fresh_container_state() {
   log "asserting container does not see host Hermes state"
-  docker exec "$HERMES_CONTAINER_NAME" sh -lc 'test ! -e "$HERMES_HOME/host-sentinel.txt"'
-  docker exec "$HERMES_CONTAINER_NAME" sh -lc 'env | sort | grep -E "^(HOME|HERMES_HOME|XDG_|API_SERVER_|PAPERCLIP_API_URL)=" || true' > "${HERMES_SMOKE_DIAG_DIR}/container-env.txt"
-  docker exec "$HERMES_CONTAINER_NAME" sh -lc 'find "$HERMES_HOME" -maxdepth 2 -type f -print | sort' > "${HERMES_SMOKE_DIAG_DIR}/container-hermes-home-files-before.txt" || true
-  if docker exec "$HERMES_CONTAINER_NAME" sh -lc 'env | grep -q "^PAPERCLIP_API_KEY="'; then
+  container exec "$HERMES_CONTAINER_NAME" sh -lc 'test ! -e "$HERMES_HOME/host-sentinel.txt"'
+  container exec "$HERMES_CONTAINER_NAME" sh -lc 'env | sort | grep -E "^(HOME|HERMES_HOME|XDG_|API_SERVER_|PAPERCLIP_API_URL)=" || true' > "${HERMES_SMOKE_DIAG_DIR}/container-env.txt"
+  container exec "$HERMES_CONTAINER_NAME" sh -lc 'find "$HERMES_HOME" -maxdepth 2 -type f -print | sort' > "${HERMES_SMOKE_DIAG_DIR}/container-hermes-home-files-before.txt" || true
+  if container exec "$HERMES_CONTAINER_NAME" sh -lc 'env | grep -q "^PAPERCLIP_API_KEY="'; then
     fail "container unexpectedly has PAPERCLIP_API_KEY before join/key claim"
   fi
 }
 
 probe_container_to_paperclip() {
   log "probing container-to-Paperclip connectivity at ${PAPERCLIP_API_URL_FOR_HERMES}/api/health"
-  if ! docker exec "$HERMES_CONTAINER_NAME" curl -fsS --max-time 8 "${PAPERCLIP_API_URL_FOR_HERMES%/}/api/health" > "${HERMES_SMOKE_DIAG_DIR}/container-paperclip-health.json"; then
-    fail "Hermes container cannot reach Paperclip. Set PAPERCLIP_API_URL_FOR_HERMES to a URL reachable from inside Docker, or keep HERMES_DOCKER_ADD_HOST=1 for Linux host.docker.internal."
+  if ! container exec "$HERMES_CONTAINER_NAME" curl -fsS --max-time 8 "${PAPERCLIP_API_URL_FOR_HERMES%/}/api/health" > "${HERMES_SMOKE_DIAG_DIR}/container-paperclip-health.json"; then
+    fail "Hermes container cannot reach Paperclip. Set PAPERCLIP_API_URL_FOR_HERMES to a URL reachable from the container, or keep HERMES_DOCKER_ADD_HOST=1 for ${CONTAINER_HOST_INTERNAL}."
   fi
 }
 
@@ -786,7 +788,7 @@ install_claimed_key_in_container() {
   # user inside the container. The state dir is still per-run and deleted on
   # success unless HERMES_SMOKE_KEEP=1.
   chmod 644 "$key_file"
-  docker exec "$HERMES_CONTAINER_NAME" sh -lc 'test -f /home/hermes/workspace/paperclip-claimed-api-key.json && test ! -e "$HERMES_HOME/host-sentinel.txt"'
+  container exec "$HERMES_CONTAINER_NAME" sh -lc 'test -f /home/hermes/workspace/paperclip-claimed-api-key.json && test ! -e "$HERMES_HOME/host-sentinel.txt"'
 }
 
 patch_agent_instructions_with_claimed_key() {
@@ -959,7 +961,7 @@ main() {
   log "diagnostics dir: ${HERMES_SMOKE_DIAG_DIR}"
 
   require_cmd curl
-  require_cmd docker
+  require_container_engine
   require_cmd jq
 
   if [[ -z "$HERMES_GATEWAY_API_KEY" ]]; then

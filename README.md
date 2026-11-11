@@ -34,7 +34,8 @@ database. Azure container configuration is unchanged.
 
 ## Build and publish Clippy to Azure Container Registry
 
-Install Docker Desktop with its Linux engine running, Git (including `tar`),
+Install Podman Desktop with its Linux machine running (`podman machine start`),
+Git (including `tar`),
 and Azure CLI. Sign in with `az login`; your account needs push access to the
 existing registry. From this repository:
 
@@ -45,13 +46,19 @@ existing registry. From this repository:
 ```
 
 The script builds locally for `linux/amd64` using `clippy\Dockerfile`'s
-`production` target, logs Docker in through Azure CLI, pushes both the versioned
+`production` target with native `podman build`, logs Podman in using an Azure CLI
+exposed registry token over stdin, pushes both the versioned
 image and `latest`, and prints both tags plus their immutable registry digest.
 `-ImageName` defaults to `clippy`; `-Tag` defaults to a timestamp plus source
 commit. Passing `-Tag latest` still retains that timestamped rollback tag.
 Publishing does not restart running containers; reprovision them or deploy the
 printed digest to pick up the new image. `-Subscription` is
 optional and does not change Azure CLI's default subscription.
+Registry authentication uses a temporary authfile removed after success or
+failure; the token is not passed in command arguments or saved in the repository.
+On Windows, machine builds use the selected connection's remote upload transport
+to avoid Podman's mapped-context build-secret path bug. This does not change the
+saved connection or restart the machine.
 
 Only committed files under `clippy` enter the build context. Commit application
 changes before running; modified or untracked files there cause an error.
@@ -59,10 +66,10 @@ The Dockerfile itself is taken from the current checkout, so recipe changes
 can be tested before committing. The script uses npm's user npmrc by default
 (`npm config get userconfig`); use `-NpmConfigPath C:\path\to\.npmrc` to select
 another file. The internal mirror does not require a separate authentication step.
-BuildKit mounts it as a secret only while installing packages, including the
+Podman mounts it as a build secret only while installing packages, including the
 project-pinned pnpm bootstrap. Its registry/auth configuration is never copied
 into an image layer or passed as a build argument. npm logs/cache stay in
-BuildKit cache mounts, and generated pnpm metadata has mirror locations removed
+build cache mounts, and generated pnpm metadata has mirror locations removed
 before it enters the runtime image. Package versions and integrity hashes are
 retained. Native build configuration snapshots are removed; compiled addons
 remain available. Local environment files,

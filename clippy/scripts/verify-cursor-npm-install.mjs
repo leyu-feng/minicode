@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { materializePublishManifest, prepareBundledPackage } from './prepare-bundled-package.mjs';
 import { GROK_PUBLIC_INSTALL_LIFECYCLE, GROK_PUBLIC_INSTALL_IMAGE } from './grok-public-install-sandbox.mjs';
 import { cursorConsumerDockerArgs, prepareCursorInstallAccount } from './cursor-public-install-sandbox.mjs';
+import { containerRunArgs, selectContainerEngine } from './container-engine.mjs';
+const containerEngine = selectContainerEngine();
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const root = mkdtempSync(join(tmpdir(), 'paperclip-cursor-public-install-'));
 console.log(`Verification evidence: ${root}`);
@@ -67,7 +69,7 @@ writeFileSync(join(sentinelSource,'package.json'), JSON.stringify({name:'papercl
 run('npm',['pack','--ignore-scripts','--pack-destination',assets],sentinelSource);
 for (const file of readdirSync(assets)) chmodSync(join(assets,file),0o644);
 const account = prepareCursorInstallAccount(root, process.getuid(), process.getgid());
-const isolated = (command, options={}) => run('docker',cursorConsumerDockerArgs({assets,consumer,cache,account,uid:process.getuid(),gid:process.getgid(),command,...options}));
+const isolated = (command, options={}) => run(containerEngine,containerRunArgs(cursorConsumerDockerArgs({assets,consumer,cache,account,uid:process.getuid(),gid:process.getgid(),command,...options}), containerEngine));
 isolated(['npm','install','--ignore-scripts','--omit=dev',...readdirSync(assets).filter(f=>f.endsWith('.tgz')).map(f=>`/packages/${f}`)],{download:true});
 const sentinel = join(consumer,'node_modules/paperclip-verification-lifecycle-sentinel/lifecycle-ran');
 assert.equal(existsSync(sentinel),false);

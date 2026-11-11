@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/container-engine.sh"
 
 log() {
   echo "[openclaw-docker-ui] $*"
@@ -48,21 +49,21 @@ reset_openclaw_state_dir() {
     "$resolved_state_dir/update-check.json"
 }
 
-require_cmd docker
+require_container_engine
 require_cmd git
 require_cmd curl
 require_cmd openssl
 require_cmd grep
 
 OPENCLAW_REPO_URL="${OPENCLAW_REPO_URL:-https://github.com/openclaw/openclaw.git}"
-OPENCLAW_DOCKER_DIR="${OPENCLAW_DOCKER_DIR:-/tmp/openclaw-docker}"
+OPENCLAW_DOCKER_DIR="$(container_host_path "${OPENCLAW_DOCKER_DIR:-/tmp/openclaw-docker}")"
 OPENCLAW_REPO_REF="${OPENCLAW_REPO_REF:-v2026.3.2}"
 OPENCLAW_IMAGE="${OPENCLAW_IMAGE:-openclaw:local}"
 OPENCLAW_TMP_DIR="${OPENCLAW_TMP_DIR:-${TMPDIR:-/tmp}}"
 OPENCLAW_TMP_DIR="${OPENCLAW_TMP_DIR%/}"
 OPENCLAW_TMP_DIR="${OPENCLAW_TMP_DIR:-/tmp}"
-OPENCLAW_CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-$OPENCLAW_TMP_DIR/openclaw-paperclip-smoke}"
-OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$OPENCLAW_CONFIG_DIR/workspace}"
+OPENCLAW_CONFIG_DIR="$(container_host_path "${OPENCLAW_CONFIG_DIR:-$OPENCLAW_TMP_DIR/openclaw-paperclip-smoke}")"
+OPENCLAW_WORKSPACE_DIR="$(container_host_path "${OPENCLAW_WORKSPACE_DIR:-$OPENCLAW_CONFIG_DIR/workspace}")"
 OPENCLAW_GATEWAY_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
 OPENCLAW_BRIDGE_PORT="${OPENCLAW_BRIDGE_PORT:-18790}"
 OPENCLAW_GATEWAY_BIND="${OPENCLAW_GATEWAY_BIND:-lan}"
@@ -77,7 +78,7 @@ OPENCLAW_MODEL_PRIMARY="${OPENCLAW_MODEL_PRIMARY:-openai/gpt-5.2}"
 OPENCLAW_MODEL_FALLBACK="${OPENCLAW_MODEL_FALLBACK:-openai/gpt-5.2-chat-latest}"
 OPENCLAW_RESET_STATE="${OPENCLAW_RESET_STATE:-1}"
 PAPERCLIP_HOST_PORT="${PAPERCLIP_HOST_PORT:-3100}"
-PAPERCLIP_HOST_FROM_CONTAINER="${PAPERCLIP_HOST_FROM_CONTAINER:-host.docker.internal}"
+PAPERCLIP_HOST_FROM_CONTAINER="${PAPERCLIP_HOST_FROM_CONTAINER:-$CONTAINER_HOST_INTERNAL}"
 
 case "$OPENCLAW_DISABLE_DEVICE_AUTH" in
   1|true|TRUE|True|yes|YES|Yes)
@@ -120,8 +121,8 @@ git -C "$OPENCLAW_DOCKER_DIR" checkout --quiet "$resolved_openclaw_ref"
 log "using OpenClaw ref $resolved_openclaw_ref ($(git -C "$OPENCLAW_DOCKER_DIR" rev-parse --short HEAD))"
 
 if [[ "$OPENCLAW_BUILD" == "1" ]]; then
-  log "building Docker image $OPENCLAW_IMAGE"
-  docker build -t "$OPENCLAW_IMAGE" -f "$OPENCLAW_DOCKER_DIR/Dockerfile" "$OPENCLAW_DOCKER_DIR"
+  log "building container image $OPENCLAW_IMAGE with $CONTAINER_ENGINE"
+  container build -t "$OPENCLAW_IMAGE" -f "$OPENCLAW_DOCKER_DIR/Dockerfile" "$OPENCLAW_DOCKER_DIR"
 fi
 
 log "writing OpenClaw config under $OPENCLAW_CONFIG_DIR"
@@ -135,7 +136,7 @@ if [[ "$OPENCLAW_RESET_STATE" == "1" ]]; then
     OPENCLAW_GATEWAY_TOKEN="$OPENCLAW_GATEWAY_TOKEN" \
     OPENCLAW_IMAGE="$OPENCLAW_IMAGE" \
     OPENAI_API_KEY="$OPENAI_API_KEY" \
-    docker compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" down --remove-orphans >/dev/null 2>&1 || true
+    container compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" down --remove-orphans >/dev/null 2>&1 || true
   reset_openclaw_state_dir "$OPENCLAW_CONFIG_DIR"
 fi
 mkdir -p "$OPENCLAW_WORKSPACE_DIR" "$OPENCLAW_CONFIG_DIR/identity" "$OPENCLAW_CONFIG_DIR/credentials"
@@ -190,20 +191,26 @@ OPENAI_API_KEY=$OPENAI_API_KEY
 EOF
 
 COMPOSE_OVERRIDE="${OPENCLAW_DOCKER_DIR}/.paperclip-openclaw.override.yml"
+USERNS_SETTING=""
+if [[ "$CONTAINER_ENGINE" == "podman" ]]; then
+  USERNS_SETTING="userns_mode: keep-id:uid=1000,gid=1000"
+fi
 cat > "$COMPOSE_OVERRIDE" <<EOF
 services:
   openclaw-gateway:
+    $USERNS_SETTING
     tmpfs:
       - /tmp:exec,size=512M
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "$CONTAINER_HOST_INTERNAL:host-gateway"
   openclaw-cli:
+    $USERNS_SETTING
     tmpfs:
       - /tmp:exec,size=512M
 EOF
 
 compose() {
-  docker compose \
+  container compose \
     -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" \
     -f "$COMPOSE_OVERRIDE" \
     "$@"
@@ -211,7 +218,11 @@ compose() {
 
 detect_paperclip_base_url() {
   local bridge_gateway candidate health_url
-  bridge_gateway="$(docker network inspect openclaw-docker_default --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)"
+  if [[ "$CONTAINER_ENGINE" == "podman" ]]; then
+    bridge_gateway="$(container network inspect openclaw-docker_default --format '{{(index .Subnets 0).Gateway}}' 2>/dev/null || true)"
+  else
+    bridge_gateway="$(container network inspect openclaw-docker_default --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)"
+  fi
   for candidate in "$PAPERCLIP_HOST_FROM_CONTAINER" "$bridge_gateway"; do
     [[ -n "$candidate" ]] || continue
     health_url="http://${candidate}:${PAPERCLIP_HOST_PORT}/api/health"
@@ -275,26 +286,26 @@ EOF
 EOF
   else
     cat <<EOF
-  Auto-detect failed. Try: http://host.docker.internal:${PAPERCLIP_HOST_PORT}
+  Auto-detect failed. Try: http://${CONTAINER_HOST_INTERNAL}:${PAPERCLIP_HOST_PORT}
   (Do not use http://127.0.0.1:${PAPERCLIP_HOST_PORT} inside the container.)
   If Paperclip rejects the host, run on host machine:
-    pnpm paperclipai allowed-hostname host.docker.internal
+    pnpm paperclipai allowed-hostname ${CONTAINER_HOST_INTERNAL}
   Then restart Paperclip and re-run this script.
 EOF
   fi
   cat <<EOF
 
 Useful commands:
-  docker compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" logs -f openclaw-gateway
-  docker compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" down
+  ${CONTAINER_ENGINE} compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" logs -f openclaw-gateway
+  ${CONTAINER_ENGINE} compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" down
 EOF
 else
   cat <<EOF
 Pairing:
   Device pairing is enabled.
   If UI shows "pairing required", run:
-    docker compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" run --rm openclaw-cli devices list
-    docker compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" run --rm openclaw-cli devices approve --latest
+    ${CONTAINER_ENGINE} compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" run --rm openclaw-cli devices list
+    ${CONTAINER_ENGINE} compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" run --rm openclaw-cli devices approve --latest
 Model:
   ${OPENCLAW_MODEL_PRIMARY} (fallback: ${OPENCLAW_MODEL_FALLBACK})
 State:
@@ -308,18 +319,18 @@ EOF
 EOF
   else
     cat <<EOF
-  Auto-detect failed. Try: http://host.docker.internal:${PAPERCLIP_HOST_PORT}
+  Auto-detect failed. Try: http://${CONTAINER_HOST_INTERNAL}:${PAPERCLIP_HOST_PORT}
   (Do not use http://127.0.0.1:${PAPERCLIP_HOST_PORT} inside the container.)
   If Paperclip rejects the host, run on host machine:
-    pnpm paperclipai allowed-hostname host.docker.internal
+    pnpm paperclipai allowed-hostname ${CONTAINER_HOST_INTERNAL}
   Then restart Paperclip and re-run this script.
 EOF
   fi
   cat <<EOF
 
 Useful commands:
-  docker compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" logs -f openclaw-gateway
-  docker compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" down
+  ${CONTAINER_ENGINE} compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" logs -f openclaw-gateway
+  ${CONTAINER_ENGINE} compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" -f "$COMPOSE_OVERRIDE" down
 EOF
 fi
 

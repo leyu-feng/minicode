@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/container-engine.sh"
 
 if ! command -v curl >/dev/null 2>&1; then
   echo "curl is required" >&2
@@ -60,7 +61,7 @@ EOF
 
 cleanup() {
   if [[ "$STARTED_CONTAINER" == "1" ]]; then
-    docker rm -f "$SMOKE_CONTAINER_NAME" >/dev/null 2>&1 || true
+    container rm -f "$SMOKE_CONTAINER_NAME" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -109,15 +110,13 @@ assert_json_has_string() {
 }
 
 if [[ "$USE_DOCKER_RECEIVER" == "1" && -z "$OPENCLAW_WEBHOOK_URL" ]]; then
-  if ! command -v docker >/dev/null 2>&1; then
-    fail "docker is required when USE_DOCKER_RECEIVER=1"
-  fi
-  log "building dockerized OpenClaw webhook receiver image"
-  docker build -t "$SMOKE_IMAGE" -f docker/openclaw-smoke/Dockerfile docker/openclaw-smoke >/dev/null
-  docker rm -f "$SMOKE_CONTAINER_NAME" >/dev/null 2>&1 || true
+  require_container_engine
+  log "building OpenClaw webhook receiver image with $CONTAINER_ENGINE"
+  container build -t "$SMOKE_IMAGE" -f docker/openclaw-smoke/Dockerfile docker/openclaw-smoke >/dev/null
+  container rm -f "$SMOKE_CONTAINER_NAME" >/dev/null 2>&1 || true
 
-  log "starting dockerized OpenClaw webhook receiver"
-  docker run -d \
+  log "starting containerized OpenClaw webhook receiver"
+  container run -d \
     --name "$SMOKE_CONTAINER_NAME" \
     -p "${SMOKE_PORT}:8787" \
     -e "OPENCLAW_SMOKE_AUTH=${OPENCLAW_WEBHOOK_AUTH}" \

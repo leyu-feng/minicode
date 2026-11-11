@@ -204,7 +204,7 @@ test('the image and Grok downloads start before staging and join without weakeni
   const linuxSource = source.slice(source.indexOf("assert.equal(process.platform, 'linux'"));
   const position = fragment => { const index = linuxSource.indexOf(fragment); assert.notEqual(index, -1, `verifier must contain ${fragment}`); return index; };
   // Exactly the pinned consumer image is pulled, for the platform the probes run on.
-  const imagePull = position("prefetch('image', 'docker', ['pull', '--platform', 'linux/amd64', GROK_PUBLIC_INSTALL_IMAGE])");
+  const imagePull = position("prefetch('image', containerEngine, ['pull', '--platform', 'linux/amd64', GROK_PUBLIC_INSTALL_IMAGE])");
   // Grok is provisioned into the prefetch directory, never straight into `native/grok`.
   const grokProvision = position("prefetch('grok', process.execPath, [join(repo, 'packages/paperclip-runner/scripts/provision-grok.mjs'), stagedGrok])");
   assert.ok(source.includes("const stagedGrok = join(prefetched, 'grok')"));

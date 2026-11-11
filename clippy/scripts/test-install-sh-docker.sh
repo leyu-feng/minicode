@@ -2,6 +2,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$REPO_ROOT/scripts/container-engine.sh"
+require_container_engine
 RESULTS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/paperclip-install-sh.XXXXXX")"
 KEEP_RESULTS="${KEEP_RESULTS:-0}"
 
@@ -15,28 +18,23 @@ cleanup() {
 
 trap cleanup EXIT
 
-command -v docker >/dev/null 2>&1 || {
-  echo "docker is required" >&2
-  exit 1
-}
-
 run_shellcheck() {
-  docker run --rm \
+  container run --rm \
     -v "$REPO_ROOT:/work:ro" \
     -w /work \
-    koalaman/shellcheck:stable \
-    scripts/install.sh scripts/test-install-sh-docker.sh scripts/install-sh-fixtures/npx
+    docker.io/koalaman/shellcheck:stable \
+    scripts/install.sh scripts/test-install-sh-docker.sh scripts/container-engine.sh scripts/install-sh-fixtures/npx
 }
 
 run_with_node() {
   local name="$1"
   shift
-  docker run --rm \
+  container run --rm \
     -v "$REPO_ROOT/scripts:/paperclip-scripts:ro" \
     -v "$RESULTS_DIR:/results" \
     -e "PAPERCLIP_INSTALL_TEST_LOG=/results/$name.args" \
     -e PATH="/paperclip-scripts/install-sh-fixtures:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    node:24-bookworm-slim \
+    docker.io/library/node:24-bookworm-slim \
     "$@"
 }
 
@@ -76,7 +74,7 @@ assert_line "$RESULTS_DIR/with-node.args" "npmrc:registry=https://registry.npmjs
 echo "==> hostile npm config isolation"
 mkdir -p "$RESULTS_DIR/hostile-home"
 printf 'registry=http://attacker-registry.invalid\n' >"$RESULTS_DIR/hostile-home/.npmrc"
-docker run --rm \
+container run --rm \
   -v "$REPO_ROOT/scripts:/paperclip-scripts:ro" \
   -v "$RESULTS_DIR:/results" \
   -e HOME=/results/hostile-home \
@@ -84,7 +82,7 @@ docker run --rm \
   -e npm_config_registry=http://attacker-registry.invalid \
   -e PAPERCLIP_INSTALL_TEST_LOG=/results/hostile.args \
   -e PATH="/paperclip-scripts/install-sh-fixtures:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-  node:24-bookworm-slim \
+  docker.io/library/node:24-bookworm-slim \
   bash /paperclip-scripts/install.sh --no-prompt --no-onboard
 assert_line "$RESULTS_DIR/hostile.args" "--registry=https://registry.npmjs.org"
 assert_line "$RESULTS_DIR/hostile.args" "NPM_CONFIG_REGISTRY=https://registry.npmjs.org"
@@ -112,10 +110,10 @@ run_with_node piped bash -c 'cat /paperclip-scripts/install.sh | bash -s -- --no
 assert_line "$RESULTS_DIR/piped.args" "--yes"
 
 echo "==> piped mode refuses privileged Node bootstrap"
-if docker run --rm \
+if container run --rm \
   -v "$REPO_ROOT/scripts:/paperclip-scripts:ro" \
   -e PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-  ubuntu:24.04 \
+  docker.io/library/ubuntu:24.04 \
   bash -c 'cat /paperclip-scripts/install.sh | bash -s -- --no-prompt --no-onboard' \
   >"$RESULTS_DIR/piped-no-node.out" 2>&1; then
   echo "Expected piped install without Node.js to fail before privileged bootstrap" >&2
@@ -131,7 +129,7 @@ run_with_node dry-run bash /paperclip-scripts/install.sh --no-prompt --dry-run -
 }
 
 echo "==> environment twins"
-docker run --rm \
+container run --rm \
   -v "$REPO_ROOT/scripts:/paperclip-scripts:ro" \
   -v "$RESULTS_DIR:/results" \
   -e PAPERCLIP_INSTALL_TEST_LOG=/results/env.args \
@@ -140,7 +138,7 @@ docker run --rm \
   -e PAPERCLIP_INSTALL_NO_ONBOARD=1 \
   -e PAPERCLIP_INSTALL_NO_PROMPT=1 \
   -e PATH="/paperclip-scripts/install-sh-fixtures:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-  node:24-bookworm-slim \
+  docker.io/library/node:24-bookworm-slim \
   bash /paperclip-scripts/install.sh
 assert_line "$RESULTS_DIR/env.args" "paperclipai@2026.722.0"
 assert_line "$RESULTS_DIR/env.args" "--version"
@@ -150,12 +148,12 @@ assert_no_line "$RESULTS_DIR/env.args" "--install-service"
 assert_line "$RESULTS_DIR/env.args" "service"
 
 echo "==> no Node, apt bootstrap"
-docker run --rm \
+container run --rm \
   -v "$REPO_ROOT/scripts:/paperclip-scripts:ro" \
   -v "$RESULTS_DIR:/results" \
   -e PAPERCLIP_INSTALL_TEST_LOG=/results/no-node.args \
   -e PATH="/paperclip-scripts/install-sh-fixtures:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-  ubuntu:24.04 \
+  docker.io/library/ubuntu:24.04 \
   bash -c 'apt-get update >/dev/null && apt-get install -y ca-certificates curl >/dev/null && bash /paperclip-scripts/install.sh --no-prompt --no-onboard'
 assert_line "$RESULTS_DIR/no-node.args" "paperclipai@latest"
 node_version="$(cat "$RESULTS_DIR/no-node.args.node")"
@@ -166,4 +164,4 @@ node_major="${node_major%%.*}"
   exit 1
 }
 
-echo "Installer Docker checks passed."
+echo "Installer container checks passed."

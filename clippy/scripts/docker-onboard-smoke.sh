@@ -2,6 +2,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$REPO_ROOT/scripts/container-engine.sh"
+require_container_engine
 IMAGE_NAME="${IMAGE_NAME:-paperclip-onboard-smoke}"
 HOST_PORT="${HOST_PORT:-3131}"
 PAPERCLIPAI_VERSION="${PAPERCLIPAI_VERSION:-latest}"
@@ -39,6 +41,8 @@ CONTAINER_NAME="${SMOKE_CONTAINER_NAME:-$IMAGE_NAME}"
 CONTAINER_NAME="${CONTAINER_NAME//[^a-zA-Z0-9_.-]/-}"
 PROVIDER_MOCK_CONTAINER_NAME="$CONTAINER_NAME-provider-mock"
 PROVIDER_MOCK_DIR="$DATA_DIR-provider-mock"
+SMOKE_NETWORK=""
+SMOKE_NETWORK_ARGS=()
 # Where the container's logs are written before it is torn down. See
 # `dump_container_logs`.
 SMOKE_LOG_FILE="${SMOKE_LOG_FILE:-${TMPDIR:-/tmp}/${CONTAINER_NAME}.log}"
@@ -73,11 +77,11 @@ dump_container_logs() {
   if [[ -z "$SMOKE_LOG_FILE" ]]; then
     return 0
   fi
-  if ! docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+  if ! container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
     return 0
   fi
   mkdir -p "$(dirname "$SMOKE_LOG_FILE")" >/dev/null 2>&1 || return 0
-  docker logs "$CONTAINER_NAME" >"$SMOKE_LOG_FILE" 2>&1 || true
+  container logs "$CONTAINER_NAME" >"$SMOKE_LOG_FILE" 2>&1 || true
 }
 
 cleanup() {
@@ -87,9 +91,12 @@ cleanup() {
   # Before the teardown below, never after it.
   dump_container_logs
   if [[ "$PRESERVE_CONTAINER_ON_EXIT" != "true" ]]; then
-    docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    docker rm -f "$PROVIDER_MOCK_CONTAINER_NAME" >/dev/null 2>&1 || true
+    container stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    container rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    container rm -f "$PROVIDER_MOCK_CONTAINER_NAME" >/dev/null 2>&1 || true
+    if [[ -n "$SMOKE_NETWORK" ]]; then
+      container network rm "$SMOKE_NETWORK" >/dev/null 2>&1 || true
+    fi
     rm -rf "$PROVIDER_MOCK_DIR" >/dev/null 2>&1 || true
   fi
   if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
@@ -101,7 +108,7 @@ trap cleanup EXIT INT TERM
 
 container_is_running() {
   local running
-  running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+  running="$(container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)"
   [[ "$running" == "true" ]]
 }
 
@@ -116,17 +123,17 @@ wait_for_http() {
     fi
     if ! container_is_running; then
       echo "Smoke bootstrap failed: container $CONTAINER_NAME exited before $url became ready" >&2
-      docker logs "$CONTAINER_NAME" >&2 || true
+      container logs "$CONTAINER_NAME" >&2 || true
       return 1
     fi
     sleep "$sleep_seconds"
   done
   if ! container_is_running; then
     echo "Smoke bootstrap failed: container $CONTAINER_NAME exited before readiness check completed" >&2
-    docker logs "$CONTAINER_NAME" >&2 || true
+    container logs "$CONTAINER_NAME" >&2 || true
   else
     echo "Smoke bootstrap failed: $url not ready after ${attempts} attempts; container is still running. Last container logs:" >&2
-    docker logs --tail 150 "$CONTAINER_NAME" >&2 || true
+    container logs --tail 150 "$CONTAINER_NAME" >&2 || true
   fi
   return 1
 }
@@ -152,7 +159,7 @@ generate_bootstrap_invite_url() {
   local bootstrap_output
   local bootstrap_status
   if bootstrap_output="$(
-    docker exec \
+    container exec \
       -e PAPERCLIP_DEPLOYMENT_MODE="$PAPERCLIP_DEPLOYMENT_MODE" \
       -e PAPERCLIP_DEPLOYMENT_EXPOSURE="$PAPERCLIP_DEPLOYMENT_EXPOSURE" \
       -e PAPERCLIP_PUBLIC_URL="$PAPERCLIP_PUBLIC_URL" \
@@ -304,18 +311,22 @@ auto_bootstrap_authenticated_smoke() {
 }
 
 echo "==> Building onboard smoke image"
-docker build \
+container build \
   --build-arg PAPERCLIPAI_VERSION="$PAPERCLIPAI_VERSION" \
   --build-arg HOST_UID="$HOST_UID" \
   -f "$REPO_ROOT/docker/Dockerfile.onboard-smoke" \
   -t "$IMAGE_NAME" \
   "$REPO_ROOT"
 
-# Extra `docker run` arguments for the app container when the provider mock is
+# Extra container arguments for the app container when the provider mock is
 # on: the DNS override, the mock's CA, and the mount that carries it.
 PROVIDER_MOCK_RUN_ARGS=()
 
 start_provider_mock() {
+  if [[ "$CONTAINER_ENGINE" == "podman" ]]; then
+    SMOKE_NETWORK="$(container network create)"
+    SMOKE_NETWORK_ARGS=(--network "$SMOKE_NETWORK")
+  fi
   rm -rf "$PROVIDER_MOCK_DIR"
   mkdir -p "$PROVIDER_MOCK_DIR"
   chmod 755 "$PROVIDER_MOCK_DIR"
@@ -361,22 +372,23 @@ const server = createServer(
 server.listen(443, () => console.log("[provider-mock] listening on 443"));
 MOCK_EOF
 
-  docker rm -f "$PROVIDER_MOCK_CONTAINER_NAME" >/dev/null 2>&1 || true
+  container rm -f "$PROVIDER_MOCK_CONTAINER_NAME" >/dev/null 2>&1 || true
   # The smoke image doubles as the mock's runtime: it already has node and is
   # already built, so the mock costs no extra pull. Root, because binding 443
   # inside the container needs it, and 443 is not negotiable — the product's
   # provider endpoints are hardcoded https URLs.
-  docker run -d \
+  container run -d \
     --name "$PROVIDER_MOCK_CONTAINER_NAME" \
+    ${SMOKE_NETWORK_ARGS[@]+"${SMOKE_NETWORK_ARGS[@]}"} \
     --user 0 \
     -v "$PROVIDER_MOCK_DIR:/provider-mock:ro" \
     "$IMAGE_NAME" node /provider-mock/server.mjs >/dev/null
 
   local mock_ip
-  mock_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$PROVIDER_MOCK_CONTAINER_NAME")"
+  mock_ip="$(container inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$PROVIDER_MOCK_CONTAINER_NAME")"
   if [[ -z "$mock_ip" ]]; then
     echo "Smoke bootstrap failed: provider mock container has no IP address" >&2
-    docker logs "$PROVIDER_MOCK_CONTAINER_NAME" >&2 || true
+    container logs "$PROVIDER_MOCK_CONTAINER_NAME" >&2 || true
     return 1
   fi
   PROVIDER_MOCK_RUN_ARGS=(
@@ -405,14 +417,15 @@ if [[ "$SMOKE_DETACH" != "true" ]]; then
   echo "    Live output: onboard banner and server logs stream in this terminal (Ctrl+C to stop)"
 fi
 
-docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+container rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 # No `--rm`. A container that removes itself takes its logs with it the instant
 # it exits, which is the one moment they are worth reading; the cleanup above
 # removes it instead, after dumping them. The `docker rm -f` just above covers
 # a container left behind by a previous run.
-docker run -d \
+container run -d \
   --name "$CONTAINER_NAME" \
+  ${SMOKE_NETWORK_ARGS[@]+"${SMOKE_NETWORK_ARGS[@]}"} \
   -p "$HOST_PORT:3100" \
   -e HOST=0.0.0.0 \
   -e PORT=3100 \
@@ -424,7 +437,7 @@ docker run -d \
   "$IMAGE_NAME" >/dev/null
 
 if [[ "$SMOKE_DETACH" != "true" ]]; then
-  docker logs -f "$CONTAINER_NAME" &
+  container logs -f "$CONTAINER_NAME" &
   LOG_PID=$!
 fi
 

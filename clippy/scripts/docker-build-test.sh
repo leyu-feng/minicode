@@ -1,38 +1,30 @@
 #!/usr/bin/env bash
-# Verify the Docker image builds successfully.
-# Skips gracefully when docker/podman is not available.
+# Verify the container image builds successfully.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Detect container runtime
-if command -v docker >/dev/null 2>&1; then
-  RUNTIME=docker
-elif command -v podman >/dev/null 2>&1; then
-  RUNTIME=podman
-else
-  echo "SKIP: neither docker nor podman found — skipping build test"
-  exit 0
-fi
-
-# Verify the daemon is reachable (docker may be installed but not running)
-if ! "$RUNTIME" info >/dev/null 2>&1; then
-  echo "SKIP: $RUNTIME is installed but not running — skipping build test"
-  exit 0
+source "$REPO_ROOT/scripts/container-engine.sh"
+if ! require_container_engine; then
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    echo "SKIP: $CONTAINER_ENGINE is unavailable — skipping build test"
+    exit 0
+  fi
+  exit 1
 fi
 
 IMAGE_TAG="paperclip-build-test:$$"
-trap '"$RUNTIME" rmi "$IMAGE_TAG" >/dev/null 2>&1 || true' EXIT
+trap 'container rmi "$IMAGE_TAG" >/dev/null 2>&1 || true' EXIT
 
-echo "==> Testing Docker build with $RUNTIME"
-"$RUNTIME" build \
+echo "==> Testing container build with $CONTAINER_ENGINE"
+container build \
   -f "$REPO_ROOT/Dockerfile" \
   -t "$IMAGE_TAG" \
   --target production \
   "$REPO_ROOT"
 
 echo "==> Verifying key binaries in image"
-"$RUNTIME" run --rm "$IMAGE_TAG" sh -c '
+container run --rm "$IMAGE_TAG" sh -c '
   set -e
   node --version
   git --version
@@ -46,6 +38,6 @@ echo "==> Verifying key binaries in image"
 echo "==> Verifying PID 1 is an init that reaps adopted orphans"
 # Piped in as CMD (`sh -s`) rather than `--entrypoint`, so the image's real
 # ENTRYPOINT still runs and PID 1 is exactly what a production container gets.
-"$RUNTIME" run --rm -i "$IMAGE_TAG" sh -s < "$REPO_ROOT/scripts/assert-orphan-reaping.sh"
+container run --rm -i "$IMAGE_TAG" sh -s < "$REPO_ROOT/scripts/assert-orphan-reaping.sh"
 
-echo "PASS: Docker build test succeeded"
+echo "PASS: Container build test succeeded"

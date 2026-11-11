@@ -18,6 +18,8 @@ import { GROK_PUBLIC_INSTALL_IMAGE, GROK_PUBLIC_INSTALL_LIFECYCLE, assertInstall
 import { startPrefetch, stopPrefetches } from './prefetch-child.mjs';
 import { retainRunnerQualificationPackages } from './retain-runner-qualification-packages.mjs';
 import { bundledInstallTimings, startBundledInstalls } from './stage-bundled-packages.mjs';
+import { containerRunArgs, selectContainerEngine } from './container-engine.mjs';
+const containerEngine = selectContainerEngine();
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 async function verifyMacConsumer(packageDirectory, sourceRevision, receiptPath) {
   assert.equal(process.env.GITHUB_ACTIONS, 'true', 'Mac clean consumers run only on disposable hosted CI');
@@ -116,9 +118,9 @@ async function verifyLinuxArmConsumer(packageDirectory, sourceRevision, receiptP
       env: { PATH: process.env.PATH, HOME: root, TMPDIR: root }, timeout: 10 * 60_000,
       maxBuffer: 32 * 1024 * 1024, encoding: 'utf8' });
     const platform = 'linux/arm64';
-    run('docker', ['pull', '--platform', platform, GROK_PUBLIC_INSTALL_IMAGE]);
-    const isolated = (command, options = {}) => run('docker', grokConsumerDockerArgs({ assets, consumer, cache,
-      uid: process.getuid(), gid: process.getgid(), platform, command, ...options }));
+    run(containerEngine, ['pull', '--platform', platform, GROK_PUBLIC_INSTALL_IMAGE]);
+    const isolated = (command, options = {}) => run(containerEngine, containerRunArgs(grokConsumerDockerArgs({ assets, consumer, cache,
+      uid: process.getuid(), gid: process.getgid(), platform, command, ...options }), containerEngine));
     for (const entry of manifest.archives) {
       assert.match(entry.file, /^[A-Za-z0-9._-]+\.tgz$/); assert.match(entry.sha256, /^[a-f0-9]{64}$/);
       const tarball = join(packages, entry.file);
@@ -226,7 +228,7 @@ let phaseStarted = performance.now();
 const phase = name => { const now = performance.now(); timing[`${name}_ms`] = Math.round(now - phaseStarted); phaseStarted = now; };
 const awaited = async (name, promise) => { const started = performance.now(); await promise; timing[`${name}_wait_ms`] = Math.round(performance.now() - started); };
 try {
-  const imageReady = prefetch('image', 'docker', ['pull', '--platform', 'linux/amd64', GROK_PUBLIC_INSTALL_IMAGE]);
+  const imageReady = prefetch('image', containerEngine, ['pull', '--platform', 'linux/amd64', GROK_PUBLIC_INSTALL_IMAGE]);
   // Provision as the unprivileged verification user, never into the host's /opt.
   // Only the positive probe sees this file at the canonical sandbox path.
   const grokReady = prefetch('grok', process.execPath, [join(repo, 'packages/paperclip-runner/scripts/provision-grok.mjs'), stagedGrok]);
@@ -353,7 +355,7 @@ try {
   run('npm', ['pack', '--ignore-scripts', '--pack-destination', assets], sentinelSource);
   const sentinel = join(consumer, 'node_modules/paperclip-verification-lifecycle-sentinel/lifecycle-ran');
   const consumerUid = process.getuid();
-  const isolated = (command, options = {}) => run('docker', grokConsumerDockerArgs({ assets, consumer, cache, uid: consumerUid, gid: process.getgid(), command, ...options }));
+  const isolated = (command, options = {}) => run(containerEngine, containerRunArgs(grokConsumerDockerArgs({ assets, consumer, cache, uid: consumerUid, gid: process.getgid(), command, ...options }), containerEngine));
   phase('stage_packages');
   await awaited('image', imageReady);
   // npm resolution is intentionally the public consumer graph, not the pnpm

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/container-engine.sh"
 
 log() {
   echo "[openclaw-gateway-e2e] $*"
@@ -21,7 +22,7 @@ require_cmd() {
 
 require_cmd curl
 require_cmd jq
-require_cmd docker
+require_container_engine
 require_cmd node
 require_cmd shasum
 
@@ -35,17 +36,17 @@ OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-}"
 OPENCLAW_TMP_DIR="${OPENCLAW_TMP_DIR:-${TMPDIR:-/tmp}}"
 OPENCLAW_TMP_DIR="${OPENCLAW_TMP_DIR%/}"
 OPENCLAW_TMP_DIR="${OPENCLAW_TMP_DIR:-/tmp}"
-OPENCLAW_CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-${OPENCLAW_TMP_DIR}/openclaw-paperclip-smoke}"
-OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-${OPENCLAW_CONFIG_DIR}/workspace}"
+OPENCLAW_CONFIG_DIR="$(container_host_path "${OPENCLAW_CONFIG_DIR:-${OPENCLAW_TMP_DIR}/openclaw-paperclip-smoke}")"
+OPENCLAW_WORKSPACE_DIR="$(container_host_path "${OPENCLAW_WORKSPACE_DIR:-${OPENCLAW_CONFIG_DIR}/workspace}")"
 OPENCLAW_CONTAINER_NAME="${OPENCLAW_CONTAINER_NAME:-openclaw-docker-openclaw-gateway-1}"
 OPENCLAW_IMAGE="${OPENCLAW_IMAGE:-openclaw:local}"
-OPENCLAW_DOCKER_DIR="${OPENCLAW_DOCKER_DIR:-/tmp/openclaw-docker}"
+OPENCLAW_DOCKER_DIR="$(container_host_path "${OPENCLAW_DOCKER_DIR:-/tmp/openclaw-docker}")"
 OPENCLAW_RESET_DOCKER="${OPENCLAW_RESET_DOCKER:-1}"
 OPENCLAW_BUILD="${OPENCLAW_BUILD:-1}"
 OPENCLAW_WAIT_SECONDS="${OPENCLAW_WAIT_SECONDS:-60}"
 OPENCLAW_RESET_STATE="${OPENCLAW_RESET_STATE:-1}"
 
-PAPERCLIP_API_URL_FOR_OPENCLAW="${PAPERCLIP_API_URL_FOR_OPENCLAW:-http://host.docker.internal:3100}"
+PAPERCLIP_API_URL_FOR_OPENCLAW="${PAPERCLIP_API_URL_FOR_OPENCLAW:-http://${CONTAINER_HOST_INTERNAL}:3100}"
 CASE_TIMEOUT_SEC="${CASE_TIMEOUT_SEC:-420}"
 RUN_TIMEOUT_SEC="${RUN_TIMEOUT_SEC:-300}"
 STRICT_CASES="${STRICT_CASES:-1}"
@@ -162,7 +163,7 @@ capture_openclaw_container_logs() {
     warn "could not detect OpenClaw container for diagnostics"
     return 0
   fi
-  docker logs --tail=1200 "$container" > "${OPENCLAW_DIAG_DIR}/openclaw-container.log" 2>&1 || true
+  container logs --tail=1200 "$container" > "${OPENCLAW_DIAG_DIR}/openclaw-container.log" 2>&1 || true
 }
 
 assert_status() {
@@ -186,22 +187,22 @@ require_board_auth() {
 
 maybe_cleanup_openclaw_docker() {
   if [[ "$OPENCLAW_RESET_DOCKER" != "1" ]]; then
-    log "OPENCLAW_RESET_DOCKER=${OPENCLAW_RESET_DOCKER}; skipping docker cleanup"
+    log "OPENCLAW_RESET_DOCKER=${OPENCLAW_RESET_DOCKER}; skipping container cleanup"
     return
   fi
 
-  log "cleaning OpenClaw docker state"
+  log "cleaning OpenClaw container state"
   if [[ -d "$OPENCLAW_DOCKER_DIR" ]]; then
-    docker compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" down --remove-orphans >/dev/null 2>&1 || true
+    container compose -f "$OPENCLAW_DOCKER_DIR/docker-compose.yml" down --remove-orphans >/dev/null 2>&1 || true
   fi
-  if docker ps -a --format '{{.Names}}' | grep -qx "$OPENCLAW_CONTAINER_NAME"; then
-    docker rm -f "$OPENCLAW_CONTAINER_NAME" >/dev/null 2>&1 || true
+  if container ps -a --format '{{.Names}}' | grep -qx "$OPENCLAW_CONTAINER_NAME"; then
+    container rm -f "$OPENCLAW_CONTAINER_NAME" >/dev/null 2>&1 || true
   fi
-  docker image rm "$OPENCLAW_IMAGE" >/dev/null 2>&1 || true
+  container image rm "$OPENCLAW_IMAGE" >/dev/null 2>&1 || true
 }
 
 start_openclaw_docker() {
-  log "starting clean OpenClaw docker"
+  log "starting clean OpenClaw container"
   OPENCLAW_CONFIG_DIR="$OPENCLAW_CONFIG_DIR" OPENCLAW_WORKSPACE_DIR="$OPENCLAW_WORKSPACE_DIR" \
   OPENCLAW_RESET_STATE="$OPENCLAW_RESET_STATE" OPENCLAW_BUILD="$OPENCLAW_BUILD" OPENCLAW_WAIT_SECONDS="$OPENCLAW_WAIT_SECONDS" \
     ./scripts/smoke/openclaw-docker-ui.sh
@@ -226,13 +227,13 @@ wait_http_ready() {
 }
 
 detect_openclaw_container() {
-  if docker ps --format '{{.Names}}' | grep -qx "$OPENCLAW_CONTAINER_NAME"; then
+  if container ps --format '{{.Names}}' | grep -qx "$OPENCLAW_CONTAINER_NAME"; then
     echo "$OPENCLAW_CONTAINER_NAME"
     return 0
   fi
 
   local detected
-  detected="$(docker ps --format '{{.Names}}' | grep 'openclaw-gateway' | head -n1 || true)"
+  detected="$(container ps --format '{{.Names}}' | grep 'openclaw-gateway' | head -n1 || true)"
   if [[ -n "$detected" ]]; then
     echo "$detected"
     return 0
@@ -262,7 +263,7 @@ detect_gateway_token() {
   container="$(detect_openclaw_container || true)"
   if [[ -n "$container" ]]; then
     local token_from_container
-    token_from_container="$(docker exec "$container" sh -lc "node -e 'const fs=require(\"fs\");const c=JSON.parse(fs.readFileSync(\"/home/node/.openclaw/openclaw.json\",\"utf8\"));process.stdout.write(c.gateway?.auth?.token||\"\");'" 2>/dev/null || true)"
+    token_from_container="$(container exec "$container" sh -lc "node -e 'const fs=require(\"fs\");const c=JSON.parse(fs.readFileSync(\"/home/node/.openclaw/openclaw.json\",\"utf8\"));process.stdout.write(c.gateway?.auth?.token||\"\");'" 2>/dev/null || true)"
     if [[ -n "$token_from_container" ]]; then
       echo "$token_from_container"
       return 0
@@ -479,9 +480,9 @@ persist_claimed_key_artifacts() {
   local container
   container="$(detect_openclaw_container || true)"
   if [[ -n "$container" ]]; then
-    docker exec "$container" sh -lc "mkdir -p /home/node/.openclaw/workspace" >/dev/null 2>&1 || true
-    docker cp "$claimed_file" "${container}:/home/node/.openclaw/workspace/paperclip-claimed-api-key.json" >/dev/null 2>&1 || true
-    docker exec "$container" sh -lc "chmod 644 /home/node/.openclaw/workspace/paperclip-claimed-api-key.json" >/dev/null 2>&1 || true
+    container exec "$container" sh -lc "mkdir -p /home/node/.openclaw/workspace" >/dev/null 2>&1 || true
+    container cp "$claimed_file" "${container}:/home/node/.openclaw/workspace/paperclip-claimed-api-key.json" >/dev/null 2>&1 || true
+    container exec "$container" sh -lc "chmod 644 /home/node/.openclaw/workspace/paperclip-claimed-api-key.json" >/dev/null 2>&1 || true
   fi
 
   if [[ "$AUTO_INSTALL_SKILL" == "1" ]]; then
@@ -578,7 +579,7 @@ approve_latest_pairing_request() {
 
   log "approving latest gateway pairing request in ${container}"
   local output
-  if output="$(docker exec \
+  if output="$(container exec \
     -e OPENCLAW_GATEWAY_URL="$OPENCLAW_GATEWAY_URL" \
     -e OPENCLAW_GATEWAY_TOKEN="$gateway_token" \
     "$container" \

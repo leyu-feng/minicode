@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { accessSync, constants, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 // Pins the diagnostics wiring of the Docker leg of the release smoke.
@@ -13,7 +14,7 @@ import test from "node:test";
 // produced, and the harness ran the container with `--rm` so stopping it
 // deleted the logs anyway. These assertions keep both halves fixed.
 
-const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const scriptPath = join(repoRoot, "scripts", "docker-onboard-smoke.sh");
 const script = readFileSync(scriptPath, "utf8");
 const workflow = readFileSync(
@@ -37,16 +38,16 @@ test("container name can be fixed by the caller", () => {
 test("the container does not remove itself", () => {
   // `--rm` deletes the container the instant its process exits, so a crash
   // takes the logs with it before any cleanup can read them.
-  assert.match(script, /^docker run -d \\$/m);
-  assert.doesNotMatch(script, /docker run [^\n]*--rm/);
+  assert.match(script, /^container run -d \\$/m);
+  assert.doesNotMatch(script, /container run [^\n]*--rm/);
 });
 
 test("cleanup dumps the container logs before it tears the container down", () => {
   const cleanup = script.match(/^cleanup\(\) \{$[\s\S]*?^\}$/m)?.[0];
   assert.ok(cleanup, "cleanup() must exist");
   const dumpAt = cleanup.indexOf("dump_container_logs");
-  const stopAt = cleanup.indexOf("docker stop");
-  const removeAt = cleanup.indexOf("docker rm");
+  const stopAt = cleanup.indexOf("container stop");
+  const removeAt = cleanup.indexOf("container rm");
   assert.ok(dumpAt !== -1, "cleanup() must dump the container logs");
   assert.ok(stopAt !== -1, "cleanup() must still stop the container");
   assert.ok(
@@ -61,7 +62,7 @@ test("cleanup dumps the container logs before it tears the container down", () =
 
 test("the log dump has a destination, and callers are told where it is", () => {
   assert.match(script, /SMOKE_LOG_FILE="\$\{SMOKE_LOG_FILE:-/);
-  assert.match(script, /docker logs "\$CONTAINER_NAME" >"\$SMOKE_LOG_FILE"/);
+  assert.match(script, /container logs "\$CONTAINER_NAME" >"\$SMOKE_LOG_FILE"/);
   assert.match(script, /printf 'SMOKE_LOG_FILE=%q\\n' "\$SMOKE_LOG_FILE"/);
 });
 
