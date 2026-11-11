@@ -110,8 +110,8 @@ try {
         $env:CONTAINER_CONNECTION = $null
       }
     }
-    Invoke-Checked $podman (@(
-      "build", "--format", "docker", "--platform", "linux/amd64", "--target", "production",
+    & (Join-Path $PSScriptRoot "Invoke-PodmanBuild.ps1") -PodmanPath $podman -Component clippy -BuildArguments (@(
+      "--format", "docker", "--platform", "linux/amd64", "--target", "production",
       "--build-arg", "PAPERCLIP_BUILD_COMMIT=$sourceCommit",
       "--build-arg", "PROVIDER_PACK_EXCLUDE=pi,cursor",
       "--secret", "id=npmrc,src=$NpmConfigPath",

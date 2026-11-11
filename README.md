@@ -60,6 +60,21 @@ On Windows, machine builds use the selected connection's remote upload transport
 to avoid Podman's mapped-context build-secret path bug. This does not change the
 saved connection or restart the machine.
 
+Local builds automatically update the readable JSON ledger at
+`%LOCALAPPDATA%\Clippy\container-cache-usage.json`, shared with MMD.Build's local
+build wrapper. Set `PODMAN_CACHE_LEDGER` to override its location. Entries identify
+the image and engine separately, record the last build that used each checkpoint,
+and record `lastReusedAt` only for explicit Podman `Using cache` messages. Build
+timestamps are completion times, not precise per-step times. The ledger contains
+no build commands, output, or credentials and never deletes images.
+Direct `podman build` commands bypass tracking; use the wrapper for other images:
+
+```powershell
+.\Invoke-PodmanBuild.ps1 -Component my-image -BuildArguments @('-t', 'my-image:local', '.')
+# Import an existing log; its last-write time is used unless -ObservedAt is supplied:
+.\Invoke-PodmanBuild.ps1 -Component my-image -LogPath C:\logs\build.log
+```
+
 Only committed files under `clippy` enter the build context. Commit application
 changes before running; modified or untracked files there cause an error.
 The Dockerfile itself is taken from the current checkout, so recipe changes

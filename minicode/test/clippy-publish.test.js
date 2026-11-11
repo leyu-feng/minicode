@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { spawn, execFile } from "node:child_process"
 import { promisify } from "node:util"
+import { existsSync } from "node:fs"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -9,7 +10,7 @@ import test from "node:test"
 const execFileAsync = promisify(execFile)
 const windows = process.platform === "win32"
 
-async function publish(t, { buildOnly = false, fail = "", dirty = false, tag, latestMismatch = false, invalidLogin = false, engine = "linux", connectionEnv = {} } = {}) {
+async function publish(t, { buildOnly = false, fail = "", dirty = false, tag, latestMismatch = false, invalidLogin = false, engine = "linux", partialBuild = false, connectionEnv = {}, shell = "powershell.exe" } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "clippy publish test "))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
   const context = path.join(root, "clippy")
@@ -17,6 +18,7 @@ async function publish(t, { buildOnly = false, fail = "", dirty = false, tag, la
   await fs.mkdir(context)
   await fs.mkdir(tools)
   await fs.copyFile(new URL("../../publish-clippy.ps1", import.meta.url), path.join(root, "publish-clippy.ps1"))
+  await fs.copyFile(new URL("../../Invoke-PodmanBuild.ps1", import.meta.url), path.join(root, "Invoke-PodmanBuild.ps1"))
   await fs.writeFile(path.join(root, "fixture.ps1"), `
 param([string]$RegistryName, [string]$Subscription, [string]$Tag, [switch]$BuildOnly)
 try { & (Join-Path $PSScriptRoot "publish-clippy.ps1") @PSBoundParameters }
@@ -59,8 +61,22 @@ if (stage === "podman:build") {
 }
 fs.appendFileSync(process.env.PUBLISH_TEST_CALLS, JSON.stringify(call) + "\\n")
 if (stage === process.env.PUBLISH_TEST_FAIL) process.exit(23)
+if (stage === "podman:build") {
+  console.log("STEP 2/3: RUN private-build-command")
+  console.log("--> Using cache " + "a".repeat(64))
+  console.log("--> " + "a".repeat(12))
+  console.log("private-build-output")
+  console.log("STEP 3/3: COPY . .")
+  console.log("--> " + "b".repeat(12))
+  if (process.env.PUBLISH_TEST_PARTIAL_BUILD === "1") process.exit(23)
+}
+if (stage === "podman:images") console.log(JSON.stringify([
+  { Id: "a".repeat(64), Names: ["localhost/build-cache/clippy:step-" + "a".repeat(12)] },
+  { Id: "b".repeat(64), Names: ["clippy:fixture"] },
+]))
 if (stage === "podman:push" && args.at(-1).endsWith(":latest") && process.env.PUBLISH_TEST_FAIL === "latest") process.exit(23)
-if (stage === "podman:info") console.log(process.env.PUBLISH_TEST_ENGINE)
+if (stage === "podman:info") console.log(args.includes("{{.Host.OS}}")
+  ? process.env.PUBLISH_TEST_ENGINE : process.env.PUBLISH_TEST_CACHE_ENGINE || "fixture-machine|/fixture/storage")
 if (stage === "podman:system") console.log(JSON.stringify([
   { Name: "fixture-machine", Default: true, IsMachine: true,
     URI: "ssh://fixture@localhost:12345/run/podman.sock", Identity: "fixture-private-key-path" },
@@ -82,7 +98,7 @@ if (tool === "az" && args[1] === "repository") console.log("sha256:" + (args.inc
   }
   const args = buildOnly ? ["-BuildOnly"] : ["-RegistryName", "fixture", "-Subscription", "fixture-subscription"]
   if (tag) args.push("-Tag", tag)
-  const child = spawn("powershell.exe", [
+  const child = spawn(shell, [
     "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
     "-File", path.join(root, "fixture.ps1"), ...args,
   ], {
@@ -92,8 +108,10 @@ if (tool === "az" && args[1] === "repository") console.log("sha256:" + (args.inc
       PUBLISH_TEST_CALLS: callsFile, PUBLISH_TEST_FAIL: fail, PUBLISH_TEST_NPMRC: npmrc,
       PUBLISH_TEST_LATEST_MISMATCH: latestMismatch ? "1" : "0",
       PUBLISH_TEST_INVALID_LOGIN: invalidLogin ? "1" : "0", PUBLISH_TEST_ENGINE: engine,
+      PUBLISH_TEST_PARTIAL_BUILD: partialBuild ? "1" : "0",
       CONTAINER_HOST: "", CONTAINER_CONNECTION: "", CONTAINER_SSHKEY: "",
       ...connectionEnv, PUBLISH_TEST_RESTORED: path.join(root, "restored.json"),
+      PODMAN_CACHE_LEDGER: path.join(root, "cache-usage.json"),
     },
     stdio: ["ignore", "pipe", "pipe"],
   })
@@ -106,7 +124,10 @@ if (tool === "az" && args[1] === "repository") console.log("sha256:" + (args.inc
   })
   const calls = (await fs.readFile(callsFile, "utf8")).trim().split("\n").map(JSON.parse)
   const restored = JSON.parse((await fs.readFile(path.join(root, "restored.json"), "utf8")).replace(/^\uFEFF/, ""))
-  return { code, output, calls, commit, restored }
+  let ledger = null
+  try { ledger = JSON.parse(await fs.readFile(path.join(root, "cache-usage.json"), "utf8")) }
+  catch (error) { if (error.code !== "ENOENT") throw error }
+  return { code, output, calls, commit, restored, ledger, root, tools }
 }
 
 test("Clippy publishes committed Linux production source and verifies its registry digest", { skip: !windows }, async (t) => {
@@ -159,6 +180,73 @@ test("Clippy build-only does not authenticate or upload", { skip: !windows }, as
   assert.equal(result.code, 0, result.output)
   assert.ok(result.calls.every((call) => call.tool !== "az" && call.args[0] !== "push"))
   assert.match(result.output, /Built local image: clippy:/)
+})
+
+test("Clippy records checkpoint use separately from explicit cache reuse without storing build output", { skip: !windows }, async (t) => {
+  const result = await publish(t, { buildOnly: true })
+  assert.equal(result.code, 0, result.output)
+  assert.match(result.output, /Cache usage recorded: 2 checkpoints/)
+  const cached = result.ledger.images.find(image => image.imageId === "a".repeat(64))
+  const built = result.ledger.images.find(image => image.imageId === "b".repeat(64))
+  assert.equal(cached.lastUse.evidence, "cache-hit")
+  assert.equal(cached.lastReusedAt, cached.lastUsedAt)
+  assert.equal(built.lastUse.evidence, "build-output")
+  assert.equal(built.lastReusedAt, null)
+  assert.equal(cached.engineId, built.engineId)
+  assert.equal(cached.engineId.length, 64)
+  assert.deepEqual(cached.components, ["clippy"])
+  assert.equal(cached.lastUse.buildSucceeded, true)
+  assert.equal(cached.lastUse.timeSource, "build-finished")
+  assert.doesNotMatch(JSON.stringify(result.ledger), /private-build|fixture-secret|registry-private-fixture/)
+})
+
+for (const shell of ["powershell.exe", path.join(process.env.ProgramFiles || "C:\\Program Files", "PowerShell", "7", "pwsh.exe")]) {
+  test(`Cache imports preserve timestamps, merge concurrent builds, and separate engines (${path.basename(shell)})`, {
+    skip: !windows || (shell !== "powershell.exe" && !existsSync(shell)),
+  }, async (t) => {
+    const result = await publish(t, { buildOnly: true, shell })
+    assert.equal(result.code, 0, result.output)
+    const log = path.join(result.root, "old.log")
+    await fs.writeFile(log, `--> Using cache\n--> ${"a".repeat(12)}\n--> ${"b".repeat(12)}\n`)
+    const ledgerPath = path.join(result.root, "cache-usage.json")
+    const importLog = (component, env = {}, observedAt = "2000-01-01T00:00:00Z") => execFileAsync(shell, [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      "-File", path.join(result.root, "Invoke-PodmanBuild.ps1"),
+      "-PodmanPath", path.join(result.tools, "podman.cmd"),
+      "-Component", component, "-LogPath", log, "-LedgerPath", ledgerPath,
+      "-ObservedAt", observedAt,
+    ], {
+      env: { ...process.env, PUBLISH_TEST_CALLS: path.join(result.root, "imports.jsonl"), ...env },
+      windowsHide: true,
+    })
+    await Promise.all([importLog("engsys-api"), importLog("minion")])
+    let ledger = JSON.parse(await fs.readFile(ledgerPath, "utf8"))
+    assert.equal(ledger.images.length, 2)
+    const cached = ledger.images.find(image => image.imageId === "a".repeat(64))
+    assert.equal(cached.lastUsedAt, result.ledger.images.find(image => image.imageId === cached.imageId).lastUsedAt)
+    assert.equal(cached.lastUse.component, "clippy")
+    assert.deepEqual(cached.components, ["clippy", "engsys-api", "minion"])
+    assert.equal(new Date(cached.firstUsedAt).getUTCFullYear(), 2000)
+    const later = new Date(Date.parse(cached.lastUsedAt) + 60_000).toISOString()
+    await importLog("engsys-api", {}, later)
+    ledger = JSON.parse(await fs.readFile(ledgerPath, "utf8"))
+    assert.ok(ledger.images.every(image => Date.parse(image.lastUsedAt) === Date.parse(later)))
+    assert.ok(ledger.images.every(image => image.lastUse.component === "engsys-api"))
+    assert.equal(Date.parse(ledger.images.find(image => image.imageId === cached.imageId).lastReusedAt), Date.parse(later))
+    await importLog("engsys-api", { PUBLISH_TEST_CACHE_ENGINE: "other-machine|/other/storage" })
+    ledger = JSON.parse(await fs.readFile(ledgerPath, "utf8"))
+    assert.equal(ledger.images.length, 4)
+    assert.equal(new Set(ledger.images.map(image => image.engineId)).size, 2)
+  })
+}
+
+test("Failed builds retain truthful partial cache usage and never publish", { skip: !windows }, async (t) => {
+  const result = await publish(t, { partialBuild: true })
+  assert.notEqual(result.code, 0)
+  assert.match(result.output, /failed \(exit 23\)/)
+  assert.equal(result.ledger.images.length, 2)
+  assert.ok(result.ledger.images.every(image => image.lastUse.buildSucceeded === false))
+  assert.ok(!result.calls.some(call => call.args[0] === "push"))
 })
 
 test("Clippy honors the named Podman machine and restores its transport after success or failure", { skip: !windows }, async (t) => {
