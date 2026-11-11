@@ -116,6 +116,8 @@ export class HostedHarnessSession extends EventEmitter {
     let lastModelRequest
     let modelFailure
     let promptEvidence
+    const streamFailures = new Map()
+    const completedRequests = new Map()
     const nativeTools = new Map()
     const bridgedToolIds = new Set()
     const trustedTools = new Set(this.tools.flatMap(tool => [tool.name, `hosted_${tool.name}`]))
@@ -162,7 +164,7 @@ export class HostedHarnessSession extends EventEmitter {
           code: /^[a-zA-Z0-9_.-]{1,100}$/.test(code) ? code : "model_request_failed",
           ...(request?.httpStatus ? { httpStatus: request.httpStatus } : {}),
           ...(/^[a-zA-Z0-9_.-]{1,200}$/.test(requestId) ? { requestId } : {}),
-          occurredAt: new Date().toISOString(),
+          occurredAt: request?.occurredAt ?? new Date().toISOString(),
           contextCharacters: request?.requestBody.length ?? 0,
         }
         if (this.captureFailedPrompt && request) promptEvidence = capture(request)
@@ -213,7 +215,28 @@ export class HostedHarnessSession extends EventEmitter {
       }
       bridge = await startHostedHarnessBridge({
         ...this.modelConfig, tools: this.tools, signal, modelEnabled: !this.github,
-        onError: (message, request) => request ? failModel(message, request) : fail(message),
+        onError: (message, request) => {
+          if (request?.code !== "ERR_STREAM_PREMATURE_CLOSE") {
+            if (request) failModel(message, request)
+            else fail(message)
+            return
+          }
+          output("stderr", `${message}\n`)
+          if ((completedRequests.get(request.requestKey) ?? 0) >= request.turn) {
+            output("stdout", "Model stream recovered after a confirmed harness retry.\n")
+          } else if ((streamFailures.get(request.requestKey)?.request.turn ?? 0) < request.turn) {
+            streamFailures.set(request.requestKey, { message, request: { ...request, occurredAt: new Date().toISOString() } })
+          }
+        },
+        onModelComplete: request => {
+          const completedTurn = Math.max(completedRequests.get(request.requestKey) ?? 0, request.turn)
+          completedRequests.set(request.requestKey, completedTurn)
+          const pending = streamFailures.get(request.requestKey)
+          if (pending && pending.request.turn <= completedTurn) {
+            streamFailures.delete(request.requestKey)
+            output("stdout", "Model stream recovered after a confirmed harness retry.\n")
+          }
+        },
         onModelRequest: (request, token) => {
           if (token && !secrets.includes(token)) secrets.push(token)
           turn = round || request.turn
@@ -446,6 +469,7 @@ export class HostedHarnessSession extends EventEmitter {
       } catch (error) {
         if (!(error instanceof SyntaxError)) throw error
       }
+      for (const { message, request } of streamFailures.values()) failModel(message, request)
       if (failure) return failedResult(failure)
       if (!completed || this.harness !== "pi" && exit.code !== 0) {
         return { exitCode: 1, error: `Hosted ${this.harness} did not complete successfully (exit ${exit.code ?? exit.terminationSignal})` }

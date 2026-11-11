@@ -1,6 +1,6 @@
 import { createServer } from "node:http"
 import { once } from "node:events"
-import { randomBytes } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { Readable, Transform } from "node:stream"
 import { pipeline } from "node:stream/promises"
 
@@ -70,7 +70,7 @@ function trackModelCompletion(chatCompletions, onCompletion) {
   })
 }
 
-export async function startHostedHarnessBridge({ endpoint, model, getAccessToken, tools, signal, onError, onModelRequest, onToolEvent, modelEnabled = true }) {
+export async function startHostedHarnessBridge({ endpoint, model, getAccessToken, tools, signal, onError, onModelRequest, onModelComplete, onToolEvent, modelEnabled = true }) {
   const upstream = modelEnabled ? new URL(endpoint) : null
   if (upstream && (upstream.protocol !== "https:" || upstream.username || upstream.password
     || !upstream.pathname.endsWith("/responses"))) throw new Error("Invalid Hosted model endpoint")
@@ -134,7 +134,11 @@ export async function startHostedHarnessBridge({ endpoint, model, getAccessToken
       const target = new URL(upstream)
       if (request.url.endsWith("/chat/completions")) target.pathname = target.pathname.replace(/responses$/, "chat/completions")
       input.model = model
-      modelRequest = { turn: ++modelRequests, requestBody: JSON.stringify(input) }
+      const requestBody = JSON.stringify(input)
+      modelRequest = {
+        turn: ++modelRequests, requestBody,
+        requestKey: createHash("sha256").update(request.url).update("\0").update(requestBody).digest("hex"),
+      }
       const token = await getAccessToken({ signal })
       signal.throwIfAborted()
       onModelRequest?.(modelRequest, token)
@@ -161,9 +165,13 @@ export async function startHostedHarnessBridge({ endpoint, model, getAccessToken
         }
         await pipeline(...streams, response, { signal })
       } else response.end()
+      if (modelCompleted) onModelComplete?.(modelRequest)
     })().catch(error => {
       // Harnesses can close a completed SSE response before the upstream HTTP EOF.
-      if (!signal.aborted && modelCompleted && error.code === "ERR_STREAM_PREMATURE_CLOSE") return
+      if (!signal.aborted && modelCompleted && error.code === "ERR_STREAM_PREMATURE_CLOSE") {
+        onModelComplete?.(modelRequest)
+        return
+      }
       onError(signal.aborted ? "Hosted harness cancelled" : error.message,
         modelRequest ? { ...modelRequest, code: error.cause?.code ?? error.code } : undefined)
       if (response.headersSent) response.destroy()

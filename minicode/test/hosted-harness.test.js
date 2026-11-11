@@ -309,6 +309,10 @@ for (const scenario of [
   { name: "split CRLF completion", frame: 'data:\r\n\r\n: caf\u00e9\r\ndata: {"type":"response.completed",\r\ndata: "response":{"status":"completed"}}\r\n\r\n', split: true, success: true },
   { name: "completed Chat Completions stream", route: "chat/completions", frame: "data: [DONE]\n\n", success: true },
   { name: "unfinished Responses stream", frame: 'data: {"type":"response.output_text.delta","delta":"response.completed"}\n\n' },
+  { name: "unfinished Responses stream followed by a confirmed retry", frame: 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n', retry: "same", success: true },
+  { name: "unfinished Responses stream followed by completion of a different request", frame: 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n', retry: "different" },
+  { name: "unfinished Responses stream followed by an incomplete retry", frame: 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n', retry: "incomplete" },
+  { name: "unfinished Responses stream after an earlier identical completed request", frame: 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n', priorCompletion: true },
   { name: "unsuccessful Responses completion", frame: 'data: {"type":"response.completed","response":{"status":"incomplete"}}\n\n' },
   { name: "unterminated completion event", frame: 'data: {"type":"response.completed","response":{"status":"completed"}}\n' },
   { name: "malformed stream before completion", frame: 'data: {invalid}\n\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n' },
@@ -322,7 +326,17 @@ for (const scenario of [
     const streamCancelled = new Promise(resolve => { cancelled = resolve })
     t.mock.method(globalThis, "fetch", async (url, options) => {
       if (!String(url).startsWith("https://model.example")) return fetchOriginal(url, options)
-      if (++requests > 1) return new Response('{"output":[]}')
+      requests++
+      if (scenario.priorCompletion && requests === 1) return new Response(
+        'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+        { headers: { "Content-Type": "text/event-stream" } },
+      )
+      if (requests > (scenario.priorCompletion ? 2 : 1)) return scenario.retry
+        ? new Response(scenario.retry === "incomplete"
+          ? 'data: {"type":"response.incomplete","response":{"status":"incomplete"}}\n\n'
+          : 'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+        { headers: { "Content-Type": "text/event-stream" } })
+        : new Response('{"output":[]}')
       return new Response(new ReadableStream({
         start(controller) {
           const bytes = Buffer.from(scenario.frame)
@@ -348,6 +362,7 @@ for (const scenario of [
           body: JSON.stringify(input)
         });
         console.log(JSON.stringify({ type: "step_start" }));
+        ${scenario.priorCompletion ? 'await (await post("/openai/v1/responses", { stream: true, input: "Offline request" })).text();' : ""}
         const response = await post("/openai/v1/${scenario.route ?? "responses"}", { stream: true, input: "Offline request" });
         const reader = response.body.getReader();
         const received = [];
@@ -366,7 +381,10 @@ for (const scenario of [
         if ((await tool.json()).result.isError) throw new Error("Offline tool failed");
         console.log(JSON.stringify({ type: "step_finish" }));
         console.log(JSON.stringify({ type: "step_start" }));
-        await (await post("/openai/v1/responses", { input: "Follow-up request" })).text();
+        await (await post("/openai/v1/responses", ${JSON.stringify(
+          ["same", "incomplete"].includes(scenario.retry)
+            ? { stream: true, input: "Offline request" } : { input: "Follow-up request" },
+        )})).text();
         console.log(JSON.stringify({ type: "text", part: { text: "Finished" } }));
         console.log(JSON.stringify({ type: "step_finish" }));
       `], options),
@@ -376,7 +394,7 @@ for (const scenario of [
     const output = []
     session.on("output", event => output.push(event.data))
     const result = await session.write("Offline stream-close reproduction")
-    assert.equal(requests, 2, output.join(""))
+    assert.equal(requests, scenario.priorCompletion ? 3 : 2, output.join(""))
     assert.equal(toolCalls, 1)
     assert.ok(output.join("").includes("Finished"))
     if (scenario.success) assert.deepEqual(result, { exitCode: 0, summary: "Finished" })
