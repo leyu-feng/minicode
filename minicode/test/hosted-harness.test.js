@@ -552,7 +552,7 @@ for (const harness of ["opencode", "pi"]) {
     assert.deepEqual(activities.filter(event => event.action === "model_request").map(event => event.turn), [1, 1, 2])
     assert.deepEqual(activities.filter(event => event.action === "provider_read").map(event => event.kind), ["model_action", "tool_result"])
     assert.deepEqual(activities.filter(event => event.target === "native-1").map(event => event.kind), ["model_action", "tool_result"])
-    assert.ok(details.some(event => event.phase === "end" && event.output.includes("shell result")))
+    assert.ok(details.some(event => event.phase === "end" && event.output?.includes("shell result")))
     assert.ok(!JSON.stringify(activities).includes("shell result"))
     assert.ok(!events.filter(event => event.stream !== "command").some(event => event.data.includes("shell result")))
     assert.ok(events.some(event => event.stream === "command" && event.data.includes("# system instructions")))
@@ -561,6 +561,29 @@ for (const harness of ["opencode", "pi"]) {
     for (const secret of ["run-secret", "private-token", "unregistered-credential", "HIDDEN_REASONING"]) assert.ok(!logs.includes(secret), secret)
   })
 }
+
+test("assignment message details retain the full redacted body across immutable bounded parts", { timeout: 10000 }, async t => {
+  const prompt = "First line\n" + "long assignment private-run-token\n".repeat(2200) + "LAST_LINE"
+  const session = new HostedHarnessSession({
+    harness: "pi", id: "full-message", cwd: process.cwd(), instructions: "Policy",
+    env: { PAPERCLIP_API_KEY: "private-run-token" }, tools: [],
+    modelConfig: { endpoint, model: "deployment", getAccessToken: async () => "unused" },
+    prepare: async () => ({ harness: "pi", command: "trusted", version: "fixture" }),
+    spawnProcess: (_command, _args, options) => spawn(process.execPath, ["-e",
+      'let input="";process.stdin.on("data",chunk=>{input+=chunk;if(input.includes("LAST_LINE")){console.log(JSON.stringify({type:"agent_end",messages:[]}));process.exit(0)}})'], options),
+  })
+  t.after(() => session.dispose())
+  const details = []
+  session.on("tool_detail", value => { if (value.message?.label === "Assignment input") details.push(value) })
+  assert.equal((await session.write(prompt)).exitCode, 0)
+  assert.ok(details.length > 2)
+  assert.ok(details.every(detail => detail.input.length <= 12000 && !detail.truncated))
+  assert.deepEqual(details.map(detail => detail.message.part), details.map((_, index) => index))
+  assert.equal(new Set(details.map(detail => detail.message.id)).size, 1)
+  assert.equal(details.at(-1).message.last, true)
+  assert.equal(details.slice(0, -1).some(detail => detail.message.last), false)
+  assert.equal(details.map(detail => detail.input).join(""), prompt.replaceAll("private-run-token", "[redacted]"))
+})
 
 for (const harness of ["opencode", "pi"]) {
   for (const overLimit of [false, true]) {

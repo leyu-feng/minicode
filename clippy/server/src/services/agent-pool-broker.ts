@@ -13,7 +13,7 @@ import {
   agentPoolHelloSchema, agentPoolInstructionsSchema, agentPoolNameSchema, agentPoolTaskSchema,
   agentPoolHarnessIdSchema,
   AGENT_POOL_CLAUDECODE_DEFAULT_MODEL,
-  AGENT_POOL_TOOL_DETAILS, runToolDetailSchema,
+  AGENT_POOL_TOOL_DETAILS, AGENT_POOL_TRANSCRIPT_DETAILS, runToolDetailSchema,
 } from "@paperclipai/shared";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../adapters/types.js";
 import { readAgentPoolSkills } from "./agent-pool-skills.js";
@@ -227,7 +227,7 @@ export class AgentPoolBroker {
           clearTimeout(handshakeTimeout);
           this.send(peer, {
             type: "welcome", protocolVersion: AGENT_POOL_PROTOCOL_VERSION, serverInstanceId: this.serverInstanceId,
-            capabilities: ["retiring_ready_v1", AGENT_POOL_TOOL_DETAILS],
+            capabilities: ["retiring_ready_v1", AGENT_POOL_TOOL_DETAILS, AGENT_POOL_TRANSCRIPT_DETAILS],
             runId: peer.run?.id ?? null, ack: peer.run?.seq ?? 0,
             completed: peer.run?.completed ?? false,
           });

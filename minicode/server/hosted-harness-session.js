@@ -132,11 +132,25 @@ export class HostedHarnessSession extends EventEmitter {
     if (this.githubCredential?.accessToken) secrets.push(this.githubCredential.accessToken)
     const safe = value => logValue(value, secrets)
     const activity = value => this.emit("activity", {
-      ...value, ...(turn ? { turn } : {}),
+      ...(turn ? { turn } : {}), ...value,
       ...(value.action ? { action: clip(safe(value.action), 100) } : {}),
       ...(value.target ? { target: clip(safe(value.target), 200) } : {}),
       summary: clip(safe(value.summary)),
     })
+    const messageDetails = (label, value, diagnostic = false) => {
+      const text = safe(value)
+      label = safe(label).slice(0, 160)
+      const id = randomUUID()
+      const summary = (text.split(/\r?\n/).find(line => line.trim()) ?? label).slice(0, 200)
+      for (let start = 0, part = 0; start < Math.max(1, text.length); start += 12000, part++) {
+        this.emit("tool_detail", {
+          version: 1, id: randomUUID(), callId: id, phase: "end", name: label,
+          summary, ts: new Date().toISOString(), cwd: clip(safe(this.cwd), 2000),
+          input: text.slice(start, start + 12000), truncated: false,
+          message: { id, part, last: start + 12000 >= text.length, label, diagnostic },
+        })
+      }
+    }
     const output = (stream, data) => {
       lastProgress = Date.now()
       data = safe(data)
@@ -145,6 +159,7 @@ export class HostedHarnessSession extends EventEmitter {
     }
     const diagnostic = (label, value) => {
       if (diagnosticBytes >= MAX_DIAGNOSTIC_BYTES) return
+      if (label !== "assignment input") messageDetails(label, value, true)
       const data = clip(`# ${label}\n${safe(value)}\n`)
       if (diagnosticBytes + Buffer.byteLength(data) > MAX_DIAGNOSTIC_BYTES) {
         diagnosticBytes = MAX_DIAGNOSTIC_BYTES
@@ -152,7 +167,7 @@ export class HostedHarnessSession extends EventEmitter {
         return
       }
       diagnosticBytes += Buffer.byteLength(data)
-      this.emit("output", { stream: "command", data })
+      this.emit("output", { stream: "command", data, messageSummary: true })
     }
     const fail = message => { failure ??= safe(message) }
     const capture = request => {
@@ -187,7 +202,8 @@ export class HostedHarnessSession extends EventEmitter {
     }
     const endRound = () => {
       if (!roundOpen) return
-      activity({ kind: "model_action", action: "round_end", summary: `Round ${round} end` })
+      activity({ kind: "model_action", action: "round_end", summary: `Round ${round} end`,
+        status: failure ? "failed" : signal.aborted ? "cancelled" : "completed" })
       roundOpen = false
     }
     const startRound = () => {
@@ -264,7 +280,7 @@ export class HostedHarnessSession extends EventEmitter {
           turn = round || request.turn
           lastModelRequest = request
           const summary = `Model request ${request.turn}: ${this.modelConfig.model}, ${Buffer.byteLength(request.requestBody)} bytes`
-          activity({ kind: "model_action", action: "model_request", summary })
+          activity({ kind: "model_action", action: "model_request", turn: roundOpen ? round : null, summary })
           this.emit("output", { stream: "stdout", data: `# ${safe(summary)}\n` })
           diagnostic(`model request ${request.turn}`, JSON.parse(request.requestBody))
         },
@@ -491,7 +507,8 @@ export class HostedHarnessSession extends EventEmitter {
         if (!completed && !signal.aborted) fail(`Hosted harness input failed (${error.code ?? "IO"})`)
       })
       activity({ kind: "prompt", action: "prompt", summary: prompt })
-      this.emit("output", { stream: "stdout", data: `# assignment input\n${clip(safe(prompt), 1000)}\n` })
+      messageDetails("Assignment input", prompt)
+      this.emit("output", { stream: "stdout", data: `# assignment input\n${clip(safe(prompt), 1000)}\n`, messageSummary: true })
       diagnostic("assignment input", prompt)
       diagnostic("system instructions", this.instructions)
       if (this.harness === "pi") child.stdin.write(`${JSON.stringify({ id: this.id, type: "prompt", message: prompt })}\n`)

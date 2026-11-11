@@ -1380,13 +1380,17 @@ test(`Devbox Copilot runs default assignments with separate details supported=${
 })
 }
 
-test("detail uploads apply backpressure, replay only unacknowledged events, and keep summaries after the detail cap", async t => {
+for (const messageDetails of [false, true]) {
+test(`detail uploads apply backpressure, replay only unacknowledged events, and keep summaries after the detail cap (message: ${messageDetails})`, async t => {
   class Session extends EventEmitter {
     async write() {
       for (let i = 0; i < 400; i++) this.emit("tool_detail", {
         version: 1, id: randomUUID(), callId: randomUUID(), phase: "end", name: "run_shell",
         summary: "Check connectivity", ts: new Date().toISOString(), cwd: "workspace",
-        output: "x".repeat(24000), truncated: false,
+        ...(messageDetails ? {
+          input: "x".repeat(24000),
+          message: { id: randomUUID(), part: 0, last: true, label: "Assignment input", diagnostic: false },
+        } : { output: "x".repeat(24000) }), truncated: false,
       })
       return { exitCode: 0 }
     }
@@ -1394,7 +1398,7 @@ test("detail uploads apply backpressure, replay only unacknowledged events, and 
     dispose() {}
   }
   const fixture = await harness(t, () => new Session())
-  const capabilities = ["retiring_ready_v1", "tool_details_v1"]
+  const capabilities = ["retiring_ready_v1", "tool_details_v1", "transcript_details_v1"]
   const peer = await fixture.welcome(0, 0, false, capabilities)
   await waitUntil(() => peer.messages.some(message => message.type === "ready"))
   peer.send({ type: "task", runId: "detail-burst", agent, context: {} })
@@ -1424,7 +1428,46 @@ test("detail uploads apply backpressure, replay only unacknowledged events, and 
   assert.ok(unavailable.length > 0)
   assert.equal(details.length + unavailable.length, 400)
   assert.ok(output.includes("Tool detail upload limit reached"))
+  assert.equal(output.includes('"type":"clippy.message"'), messageDetails)
 })
+}
+
+for (const supported of [false, true]) {
+test(`transcript messages and rounds negotiate legacy fallback (supported: ${supported})`, async t => {
+  const message = { id: randomUUID(), part: 0, last: true, label: "Assignment input", diagnostic: false }
+  class Session extends EventEmitter {
+    async write() {
+      for (const diagnostic of [false, true]) this.emit("tool_detail", {
+        version: 1, id: randomUUID(), callId: message.id, phase: "end", name: message.label,
+        summary: "First line", ts: new Date().toISOString(), input: "Full message body",
+        message: { ...message, diagnostic }, truncated: false,
+      })
+      this.emit("output", { stream: "stdout", data: "# assignment input\nclipped fallback\n", messageSummary: true })
+      this.emit("activity", { kind: "model_action", action: "model_request", turn: null, summary: "Request 4, model, 200 bytes" })
+      this.emit("output", { stream: "stdout", data: "# Model request 4: model, 200 bytes\n" })
+      this.emit("activity", { kind: "model_action", action: "round_start", turn: 3, summary: "Round 3 start" })
+      this.emit("output", { stream: "stdout", data: "Visible assistant prose\n" })
+      this.emit("activity", { kind: "model_action", action: "round_end", turn: 3, summary: "Round 3 end", status: "completed" })
+      return { exitCode: 0 }
+    }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, () => new Session())
+  const peer = await fixture.welcome(0, 0, false, ["retiring_ready_v1", "tool_details_v1", ...(supported ? ["transcript_details_v1"] : [])])
+  await executeTask(peer, { runId: "transcript-details", agent })
+  const details = peer.messages.filter(event => event.type === "tool_detail")
+  assert.equal(details.length, supported ? 1 : 0)
+  const output = peer.messages.filter(event => event.type === "log").map(event => event.data).join("")
+  assert.ok(output.includes("Visible assistant prose"))
+  assert.equal(output.includes("clipped fallback"), !supported)
+  assert.equal(output.includes("# Model request 4:"), !supported)
+  const rounds = output.split("\n").map(line => line.replace(/^\[[^\]]+\]\s*/, ""))
+    .filter(line => line.startsWith('{"type":"clippy.round"')).map(line => JSON.parse(line))
+  assert.deepEqual(rounds.map(value => [value.executionId, value.round, value.action]),
+    supported ? [["transcript-details", undefined, "model_request"], ["transcript-details", 3, "round_start"], ["transcript-details", 3, "round_end"]] : [])
+})
+}
 
 for (const outputMode of ["normal", "verbose"]) {
   test(`${outputMode} worker output preserves summaries and errors with mode-specific raw tool output`, async (t) => {

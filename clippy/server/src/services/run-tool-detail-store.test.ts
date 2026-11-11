@@ -24,6 +24,26 @@ async function fixture(options: Partial<Parameters<typeof createRunToolDetailSto
   return { store, config, basePath, companyId: randomUUID(), runId: randomUUID() };
 }
 
+it("retains and pages immutable message parts without applying a preview truncation", async () => {
+  const f = await fixture();
+  const text = "First line\n" + "x".repeat(11500) + "\nLAST_LINE";
+  const value = detail({ input: text, output: undefined, message: {
+    id: randomUUID(), part: 0, last: true, label: "Assignment input", diagnostic: false,
+  } });
+  const ref = await f.store.append(f.companyId, f.runId, value);
+  expect(ref).not.toBeNull();
+  await f.store.close();
+  const restarted = createRunToolDetailStore(f.config);
+  cleanup.push(() => restarted.close());
+  await expect(restarted.append(f.companyId, f.runId, value)).resolves.toEqual(ref);
+  const first = await restarted.read(f.companyId, f.runId, ref!);
+  const second = await restarted.read(f.companyId, f.runId, ref!, first.nextOffset!);
+  expect(first.input! + second.input!).toBe(text);
+  expect(second.input).toContain("LAST_LINE");
+  expect(second.nextOffset).toBeUndefined();
+  expect(first.truncated).toBe(false);
+});
+
 it("keeps failed uploads through restart, acknowledges immutable chunks, and reads paginated cloud details after cache cleanup", async () => {
   let time = Date.now(), failing = true;
   const objects = new Map<string, Buffer>();

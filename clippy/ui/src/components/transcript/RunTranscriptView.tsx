@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TranscriptEntry } from "../../adapters";
-import type { ToolRunDecision } from "@paperclipai/shared";
+import { runMessageSummarySchema, type RunMessageSummary, type ToolRunDecision } from "@paperclipai/shared";
 import { MarkdownBody, type MarkdownExternalReferenceMap } from "../MarkdownBody";
 import { cn, formatTokens } from "../../lib/utils";
 import { runningLabelText } from "../../lib/status-colors";
@@ -15,6 +15,9 @@ import {
 } from "lucide-react";
 import { toolTaxonomy } from "../task-chat/tool-taxonomy";
 import { LazyToolDetails } from "./LazyToolDetails";
+import { TranscriptText, type MessageExpansion } from "./TranscriptText";
+import { parseRoundLine, TranscriptRound, type RoundBlock } from "./TranscriptRound";
+import { Button } from "../ui/button";
 
 /** Family glyph for a tool block/row; the taxonomy falls back to Wrench. */
 function ToolFamilyIcon({ name, className }: { name: string; className?: string }) {
@@ -45,6 +48,15 @@ interface RunTranscriptViewProps {
 }
 
 type TranscriptBlock =
+  | RoundBlock
+  | {
+      type: "message_detail";
+      ts: string;
+      id: string;
+      summary: string;
+      label: string;
+      parts: RunMessageSummary[];
+    }
   | {
       type: "message";
       role: "assistant" | "user";
@@ -554,9 +566,64 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
   const blocks: TranscriptBlock[] = [];
   const pendingToolBlocks = new Map<string, Extract<TranscriptBlock, { type: "tool" }>>();
   const pendingActivityBlocks = new Map<string, Extract<TranscriptBlock, { type: "activity" }>>();
+  const rounds = new Map<string, RoundBlock>();
+  const messages = new Map<string, Extract<TranscriptBlock, { type: "message_detail" }>>();
 
   for (const entry of entries) {
     const previous = blocks[blocks.length - 1];
+
+    if (entry.kind === "stdout" || entry.kind === "system") {
+      const candidate = entry.text.replace(/^\[[^\]\r\n]+\]\s*/, "").trim();
+      if (candidate.startsWith('{"type":"clippy.message"')) {
+        let value: unknown;
+        try { value = JSON.parse(candidate); } catch { value = null; }
+        const parsed = runMessageSummarySchema.safeParse(value);
+        if (parsed.success) {
+          const part = parsed.data;
+          let message = messages.get(part.message.id);
+          if (!message) {
+            message = { type: "message_detail", id: part.message.id, ts: entry.ts,
+              summary: part.summary, label: part.message.label, parts: [] };
+            messages.set(part.message.id, message);
+            blocks.push(message);
+          }
+          if (!message.parts.some(item => item.message.part === part.message.part)) {
+            message.parts.push(part);
+            message.parts.sort((a, b) => a.message.part - b.message.part);
+          }
+          continue;
+        }
+      }
+      const event = parseRoundLine(entry.text);
+      if (event) {
+        const key = `${event.executionId}:${event.harness}`;
+        let round = rounds.get(key);
+        if (event.action === "round_start" || event.action === "model_request") {
+          if (!round || round.status !== "running" || event.action === "round_start" && round.round !== undefined) {
+            if (round?.status === "running") {
+              round.status = "unknown";
+              round.endTs = entry.ts;
+            }
+            round = { type: "round", ts: entry.ts, startTs: entry.ts, executionId: event.executionId,
+              harness: event.harness, round: event.round, status: "running", lines: [] };
+            rounds.set(key, round);
+            blocks.push(round);
+          }
+          if (event.action === "round_start") round.round = event.round;
+        } else if (round && (event.round === undefined || round.round === undefined || round.round === event.round)) {
+          round.round ??= event.round;
+          round.status = event.status ?? "completed";
+          round.endTs = entry.ts;
+        } else {
+          round = { type: "round", ts: entry.ts, startTs: entry.ts, endTs: entry.ts,
+            executionId: event.executionId, harness: event.harness, round: event.round,
+            status: event.status ?? "completed", lines: [] };
+          blocks.push(round);
+        }
+        round.lines.push(event.summary);
+        continue;
+      }
+    }
 
     if (entry.kind === "assistant" || entry.kind === "user") {
       const isStreaming = streaming && entry.kind === "assistant" && entry.delta === true;
@@ -628,6 +695,11 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
     }
 
     if (entry.kind === "run_terminal") {
+      for (const round of rounds.values()) {
+        if (round.status !== "running") continue;
+        round.status = entry.runState === "cancelled" ? "cancelled" : entry.runState === "failed" ? "failed" : "unknown";
+        round.endTs = entry.ts;
+      }
       blocks.push({ type: "event", ts: entry.ts, label: "terminal", tone: entry.runState === "failed" ? "error" : "info", text: `${entry.runState} · ${entry.disposition}`, detail: entry.stopReason });
       continue;
     }
@@ -823,6 +895,9 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
     }
   }
 
+  if (!streaming) {
+    for (const round of rounds.values()) if (round.status === "running") round.status = "unknown";
+  }
   return groupToolBlocks(groupCommandBlocks(blocks));
 }
 
@@ -835,6 +910,10 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
  */
 function transcriptBlockIdentity(block: TranscriptBlock): string {
   switch (block.type) {
+    case "round":
+      return `round:${block.executionId}:${block.harness}:${block.startTs}`;
+    case "message_detail":
+      return `message_detail:${block.id}`;
     case "message":
       return `message:${block.role}:${block.startTs}`;
     case "thinking":
@@ -905,10 +984,12 @@ function TranscriptMessageBlock({
   block,
   density,
   externalReferences,
+  expansion,
 }: {
   block: Extract<TranscriptBlock, { type: "message" }>;
   density: TranscriptDensity;
   externalReferences?: MarkdownExternalReferenceMap;
+  expansion: MessageExpansion;
 }) {
   const isAssistant = block.role === "assistant";
   const compact = density === "compact";
@@ -921,7 +1002,10 @@ function TranscriptMessageBlock({
           <span>User</span>
         </div>
       )}
-      <MarkdownBody
+      <TranscriptText
+        text={block.text}
+        markdown
+        expansion={expansion}
         className={cn(
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           // Match the default view's chat message body (IssueChatThread:
@@ -929,9 +1013,7 @@ function TranscriptMessageBlock({
           compact ? "text-xs leading-5 text-foreground/85" : "text-sm leading-6",
         )}
         externalReferences={externalReferences}
-      >
-        {block.text}
-      </MarkdownBody>
+      />
       {block.streaming && (
         <div className="mt-2 inline-flex items-center gap-1 text-(length:--text-nano) font-medium italic text-muted-foreground">
           <span className="relative flex h-1.5 w-1.5">
@@ -1465,10 +1547,12 @@ function TranscriptEventRow({
   block,
   density,
   externalReferences,
+  expansion,
 }: {
   block: Extract<TranscriptBlock, { type: "event" }>;
   density: TranscriptDensity;
   externalReferences?: MarkdownExternalReferenceMap;
+  expansion: MessageExpansion;
 }) {
   const compact = density === "compact";
   const toneClasses =
@@ -1492,15 +1576,16 @@ function TranscriptEventRow({
         )}
         <div className="min-w-0 flex-1">
           {block.label === "result" && block.tone !== "error" ? (
-            <MarkdownBody
+            <TranscriptText
+              text={block.text}
+              markdown
+              expansion={expansion}
               className={cn(
                 "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0 text-sky-700 dark:text-sky-300",
                 compact ? "text-(length:--text-micro) leading-5" : "text-xs leading-5",
               )}
               externalReferences={externalReferences}
-            >
-              {block.text}
-            </MarkdownBody>
+            />
           ) : (
             <div className={cn("whitespace-pre-wrap break-words", compact ? "text-(length:--text-micro)" : "text-xs")}>
               <span className="text-(length:--text-nano) font-semibold uppercase tracking-(--tracking-label) text-muted-foreground/70">
@@ -1695,37 +1780,19 @@ function TranscriptStdoutRow({
   block,
   density,
   collapseByDefault,
+  expansion,
 }: {
   block: Extract<TranscriptBlock, { type: "stdout" }>;
   density: TranscriptDensity;
   collapseByDefault: boolean;
+  expansion: MessageExpansion;
 }) {
-  const [open, setOpen] = useState(!collapseByDefault);
-
   return (
-    <div>
-      <div className="flex items-center gap-2">
-        <span className="text-(length:--text-nano) font-semibold uppercase tracking-(--tracking-caps) text-muted-foreground">
-          stdout
-        </span>
-        <button
-          type="button"
-          className="inline-flex h-5 w-5 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
-          onClick={() => setOpen((value) => !value)}
-          aria-label={open ? "Collapse stdout" : "Expand stdout"}
-        >
-          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        </button>
-      </div>
-      {open && (
-        <pre className={cn(
-          "mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-foreground/80",
+      <TranscriptText text={block.text} expansion={expansion} forceCollapse={collapseByDefault}
+        className={cn(
+          "overflow-x-auto whitespace-pre-wrap break-words font-mono text-foreground/80",
           density === "compact" ? "text-(length:--text-micro)" : "text-xs",
-        )}>
-          {block.text}
-        </pre>
-      )}
-    </div>
+        )} />
   );
 }
 
@@ -1861,6 +1928,7 @@ export function RunTranscriptView({
   thinkingClassName,
   externalReferences,
 }: RunTranscriptViewProps) {
+  const [messageExpansion, setMessageExpansion] = useState<MessageExpansion>({ open: false, revision: 0 });
   const toolDecisionMaps = useMemo(() => buildToolDecisionMaps(toolDecisions), [toolDecisions]);
   const blocks = useMemo(
     () => (mode === "raw" ? [] : normalizeTranscript(entries, streaming)),
@@ -1888,16 +1956,26 @@ export function RunTranscriptView({
 
   return (
     <div className={cn("space-y-3", className)}>
+      {visibleBlocks.some(block => block.type === "message_detail" || block.type === "message" || block.type === "stdout" || block.type === "event" && block.label === "result") && (
+        <div className="flex justify-end">
+          <Button size="sm" variant="ghost" onClick={() => setMessageExpansion(value => ({ open: !value.open, revision: value.revision + 1 }))}>
+            {messageExpansion.open ? "Collapse all messages" : "Expand all messages"}
+          </Button>
+        </div>
+      )}
       {keyedBlocks.map(({ block, key }, index) => (
         <div
           key={key}
           className={cn(index === keyedBlocks.length - 1 && streaming && "tc-stream-block-enter")}
         >
+          {block.type === "round" && <TranscriptRound block={block} />}
+          {block.type === "message_detail" && <TranscriptText text={block.summary} label={block.label} parts={block.parts} expansion={messageExpansion} streaming={streaming} />}
           {block.type === "message" && (
             <TranscriptMessageBlock
               block={block}
               density={density}
               externalReferences={externalReferences}
+              expansion={messageExpansion}
             />
           )}
           {block.type === "thinking" && (
@@ -1925,7 +2003,7 @@ export function RunTranscriptView({
           {block.type === "stderr_group" && <TranscriptStderrGroup block={block} density={density} />}
           {block.type === "system_group" && <TranscriptSystemGroup block={block} density={density} />}
           {block.type === "stdout" && (
-            <TranscriptStdoutRow block={block} density={density} collapseByDefault={collapseStdout} />
+            <TranscriptStdoutRow block={block} density={density} collapseByDefault={collapseStdout} expansion={messageExpansion} />
           )}
           {block.type === "activity" && <TranscriptActivityRow block={block} density={density} />}
           {block.type === "event" && (
@@ -1933,6 +2011,7 @@ export function RunTranscriptView({
               block={block}
               density={density}
               externalReferences={externalReferences}
+              expansion={messageExpansion}
             />
           )}
           {block.type === "provider_activity" && <TranscriptProviderActivity block={block} density={density} />}

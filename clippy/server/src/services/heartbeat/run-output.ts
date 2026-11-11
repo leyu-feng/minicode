@@ -202,13 +202,16 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
         } catch (error) {
           logger.warn({ err: error, runId }, "Tool detail persistence failed; detail is unavailable");
         }
-        const summary = {
+        const summary = detail.message ? {
+          type: "clippy.message", message: detail.message, summary: detail.summary,
+          detailRef, detailStatus: detailRef ? "available" : "unavailable",
+        } : {
           type: "clippy.tool", callId: detail.callId, phase: detail.phase, name: detail.name,
           summary: detail.summary, isError: Boolean(detail.error), durationMs: detail.durationMs,
           detailRef, detailStatus: detailRef ? "available" : "unavailable",
         };
         await appendRunEvent(currentRun, {
-          eventType: "agent_pool.tool", stream: "system", level: detail.error ? "warn" : "info",
+          eventType: detail.message ? "agent_pool.message" : "agent_pool.tool", stream: "system", level: detail.error ? "warn" : "info",
           message: detail.summary, payload: summary,
         });
         await appendIdentityRedactedLog("stdout", `\n${JSON.stringify(summary)}\n`);

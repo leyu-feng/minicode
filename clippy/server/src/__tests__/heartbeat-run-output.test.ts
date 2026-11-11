@@ -120,7 +120,7 @@ describePostgres("heartbeat output through adapter dispatch and finalization", (
     expect(finished.lastOutputBytes).toBe(finished.logBytes);
   });
 
-  it("stores tool bodies separately and publishes only a compact selectable reference", async () => {
+  it.each([false, true])("stores bodies separately and publishes a compact selectable reference (message: %s)", async message => {
     const chunkId = randomUUID(), callId = randomUUID();
     const append = vi.spyOn(getRunToolDetailStore(), "append").mockImplementation(async (_companyId, runId) =>
       ({ schema: "run_tool_detail_ref_v1", runId, chunkId }));
@@ -131,19 +131,21 @@ describePostgres("heartbeat output through adapter dispatch and finalization", (
         payload: {
           version: 1, id: chunkId, callId, phase: "end", name: "run_shell",
           summary: "Check SQL", ts: new Date().toISOString(), cwd: "workspace",
-          output: "selected-only body Authorization: Bearer private-canary", durationMs: 12, truncated: false,
+          [message ? "input" : "output"]: "selected-only body Authorization: Bearer private-canary",
+          durationMs: 12, truncated: false,
+          ...(message ? { message: { id: callId, part: 0, last: true, label: "Assignment input", diagnostic: false } } : {}),
         },
       });
     });
     const { finished, entries } = await execute(f);
     expect(finished.status, finished.error ?? undefined).toBe("succeeded");
-    expect(append).toHaveBeenCalledWith(f.companyId, finished.id, expect.objectContaining({ output: expect.not.stringContaining("private-canary") }));
+    expect(append).toHaveBeenCalledWith(f.companyId, finished.id, expect.objectContaining({ [message ? "input" : "output"]: expect.not.stringContaining("private-canary") }));
     expect(JSON.stringify(entries)).not.toContain("selected-only body");
-    expect(entries.map(entry => entry.chunk).join("")).toContain('without a trailing newline\n{"type":"clippy.tool"');
+    expect(entries.map(entry => entry.chunk).join("")).toContain(`without a trailing newline\n{"type":"clippy.${message ? "message" : "tool"}"`);
     const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, finished.id));
     expect(JSON.stringify(events)).not.toContain("selected-only body");
-    expect(events.find(event => event.eventType === "agent_pool.tool")?.payload).toMatchObject({
-      callId, detailRef: { runId: finished.id, chunkId }, durationMs: 12,
+    expect(events.find(event => event.eventType === (message ? "agent_pool.message" : "agent_pool.tool"))?.payload).toMatchObject({
+      ...(message ? { message: { id: callId } } : { callId, durationMs: 12 }), detailRef: { runId: finished.id, chunkId },
     });
   });
 });

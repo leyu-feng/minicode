@@ -331,6 +331,7 @@ export async function startAgentPoolWorker({
   const shellController = new AbortController()
   let previousServer = null
   let toolDetailsSupported = false
+  let transcriptDetailsSupported = false
   let retiring = false
   let idleSince = null
   let settle
@@ -499,9 +500,22 @@ export async function startAgentPoolWorker({
       writer.marker(source, summary, end)
       activity({ kind: "model_action", action, ...(turn ? { turn } : {}), summary: `[${source}] ${summary}` })
     }
+    const roundLog = value => {
+      writer.write(harnessName, `\n${JSON.stringify({
+        type: "clippy.round", executionId: run.id, harness: harnessName,
+        ...(Number.isInteger(value.turn) && value.turn > 0 ? { round: value.turn } : {}),
+        action: value.action, summary: value.summary,
+        ...(value.status ? { status: value.status } : {}),
+      })}\n`)
+    }
     const finishLogs = exitCode => {
       const outcome = exitCode === 0 ? "succeeded" : exitCode === 130 ? "cancelled" : exitCode === 124 ? "timed out" : "failed"
-      if (round) marker(harnessName, `Round ${round} end | ${outcome}`, true, "round_end", round)
+      if (round) {
+        if (transcriptDetailsSupported) roundLog({ action: "round_end", turn: round,
+          summary: `Round ${round} end | ${outcome}`,
+          status: exitCode === 0 ? "completed" : exitCode === 130 ? "cancelled" : "failed" })
+        else marker(harnessName, `Round ${round} end | ${outcome}`, true, "round_end", round)
+      }
       if (preparing) marker("prep", `Preparation end | ${outcome}`, true)
       if (turnStarted) marker(harnessName, `Turn end | ${outcome}`, true, "turn_end")
       marker("framework", `Assignment end | ${outcome}`, true)
@@ -832,13 +846,17 @@ export async function startAgentPoolWorker({
       run.session = session
       session.on("tool_detail", detail => {
         if (stopped || run.done || !toolDetailsSupported) return
+        if (detail.message && (!transcriptDetailsSupported || detail.message.diagnostic && outputMode === "normal")) return
         const bytes = Buffer.byteLength(JSON.stringify(detail))
         if (run.detailBytes + bytes > 8 * 1024 * 1024) {
           if (!run.detailLimitReported) {
             run.detailLimitReported = true
             writer.write(harnessName, "Tool detail upload limit reached; subsequent details are unavailable.\n", "stderr")
           }
-          const data = JSON.stringify({
+          const data = JSON.stringify(detail.message ? {
+            type: "clippy.message", message: detail.message, summary: detail.summary,
+            detailRef: null, detailStatus: "unavailable",
+          } : {
             type: "clippy.tool", callId: detail.callId, phase: detail.phase, name: detail.name,
             summary: detail.summary, isError: Boolean(detail.error), durationMs: detail.durationMs,
             detailRef: null, detailStatus: "unavailable",
@@ -853,16 +871,19 @@ export async function startAgentPoolWorker({
         if (stopped || run.done) return
         if (value.action === "round_start") {
           round = value.turn
-          writer.marker(harnessName, `Round ${round} start`)
+          if (!transcriptDetailsSupported) writer.marker(harnessName, `Round ${round} start`)
         } else if (value.action === "round_end" && round === value.turn) {
-          writer.marker(harnessName, `Round ${round} end`, true)
+          if (!transcriptDetailsSupported) writer.marker(harnessName, `Round ${round} end`, true)
           round = 0
         }
+        if (transcriptDetailsSupported && ["round_start", "round_end", "model_request"].includes(value.action)) roundLog(value)
         activity(value)
       })
-      session.on("output", ({ stream, data, toolSummary }) => {
+      session.on("output", ({ stream, data, toolSummary, messageSummary }) => {
         if (stopped || run.done || run.overflow) return
         if (toolSummary && toolDetailsSupported) return
+        if (messageSummary && transcriptDetailsSupported) return
+        if (transcriptDetailsSupported && /^# Model request \d+:/.test(data)) return
         if (outputMode === "normal" && stream === "command") return
         writer.write(harnessName, data, stream === "stderr" ? "stderr" : "stdout")
       })
@@ -973,7 +994,7 @@ export async function startAgentPoolWorker({
       }, 15_000)
       pingTimer.unref()
       send({ type: "hello", protocolVersion: PROTOCOL_VERSION,
-        capabilities: [INLINE_INSTRUCTIONS, SKILL_BUNDLE, "pr_inspector_v1", "pr_inspection_result_v1", "pr_inspection_checkpoint_v1", "task_frame_512k_v1", ...(prepareHostedRepositories
+        capabilities: [INLINE_INSTRUCTIONS, SKILL_BUNDLE, "pr_inspector_v1", "pr_inspection_result_v1", "pr_inspection_checkpoint_v1", "task_frame_512k_v1", "transcript_details_v1", ...(prepareHostedRepositories
           ? [hostedRoot ? "hosted_workspace_v2" : "hosted_repositories_v1", "retiring_ready_v1"] : []),
           ...(hostedRoot && hostedProviderTool ? ["provider_read_v1"] : []),
           ...(hostedRoot && hostedProviderPostTool ? ["provider_post_v1"] : []),
@@ -1003,6 +1024,7 @@ export async function startAgentPoolWorker({
           }
           previousServer = message.serverInstanceId
           toolDetailsSupported = message.capabilities?.includes("tool_details_v1") === true
+          transcriptDetailsSupported = toolDetailsSupported && message.capabilities?.includes("transcript_details_v1") === true
           clearTimeout(leaseTimer)
           leaseTimer = null
           if (active) {

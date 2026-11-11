@@ -184,7 +184,7 @@ describe("RunTranscriptView", () => {
     });
   });
 
-  it("renders successful result summaries as markdown in nice mode", () => {
+  it("collapses multiline successful results to their first meaningful line", () => {
     const html = renderToStaticMarkup(
       <ThemeProvider>
         <RunTranscriptView
@@ -207,10 +207,66 @@ describe("RunTranscriptView", () => {
       </ThemeProvider>,
     );
 
-    expect(html).toContain("<h2>Summary</h2>");
-    expect(html).toMatch(/<li[^>]*>fixed deploy config<\/li>/);
-    expect(html).toMatch(/<li[^>]*>posted issue update<\/li>/);
+    expect(html).toContain("Summary");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("fixed deploy config");
+    expect(html).not.toContain("posted issue update");
     expect(html).not.toContain("result");
+  });
+
+  it.each(["pi", "opencode"])("folds %s lifecycle lines even when a request precedes the round start", harness => {
+    const ts = "2026-11-11T00:00:00.000Z";
+    const entries: TranscriptEntry[] = [
+      { kind: "stdout", ts, text: `>> [${harness}] Round 2 start` },
+      { kind: "stdout", ts, text: `[${harness}] # Model request 3: model, 100 bytes` },
+      { kind: "stdout", ts, text: `[${harness}] Working on round 2` },
+      { kind: "stdout", ts, text: `<< [${harness}] Round 2 end` },
+      { kind: "stdout", ts, text: `[${harness}] # Model request 4: model, 200 bytes` },
+      { kind: "stdout", ts, text: `>> [${harness}] Round 3 start` },
+      { kind: "stdout", ts, text: `<< [${harness}] Round 3 end | failed` },
+    ];
+    const blocks = normalizeTranscript(entries, false);
+    expect(blocks.map(block => block.type)).toEqual(["round", "stdout", "round"]);
+    expect(blocks[0]).toMatchObject({ round: 2, status: "completed", lines: expect.arrayContaining([`[${harness}] # Model request 3: model, 100 bytes`]) });
+    expect(blocks[2]).toMatchObject({ round: 3, status: "failed", lines: expect.arrayContaining([`[${harness}] # Model request 4: model, 200 bytes`]) });
+  });
+
+  it("does not keep a spinner or invent success when a round-end event is missing", () => {
+    const entries: TranscriptEntry[] = [
+      { kind: "stdout", ts: "2026-11-11T00:00:00Z", text: ">> [pi] Round 1 start" },
+      { kind: "stdout", ts: "2026-11-11T00:00:02Z", text: ">> [pi] Round 2 start" },
+    ];
+    expect(normalizeTranscript(entries, true)).toMatchObject([{ status: "unknown" }, { status: "running" }]);
+    expect(normalizeTranscript(entries, false)).toMatchObject([{ status: "unknown" }, { status: "unknown" }]);
+  });
+
+  it("uses an observed round end to finish a pending model request even if its start marker was lost", () => {
+    const ts = "2026-11-11T00:00:00Z";
+    expect(normalizeTranscript([
+      { kind: "stdout", ts, text: "[opencode] # Model request 4: model, 200 bytes" },
+      { kind: "stdout", ts, text: "<< [opencode] Round 3 end" },
+    ], false)).toMatchObject([{ type: "round", round: 3, status: "completed" }]);
+  });
+
+  it.each(["failed", "cancelled"] as const)("settles a still-active round on an observed %s terminal event", runState => {
+    const ts = "2026-11-11T00:00:00Z";
+    const blocks = normalizeTranscript([
+      { kind: "stdout", ts, text: ">> [pi] Round 1 start" },
+      { kind: "run_terminal", ts, turnState: runState, runState, disposition: "blocked" },
+    ], true);
+    expect(blocks[0]).toMatchObject({ type: "round", status: runState, endTs: ts });
+  });
+
+  it("keeps structured rounds from different executions separate and their streaming keys stable", () => {
+    const entry = (executionId: string, action: string, ts: string): TranscriptEntry => ({
+      kind: "stdout", ts, text: JSON.stringify({ type: "clippy.round", executionId, harness: "pi", round: 1, action, summary: action }),
+    });
+    const start = entry("attempt-a", "round_start", "2026-11-11T00:00:00Z");
+    const before = keyTranscriptBlocks(normalizeTranscript([start], true))[0].key;
+    const blocks = normalizeTranscript([start, entry("attempt-a", "round_end", "2026-11-11T00:00:02Z"),
+      entry("attempt-b", "round_start", "2026-11-11T00:00:03Z")], true);
+    expect(blocks).toMatchObject([{ executionId: "attempt-a", status: "completed" }, { executionId: "attempt-b", status: "running" }]);
+    expect(keyTranscriptBlocks(blocks)[0].key).toBe(before);
   });
 
   it("links tool rows to pending governed action decisions", () => {

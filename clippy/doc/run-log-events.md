@@ -16,7 +16,7 @@ Acknowledgement backpressure bounds in-flight uploads so large tool bursts do no
 overrun the server's pending-output queue.
 This capability changes diagnostics only, not execution or completion authority.
 
-Assistant prose remains visible. Tool start/completion summaries update one row
+Assistant prose remains inspectable. Tool start/completion summaries update one row
 with its short purpose, state and duration. Arguments, working directory, output
 and errors are fetched only when the row is expanded. Run events and stdout retain
 small references, not the detail bodies. Detail reads use the same company,
@@ -70,6 +70,33 @@ delete Blob objects or unacknowledged spool files. Deployment/container creation
 RBAC and lifecycle configuration are operator actions; setting the URL does not
 provision them. Existing logs and workers are unchanged until the updated server
 and worker are deliberately rolled out; never recycle a busy worker for logging.
+
+### Compact messages and rounds
+
+The additional `transcript_details_v1` capability preserves full redacted
+assignment messages as ordered, immutable 12,000-character parts on the existing
+acknowledged detail channel. Each part uses `tool_detail` with optional `message`
+metadata (`id`, zero-based `part`, `last`, `label`, `diagnostic`). The server emits
+compact `clippy.message` references instead of the clipped stdout preview.
+Verbose-only diagnostics remain verbose-only. The existing per-run upload,
+spool, retention, authorization, and redaction limits still apply; unavailable
+parts are reported explicitly, never represented as a complete message.
+
+The normal transcript collapses multiline prose and stdout to a first-line
+preview. One expansion automatically reads all retained parts and pages, without
+a manual "Load more" step. Readers can copy the complete body and expand or
+collapse all messages; streaming does not override an individual choice.
+Historical worker-side truncation cannot be reversed and is labeled as capture
+loss rather than another expandable message.
+
+Updated workers emit `clippy.round` rows with execution identity, harness, round,
+action, summary, and an optional terminal status. Round numbers and model request
+numbers are independent. The UI updates a single activity divider in place,
+keeps request metadata inside it, and parses legacy Pi/OpenCode markers as a
+fallback. Missing terminal evidence never produces a success check or a spinner
+on a finished transcript. Raw mode retains the original records. Old servers
+continue receiving the previous text format until capability negotiation enables
+the new format.
 
 ## Native PRP Run-Log Events
 

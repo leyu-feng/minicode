@@ -67,10 +67,11 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
-  it("acknowledges tool details after persistence and deduplicates replay without adding details to stdout", async () => {
+  it.each([false, true])("acknowledges details after persistence and deduplicates replay (message: %s)", async message => {
     const { broker, worker } = await harness();
     const client = await worker();
     expect(client.welcome?.capabilities).toContain("tool_details_v1");
+    expect(client.welcome?.capabilities).toContain("transcript_details_v1");
     const ctx = context();
     ctx.onEvent = vi.fn(async () => {});
     const result = broker.execute(ctx);
@@ -79,6 +80,7 @@ describe("AgentPool execution channel", () => {
       version: 1, id: randomUUID(), callId: randomUUID(), phase: "end", name: "run_shell",
       summary: "Check connectivity", ts: new Date().toISOString(), cwd: "workspace",
       output: "large detail belongs outside stdout", durationMs: 12, truncated: false,
+      ...(message ? { message: { id: randomUUID(), part: 0, last: true, label: "Assignment input", diagnostic: false } } : {}),
     };
     const event = { type: "tool_detail", runId: ctx.runId, seq: 1, detail };
     client.send(event);
