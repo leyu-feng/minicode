@@ -97,6 +97,11 @@ time. Hovering shows command/input details before expansion; remote input detail
 load on demand. Full results remain inside the expanded tool. Pending approvals
 stay visible in the header.
 
+Turn-start and matching harness-version lines share a compact Assignment start
+divider. Adjacent turn-end and framework assignment-end markers share one
+Assignment end divider with the observed outcome. The original lines remain
+available on expansion and in raw mode; missing outcomes never imply success.
+
 Updated workers emit `clippy.round` rows with execution identity, harness, round,
 action, summary, and an optional terminal status. Round numbers and model request
 numbers are independent. The UI updates a single activity divider in place,

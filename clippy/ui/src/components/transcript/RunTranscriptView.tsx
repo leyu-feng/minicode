@@ -17,7 +17,7 @@ import {
 import { toolTaxonomy } from "../task-chat/tool-taxonomy";
 import { LazyToolDetails } from "./LazyToolDetails";
 import { TranscriptText, type MessageExpansion } from "./TranscriptText";
-import { parseRoundLine, TranscriptRound, type RoundBlock } from "./TranscriptRound";
+import { parseAssignmentLine, parseRoundLine, TranscriptRound, type AssignmentBlock, type RoundBlock } from "./TranscriptRound";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/tooltip";
 
@@ -51,6 +51,7 @@ interface RunTranscriptViewProps {
 
 type TranscriptBlock =
   | RoundBlock
+  | AssignmentBlock
   | {
       type: "message_detail";
       ts: string;
@@ -577,6 +578,27 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
     const previous = blocks[blocks.length - 1];
 
     if (entry.kind === "stdout" || entry.kind === "system") {
+      const assignment = parseAssignmentLine(entry.text);
+      if (assignment) {
+        if (assignment.phase === "harness") {
+          if (previous?.type === "assignment" && previous.phase === "start" && previous.harness === assignment.harness) {
+            previous.lines.push(assignment.summary);
+            continue;
+          }
+        } else {
+          if (previous?.type === "assignment" && previous.phase === "end" && assignment.phase === "end"
+            && assignment.harness === "framework" && previous.harness !== "framework") {
+            previous.lines.push(assignment.summary);
+            if (previous.status !== "failed" && (previous.status !== "cancelled" || assignment.status === "failed")) {
+              previous.status = assignment.status;
+            }
+          } else {
+            blocks.push({ type: "assignment", ts: entry.ts, phase: assignment.phase,
+              harness: assignment.harness, status: assignment.status, lines: [assignment.summary] });
+          }
+          continue;
+        }
+      }
       const candidate = entry.text.replace(/^\[[^\]\r\n]+\]\s*/, "").trim();
       if (candidate.startsWith('{"type":"clippy.message"')) {
         let value: unknown;
@@ -918,6 +940,8 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
  */
 function transcriptBlockIdentity(block: TranscriptBlock): string {
   switch (block.type) {
+    case "assignment":
+      return `assignment:${block.phase}:${block.harness}:${block.ts}`;
     case "round":
       return `round:${block.executionId}:${block.harness}:${block.startTs}`;
     case "message_detail":
@@ -1851,7 +1875,7 @@ export function RunTranscriptView({
           key={key}
           className={cn(index === keyedBlocks.length - 1 && streaming && "tc-stream-block-enter")}
         >
-          {block.type === "round" && <TranscriptRound block={block} />}
+          {(block.type === "round" || block.type === "assignment") && <TranscriptRound block={block} />}
           {block.type === "message_detail" && <TranscriptText text={block.summary} label={block.label} parts={block.parts} expansion={messageExpansion} streaming={streaming}
             plain={!block.parts[0]?.message.diagnostic && /assignment input|prep/i.test(block.label)} />}
           {block.type === "message" && (

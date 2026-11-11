@@ -245,6 +245,77 @@ describe("RunTranscriptView", () => {
     expect(html).toContain('aria-expanded="false"');
   });
 
+  it("folds turn and harness startup lines into one assignment start divider", () => {
+    const ts = "2026-11-11T00:00:00Z";
+    const entries: TranscriptEntry[] = [
+      { kind: "stdout", ts, text: ">> [claudecode] Turn start" },
+      { kind: "stdout", ts, text: "[claudecode] using claudecode.contained.2.1.302 harness" },
+    ];
+    expect(normalizeTranscript(entries, true)).toEqual([{
+      type: "assignment", phase: "start", ts, harness: "claudecode", status: undefined,
+      lines: entries.map(entry => "text" in entry ? entry.text : ""),
+    }]);
+    const html = renderToStaticMarkup(<RunTranscriptView entries={entries} />);
+    expect(html).toContain("Assignment start");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("Turn start");
+    expect(html).not.toContain("contained.2.1.302");
+    expect(html).not.toContain("Succeeded");
+    expect(html).not.toContain("animate-spin");
+    expect(keyTranscriptBlocks(normalizeTranscript(entries.slice(0, 1), true))[0].key)
+      .toBe(keyTranscriptBlocks(normalizeTranscript(entries, true))[0].key);
+  });
+
+  it("folds turn and framework completion into one assignment end divider", () => {
+    const ts = "2026-11-11T00:00:02Z";
+    const entries: TranscriptEntry[] = [
+      { kind: "stdout", ts, text: "<< [claudecode] Turn end | succeeded" },
+      { kind: "stdout", ts, text: "<< [framework] Assignment end | succeeded" },
+    ];
+    expect(normalizeTranscript(entries, false)).toMatchObject([{
+      type: "assignment", phase: "end", harness: "claudecode", status: "completed",
+      lines: entries.map(entry => "text" in entry ? entry.text : ""),
+    }]);
+    const html = renderToStaticMarkup(<RunTranscriptView entries={entries} />);
+    expect(html).toContain("Assignment end");
+    expect(html).toContain("Succeeded");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("Turn end");
+    expect(html).not.toContain("[framework]");
+    const raw = renderToStaticMarkup(<RunTranscriptView entries={entries} mode="raw" />);
+    expect(raw).toContain("Turn end");
+    expect(raw).toContain("[framework]");
+  });
+
+  it.each([
+    ["failed", "failed"],
+    ["timed out", "failed"],
+    ["cancelled", "cancelled"],
+    ["", "unknown"],
+  ])("preserves %s assignment outcomes without inventing success", (outcome, status) => {
+    expect(normalizeTranscript([
+      { kind: "stdout", ts: "2026-11-11T00:00:02Z", text: `<< [framework] Assignment end${outcome ? ` | ${outcome}` : ""}` },
+    ], false)).toMatchObject([{ type: "assignment", phase: "end", harness: "framework", status }]);
+  });
+
+  it("does not hide an observed turn failure behind a successful framework completion", () => {
+    expect(normalizeTranscript([
+      { kind: "stdout", ts: "2026-11-11T00:00:01Z", text: "<< [claudecode] Turn end | failed" },
+      { kind: "stdout", ts: "2026-11-11T00:00:02Z", text: "<< [framework] Assignment end | succeeded" },
+    ], false)).toMatchObject([{ type: "assignment", phase: "end", status: "failed" }]);
+  });
+
+  it("leaves unrelated harness announcements and completion prose intact", () => {
+    const blocks = normalizeTranscript([
+      { kind: "stdout", ts: "2026-11-11T00:00:00Z", text: ">> [claudecode] Turn start" },
+      { kind: "stdout", ts: "2026-11-11T00:00:01Z", text: "[pi] using pi.contained.1 harness" },
+      { kind: "stdout", ts: "2026-11-11T00:00:02Z", text: "Final completion details." },
+      { kind: "stdout", ts: "2026-11-11T00:00:03Z", text: "<< [framework] Assignment end | succeeded" },
+    ], false);
+    expect(blocks.map(block => block.type)).toEqual(["assignment", "stdout", "assignment"]);
+    expect(blocks[1]).toMatchObject({ text: "[pi] using pi.contained.1 harness\nFinal completion details." });
+  });
+
   it.each(["pi", "opencode"])("folds %s lifecycle lines even when a request precedes the round start", harness => {
     const ts = "2026-11-11T00:00:00.000Z";
     const entries: TranscriptEntry[] = [
