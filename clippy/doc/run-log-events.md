@@ -5,6 +5,72 @@ Run-log events write to the `heartbeat_run_events` table
 Paperclip Telemetry events, and they are not OpenTelemetry exports. A run-log
 event needs no operator endpoint.
 
+## AgentPool selectable tool details
+
+The optional `tool_details_v1` server capability separates readable progress
+from tool bodies. A worker sends stable per-session call IDs and immutable event
+IDs over the existing sequenced, acknowledged execution channel. Reconnect replay
+does not create another tool row or execute a tool again. Old servers still get
+compact text progress; old workers continue using their existing log format.
+Acknowledgement backpressure bounds in-flight uploads so large tool bursts do not
+overrun the server's pending-output queue.
+This capability changes diagnostics only, not execution or completion authority.
+
+Assistant prose remains visible. Tool start/completion summaries update one row
+with its short purpose, state and duration. Arguments, working directory, output
+and errors are fetched only when the row is expanded. Run events and stdout retain
+small references, not the detail bodies. Detail reads use the same company,
+run-telemetry and private-task permissions as run-log reads, disable HTTP caching,
+and reapply viewer/identity redaction. These records are instance-owned diagnostics,
+not first-party telemetry or OTLP exports.
+
+Capture redacts known credentials, sensitive keys, bearer tokens and hidden
+reasoning/media before transport. Text fields are capped at 24,000 characters
+with an explicit truncation marker; each compressed immutable chunk is at most
+192 KiB and contains one tool-phase record. This intentionally keeps a selected
+read small without repeatedly uploading an entire growing run log. Detail traffic
+has a separate 8 MiB per-run budget; after that, summaries continue and indicate
+that details were not retained. The UI pages long retained text in 8,192-character
+increments. It never silently claims to retain unlimited output.
+
+### Server storage configuration
+
+`RUN_TOOL_DETAILS_BASE_PATH` defaults to the instance's
+`data/run-tool-details`. Use a private, persistent, **single-server-owned** directory;
+do not point several server processes at the same spool. No extra file-share copy
+is required. Each committed chunk is fsynced and atomically published locally
+before its reference is emitted. Pending files survive process restart and are
+retried every five seconds with bounded exponential backoff up to five minutes.
+Abandoned unpublished temporary chunks are removed at startup. Up to four uploads
+run together, with 32 chunks processed per sweep.
+
+Set `RUN_TOOL_DETAILS_AZURE_CONTAINER_URL` to an existing Azure Blob container,
+for example `https://account.blob.core.windows.net/run-diagnostics`. The server
+uses `DefaultAzureCredential` and the storage token audience, never a SAS query
+or tokens in config. Grant its identity **Storage Blob Data Contributor** on that
+container. Standard Azure public, US Government and China Blob endpoints are
+supported; custom endpoints and insecure redirects are rejected. The archive is
+independent of `PAPERCLIP_STORAGE_PROVIDER` and the existing run-log S3 mirror.
+No new database migration, Azure Table, or credentials in `workers.json` are needed.
+
+Uploads are conditional immutable writes with SHA-256 metadata verification on
+retry. Only a confirmed upload changes a pending file into an evictable cache
+file. Cache files are removed after five minutes, or sooner under disk pressure;
+selected reads can then use Blob. Pending chunks are **never** evicted to make
+space. The spool is capped at 512 MiB; if pending data fills it, execution and
+summaries continue, the detail reference explicitly becomes unavailable, and a
+server warning records the storage failure. Without Blob, local files remain the
+authoritative retained copy; the same cap applies and does not silently delete
+older evidence. Upload failures retain data and appear in server warnings.
+
+Details expire from reads after 30 days, measured by the server at capture.
+Configure an Azure lifecycle deletion rule for prefix `run-tool-details/v1/`
+after 30 days to reclaim the cloud objects. Application expiry alone does not
+delete Blob objects or unacknowledged spool files. Deployment/container creation,
+RBAC and lifecycle configuration are operator actions; setting the URL does not
+provision them. Existing logs and workers are unchanged until the updated server
+and worker are deliberately rolled out; never recycle a busy worker for logging.
+
 ## Native PRP Run-Log Events
 
 Fresh remote Codex model substitution emits `runner.model_fallback` on the

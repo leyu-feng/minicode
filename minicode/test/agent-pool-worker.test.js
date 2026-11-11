@@ -13,6 +13,7 @@ import { zipSync } from "fflate"
 import { WebSocketServer } from "ws"
 import { agentPoolServerUrl, loadWorkerCredential, parseWorkerCliOptions, parseWorkerReferences, startAgentPoolWorker } from "../server/agent-pool-worker.js"
 import { AgentSession } from "../server/agent-session.js"
+import { CopilotCliSession } from "../server/copilot-cli-session.js"
 import { createHostedProviderTool, createHostedProviderPostTool } from "../server/hosted-provider.js"
 import { startHostedKustoSkill } from "../server/hosted-kusto.js"
 
@@ -109,11 +110,11 @@ async function harness(t, factory, workerOptions = {}) {
     await new Promise((resolve) => http.close(resolve))
     await fs.rm(directory, { recursive: true, force: true })
   })
-  async function welcome(index, ack = 0, completed = false) {
+  async function welcome(index, ack = 0, completed = false, capabilities = ["retiring_ready_v1"]) {
     await waitUntil(() => connections[index]?.messages.some((message) => message.type === "hello"))
     const peer = connections[index]
     const hello = peer.messages.find((message) => message.type === "hello")
-    peer.send({ type: "welcome", serverInstanceId, runId: hello.runId, ack, completed, capabilities: ["retiring_ready_v1"] })
+    peer.send({ type: "welcome", serverInstanceId, runId: hello.runId, ack, completed, capabilities })
     return peer
   }
   return {
@@ -1334,6 +1335,96 @@ for (const workspaceMode of ["clone", "worktree"]) {
     assert.equal(sessions.length, 2)
   })
 }
+
+for (const supportsDetails of [false, true]) {
+test(`Devbox Copilot runs default assignments with separate details supported=${supportsDetails}`, async t => {
+  const fixture = await harness(t, options => new CopilotCliSession({
+    ...options, executable: process.execPath, model: "gpt-test",
+    spawnProcess: (file, args, settings) => childProcess.spawn(process.execPath, ["--input-type=module", "-e", `
+      import fs from "node:fs/promises";
+      for await (const chunk of process.stdin) {}
+      const config = JSON.parse(await fs.readFile(process.env.TEST_MCP_PATH, "utf8")).mcpServers.hosted;
+      console.log(JSON.stringify({ type: "assistant.turn_start" }));
+      const response = await fetch(config.url, {
+        method: "POST", headers: { ...config.headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
+          params: { name: "run_shell", arguments: { command: ${JSON.stringify(process.platform === "win32" ? "Get-Content -LiteralPath 'tracked.txt'" : "cat tracked.txt")} } } })
+      });
+      if (!response.ok || (await response.json()).result.isError) throw new Error("Assignment tool failed");
+      console.log(JSON.stringify({ type: "assistant.message", data: { content: "Assignment complete private-run-token" } }));
+      console.log(JSON.stringify({ type: "result", exitCode: 0 }));
+    `], {
+      ...settings, windowsHide: true,
+      env: { ...settings.env, TEST_MCP_PATH: args[args.indexOf("--additional-mcp-config") + 1].slice(1) },
+    }),
+  }), { defaultHarnessName: "copilotcli" })
+  const peer = await fixture.welcome(0, 0, false, ["retiring_ready_v1", ...(supportsDetails ? ["tool_details_v1"] : [])])
+  const result = await executeTask(peer, { runId: "devbox-copilot", agent, authToken: "private-run-token" })
+  assert.equal(result.summary, "Assignment complete [redacted]")
+  const output = peer.messages.filter(message => message.type === "log").map(message => message.data).join("")
+  for (const text of ["[copilotcli]", "harness=copilotcli", "Assignment complete"]) {
+    assert.ok(output.includes(text), output)
+  }
+  assert.ok(!output.includes("private-run-token"))
+  assert.ok(!output.includes("[minicode]"))
+  assert.ok(!output.includes("committed"))
+  const details = peer.messages.filter(message => message.type === "tool_detail").map(message => message.detail)
+  assert.equal(details.length, supportsDetails ? 2 : 0)
+  if (supportsDetails) {
+    assert.equal(details[0].callId, details[1].callId)
+    assert.ok(details[0].input.includes("tracked.txt"))
+    assert.ok(details[1].output.includes("committed"))
+  } else assert.ok(output.includes("# tool run_shell"))
+  assert.ok(!JSON.stringify(details).includes("private-run-token"))
+  assert.ok(!peer.messages.find(message => message.type === "hello").capabilities.includes("harness_copilotcli_v1"))
+})
+}
+
+test("detail uploads apply backpressure, replay only unacknowledged events, and keep summaries after the detail cap", async t => {
+  class Session extends EventEmitter {
+    async write() {
+      for (let i = 0; i < 400; i++) this.emit("tool_detail", {
+        version: 1, id: randomUUID(), callId: randomUUID(), phase: "end", name: "run_shell",
+        summary: "Check connectivity", ts: new Date().toISOString(), cwd: "workspace",
+        output: "x".repeat(24000), truncated: false,
+      })
+      return { exitCode: 0 }
+    }
+    interrupt() {}
+    dispose() {}
+  }
+  const fixture = await harness(t, () => new Session())
+  const capabilities = ["retiring_ready_v1", "tool_details_v1"]
+  const peer = await fixture.welcome(0, 0, false, capabilities)
+  await waitUntil(() => peer.messages.some(message => message.type === "ready"))
+  peer.send({ type: "task", runId: "detail-burst", agent, context: {} })
+  await waitUntil(() => peer.messages.filter(message => message.type === "tool_detail").length >= 5)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  const batch = peer.messages.filter(message => message.runId === "detail-burst" && Number.isSafeInteger(message.seq))
+  assert.ok(batch.reduce((bytes, event) => bytes + Buffer.byteLength(JSON.stringify(event)), 0) <= 256 * 1024)
+  assert.ok(!batch.some(event => event.type === "result"))
+  const acknowledged = batch.at(-1).seq
+  peer.socket.terminate()
+  const resumed = await fixture.welcome(1, acknowledged, false, capabilities)
+  const received = []
+  resumed.socket.on("message", raw => {
+    const event = JSON.parse(raw.toString())
+    if (!Number.isSafeInteger(event.seq)) return
+    received.push(event)
+    resumed.send({ type: "ack", runId: event.runId, seq: event.seq, completed: event.type === "result" })
+  })
+  await waitUntil(() => resumed.messages.some(message => message.type === "result"))
+  await waitUntil(() => resumed.messages.some(message => message.type === "ready"))
+  assert.deepEqual(received.map(event => event.seq), received.map((_, i) => acknowledged + i + 1))
+  const events = [...batch, ...received]
+  const details = events.filter(event => event.type === "tool_detail")
+  assert.ok(details.reduce((bytes, event) => bytes + Buffer.byteLength(JSON.stringify(event.detail)), 0) <= 8 * 1024 * 1024)
+  const output = events.filter(event => event.type === "log").map(event => event.data).join("")
+  const unavailable = output.match(/"detailStatus":"unavailable"/g) ?? []
+  assert.ok(unavailable.length > 0)
+  assert.equal(details.length + unavailable.length, 400)
+  assert.ok(output.includes("Tool detail upload limit reached"))
+})
 
 for (const outputMode of ["normal", "verbose"]) {
   test(`${outputMode} worker output preserves summaries and errors with mode-specific raw tool output`, async (t) => {

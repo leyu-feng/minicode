@@ -1,4 +1,5 @@
 import type { AgentAppearance } from "@paperclipai/shared";
+import type { RunToolDetailPage, RunToolDetailRef } from "@paperclipai/shared";
 import { HEARTBEAT_RUN_LIST_DEFAULT_LIMIT } from "@paperclipai/shared";
 import type { IssueRecoveryAction } from "@paperclipai/shared";
 import type {
@@ -153,6 +154,11 @@ export const heartbeatsApi = {
     }>(
       `/heartbeat-runs/${runId}/log?offset=${encodeURIComponent(String(offset))}&limitBytes=${encodeURIComponent(String(limitBytes))}`,
       options,
+    ),
+  toolDetail: (ref: RunToolDetailRef, offset = 0, options?: RequestOptions) =>
+    api.get<RunToolDetailPage>(
+      `/heartbeat-runs/${encodeURIComponent(ref.runId)}/tool-detail/${encodeURIComponent(ref.chunkId)}?offset=${offset}`,
+      { ...options, cache: "no-store" },
     ),
   workspaceOperations: (runId: string) =>
     api.get<WorkspaceOperation[]>(

@@ -13,6 +13,7 @@ import {
   agentPoolHelloSchema, agentPoolInstructionsSchema, agentPoolNameSchema, agentPoolTaskSchema,
   agentPoolHarnessIdSchema,
   AGENT_POOL_CLAUDECODE_DEFAULT_MODEL,
+  AGENT_POOL_TOOL_DETAILS, runToolDetailSchema,
 } from "@paperclipai/shared";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../adapters/types.js";
 import { readAgentPoolSkills } from "./agent-pool-skills.js";
@@ -23,6 +24,10 @@ export const AGENT_POOL_MAX_FRAME = 512 * 1024;
 const MAX_RUN_OUTPUT = 2 * 1024 * 1024;
 const readySchema = z.object({ type: z.literal("ready"), retiring: z.boolean().optional() });
 const eventSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("tool_detail"), runId: z.string(), seq: z.number().int().positive(),
+    detail: runToolDetailSchema,
+  }),
   z.object({
     type: z.literal("log"), runId: z.string(), seq: z.number().int().positive(),
     stream: z.enum(["stdout", "stderr"]), data: z.string().max(16_384),
@@ -39,6 +44,7 @@ interface Run {
   id: string;
   seq: number;
   bytes: number;
+  detailBytes?: number;
   cancelled: boolean;
   completed: boolean;
   result?: AdapterExecutionResult;
@@ -221,7 +227,7 @@ export class AgentPoolBroker {
           clearTimeout(handshakeTimeout);
           this.send(peer, {
             type: "welcome", protocolVersion: AGENT_POOL_PROTOCOL_VERSION, serverInstanceId: this.serverInstanceId,
-            capabilities: ["retiring_ready_v1"],
+            capabilities: ["retiring_ready_v1", AGENT_POOL_TOOL_DETAILS],
             runId: peer.run?.id ?? null, ack: peer.run?.seq ?? 0,
             completed: peer.run?.completed ?? false,
           });
@@ -262,6 +268,16 @@ export class AgentPoolBroker {
           run.bytes += Buffer.byteLength(event.data);
           if (run.bytes > MAX_RUN_OUTPUT) throw new Error("AgentPool run exceeded the output limit");
           await run.ctx.onLog(event.stream, event.data);
+        } else if (event.type === "tool_detail") {
+          run.detailBytes = (run.detailBytes ?? 0) + Buffer.byteLength(JSON.stringify(event.detail));
+          if (run.detailBytes > 8 * 1024 * 1024) throw new Error("AgentPool tool detail limit exceeded");
+          await run.ctx.onEvent?.({
+            eventType: "agent_pool.tool_detail",
+            stream: "system",
+            level: event.detail.error ? "warn" : "info",
+            message: event.detail.summary,
+            payload: event.detail,
+          });
         } else {
           run.completed = true;
           run.cleanup();

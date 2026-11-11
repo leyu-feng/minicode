@@ -14,6 +14,7 @@ import {
   User,
 } from "lucide-react";
 import { toolTaxonomy } from "../task-chat/tool-taxonomy";
+import { LazyToolDetails } from "./LazyToolDetails";
 
 /** Family glyph for a tool block/row; the taxonomy falls back to Wrench. */
 function ToolFamilyIcon({ name, className }: { name: string; className?: string }) {
@@ -525,7 +526,7 @@ function groupToolBlocks(blocks: TranscriptBlock[]): TranscriptBlock[] {
   };
 
   for (const block of blocks) {
-    if (block.type === "tool" && !isCommandTool(block.name, block.input)) {
+    if (block.type === "tool" && !isCommandTool(block.name, block.input) && !asRecord(block.input)?.clippyTool) {
       if (!groupTs) groupTs = block.ts;
       groupEndTs = block.endTs ?? block.ts;
       pending.push({
@@ -1034,7 +1035,8 @@ function TranscriptToolCard({
   density: TranscriptDensity;
   decision: ToolRunDecision | null;
 }) {
-  const [open, setOpen] = useState(block.status === "error" || Boolean(decision?.pendingAction || decision?.denialReason));
+  const remoteInput = asRecord(block.input)?.clippyTool ? asRecord(block.input) : null;
+  const [open, setOpen] = useState((!remoteInput && block.status === "error") || Boolean(decision?.pendingAction || decision?.denialReason));
   const compact = density === "compact";
   const parsedResult = parseStructuredToolResult(block.result);
   const statusLabel =
@@ -1061,7 +1063,9 @@ function TranscriptToolCard({
         ? "text-emerald-600 dark:text-emerald-300"
         : "text-blue-600 dark:text-blue-300",
   );
-  const summary = block.status === "running"
+  const summary = remoteInput
+    ? `${String(remoteInput.summary ?? "")}${typeof remoteInput.durationMs === "number" ? ` · ${remoteInput.durationMs} ms` : ""}`
+    : block.status === "running"
     ? summarizeToolInput(block.name, block.input, density)
     : block.status === "completed" && parsedResult?.body
       ? truncate(parsedResult.body.split("\n")[0] ?? parsedResult.body, compact ? 84 : 140)
@@ -1104,7 +1108,7 @@ function TranscriptToolCard({
       {open && (
         <div className="mt-3">
           <div className={detailsClass}>
-            <div className={cn("grid gap-3", compact ? "grid-cols-1" : "lg:grid-cols-2")}>
+            {remoteInput ? <LazyToolDetails input={remoteInput} /> : <div className={cn("grid gap-3", compact ? "grid-cols-1" : "lg:grid-cols-2")}>
               <div>
                 <div className="mb-1 text-(length:--text-nano) font-semibold uppercase tracking-(--tracking-caps) text-muted-foreground">
                   Input
@@ -1124,7 +1128,7 @@ function TranscriptToolCard({
                   {block.result ? formatToolPayload(block.result) : "Waiting for result..."}
                 </pre>
               </div>
-            </div>
+            </div>}
             <ToolDecisionDetails decision={decision} compact={compact} />
           </div>
         </div>

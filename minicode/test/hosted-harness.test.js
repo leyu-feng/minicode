@@ -518,6 +518,7 @@ for (const harness of ["opencode", "pi"]) {
     const output = []
     const events = []
     const activities = []
+    const details = []
     let invocation
     const session = new HostedHarnessSession({
       harness, id: "run", cwd: process.cwd(), instructions: "Trusted worker policy",
@@ -535,6 +536,7 @@ for (const harness of ["opencode", "pi"]) {
     t.after(() => session.dispose())
     session.on("output", event => { output.push(event.data); events.push(event) })
     session.on("activity", event => activities.push(event))
+    session.on("tool_detail", event => details.push(event))
     assert.deepEqual(await session.write("Assigned task\n"), { exitCode: 0, summary: "Finished" })
     assert.deepEqual(calls, [{ route: "approved" }])
     assert.equal(invocation.args.some(arg => arg.includes("Assigned task") || arg.includes("run-secret")), false)
@@ -550,10 +552,12 @@ for (const harness of ["opencode", "pi"]) {
     assert.deepEqual(activities.filter(event => event.action === "model_request").map(event => event.turn), [1, 1, 2])
     assert.deepEqual(activities.filter(event => event.action === "provider_read").map(event => event.kind), ["model_action", "tool_result"])
     assert.deepEqual(activities.filter(event => event.target === "native-1").map(event => event.kind), ["model_action", "tool_result"])
-    assert.ok(activities.some(event => event.kind === "tool_result" && event.summary.includes("shell result")))
+    assert.ok(details.some(event => event.phase === "end" && event.output.includes("shell result")))
+    assert.ok(!JSON.stringify(activities).includes("shell result"))
+    assert.ok(!events.filter(event => event.stream !== "command").some(event => event.data.includes("shell result")))
     assert.ok(events.some(event => event.stream === "command" && event.data.includes("# system instructions")))
     assert.ok(events.some(event => event.stream === "command" && event.data.includes("# model request 1")))
-    const logs = JSON.stringify({ events, activities })
+    const logs = JSON.stringify({ events, activities, details })
     for (const secret of ["run-secret", "private-token", "unregistered-credential", "HIDDEN_REASONING"]) assert.ok(!logs.includes(secret), secret)
   })
 }
@@ -734,10 +738,14 @@ for (const harness of ["opencode", "pi"]) {
     })
     t.after(() => session.dispose())
     const activities = []
+    const details = []
     session.on("activity", event => activities.push(event))
+    session.on("tool_detail", event => details.push(event))
     assert.deepEqual(await session.write("Task"), { exitCode: 0 })
     assert.deepEqual(activities.filter(event => event.target === "refused").map(event => event.kind), ["model_action", "error"])
-    assert.ok(activities.some(event => event.kind === "error" && /Permission refused/.test(event.summary) && /17 ms/.test(event.summary)))
+    assert.ok(activities.some(event => event.kind === "error" && event.action.includes("provider_read")))
+    assert.ok(details.some(event => event.phase === "end" && /Permission refused/.test(event.error) && event.durationMs === 17))
+    assert.ok(!JSON.stringify(activities).includes("Permission refused"))
   })
 }
 

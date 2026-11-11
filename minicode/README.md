@@ -479,6 +479,58 @@ opened.
 
 ## Connect as an AgentPool worker
 
+### Use native Copilot CLI on a devbox
+
+The normal worker still uses Minicode. Opt into the installed Copilot CLI with
+`--harness copilotcli`; Minicode then handles pairing, assignment isolation,
+workspace preparation, task tools and reporting, while Copilot performs inference.
+No Minicode model profile is needed:
+
+```powershell
+node .\minicode\cli.js worker --server https://clippy.example.test `
+  --worker-id <paired-worker-id> --repo-root E:\Code `
+  --workspace-mode workspace --worker-name windows-one `
+  --entra-user operator@example.test --harness copilotcli --model gpt-5.6-sol
+```
+
+Install Copilot CLI and sign in under the worker's OS account before starting.
+The worker discovers `copilot.exe` on Windows or `copilot` elsewhere from `PATH`.
+Use `--copilot-path <absolute-executable>` for another installation; Windows
+requires the native `.exe`, not an npm `.cmd` wrapper. `--model` selects the native
+Copilot model (default `auto`), not a Minicode deployment. Copilot uses the local
+CLI sign-in and home/profile; inherited API-provider overrides and token
+environment variables are removed, and assignment credentials remain in the
+trusted tools rather than the Copilot child environment.
+
+The server continues assigning this worker's `default` harness. This is a local
+execution choice, not the Hosted `copilotcli` catalog entry, which still requires
+assignment-scoped GitHub credentials. Built-in MCP servers, custom instructions
+and interactive questions are disabled; the model receives only the explicitly
+allowlisted workspace and assignment tools. This is not an OS sandbox.
+
+Uploaded normal logs identify `[copilotcli]`, include assistant progress,
+compact redacted tool-purpose rows and durations, and emit a heartbeat after
+30 seconds without progress. With a server advertising `tool_details_v1`, tool
+arguments, output and errors travel separately; opening the row loads paginated
+details. Older servers continue receiving compact text rows. Assistant prose is
+not shortened. `--output-mode verbose` adds the existing bounded inline
+diagnostics and is not required for selectable details. Missing executables,
+authentication/model errors and incomplete CLI results fail explicitly; there is
+no fallback to Minicode inference.
+
+Each assignment launches a fresh CLI conversation and removes its temporary
+MCP credential file at completion or cancellation. Existing workers keep their
+current harness until explicitly restarted; wait until they are idle before
+switching. Existing pairing and workspace flags are unchanged.
+
+The server stores compressed immutable detail chunks in a bounded local spool.
+Set `RUN_TOOL_DETAILS_AZURE_CONTAINER_URL` to an existing Azure Blob container
+HTTPS URL to archive them using the server's `DefaultAzureCredential` identity
+(managed identity in Azure or local Azure sign-in). Do not use a SAS URL or store
+credentials in worker inventories. See `clippy/doc/run-log-events.md` for limits,
+cache cleanup, retention and deployment configuration. This does not change
+workspace/file storage or require Azure Table.
+
 ### Devbox workspace-root mode
 
 Use `--workspace-mode workspace --repo-root E:\Code` to start at a non-Git

@@ -67,6 +67,32 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("acknowledges tool details after persistence and deduplicates replay without adding details to stdout", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker();
+    expect(client.welcome?.capabilities).toContain("tool_details_v1");
+    const ctx = context();
+    ctx.onEvent = vi.fn(async () => {});
+    const result = broker.execute(ctx);
+    await client.take("task");
+    const detail = {
+      version: 1, id: randomUUID(), callId: randomUUID(), phase: "end", name: "run_shell",
+      summary: "Check connectivity", ts: new Date().toISOString(), cwd: "workspace",
+      output: "large detail belongs outside stdout", durationMs: 12, truncated: false,
+    };
+    const event = { type: "tool_detail", runId: ctx.runId, seq: 1, detail };
+    client.send(event);
+    await client.take("ack");
+    client.send(event);
+    await client.take("ack");
+    expect(ctx.onEvent).toHaveBeenCalledTimes(1);
+    expect(ctx.onEvent).toHaveBeenCalledWith(expect.objectContaining({ eventType: "agent_pool.tool_detail", payload: detail }));
+    expect(ctx.onLog).not.toHaveBeenCalled();
+    client.send({ type: "result", runId: ctx.runId, seq: 2, exitCode: 0 });
+    await client.take("ack");
+    client.send({ type: "ready" });
+    await expect(result).resolves.toMatchObject({ exitCode: 0 });
+  });
   it("does not reserve or dispatch workers that cannot use authenticated inspection receipts", async () => {
     const { broker, worker } = await harness();
     const client = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1", "pr_inspector_v1"], {}, false);
@@ -239,7 +265,7 @@ describe("AgentPool execution channel", () => {
   it("settles an acknowledged result with retirement without making the worker available again", async () => {
     const { broker, worker } = await harness();
     const client = await worker();
-    expect(client.welcome).toMatchObject({ capabilities: ["retiring_ready_v1"] });
+    expect(client.welcome).toMatchObject({ capabilities: expect.arrayContaining(["retiring_ready_v1"]) });
     const ctx = context();
     const result = broker.execute(ctx);
     await client.take("task");

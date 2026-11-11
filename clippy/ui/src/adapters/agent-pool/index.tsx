@@ -6,6 +6,35 @@ import { HostedRepositorySelect } from "../../components/HostedRepositorySelect"
 import { HostedHarnessSelect } from "../../components/HostedHarnessSelect";
 import { AgentGitHubLogin } from "../../components/AgentGitHubLogin";
 import { AGENT_POOL_CLAUDECODE_DEFAULT_MODEL, agentPoolRequiresGitHubLogin } from "@paperclipai/shared";
+import { runToolSummarySchema } from "@paperclipai/shared";
+import type { TranscriptEntry } from "../types";
+
+export function parseAgentPoolStdoutLine(line: string, ts: string): TranscriptEntry[] {
+  // Legacy workers prefix stdout. New servers emit unprefixed structured summaries.
+  const candidate = line.replace(/^\[[^\]\r\n]+\]\s*/, "");
+  if (candidate.startsWith('{"type":"clippy.tool"')) {
+    let value: unknown;
+    try { value = JSON.parse(candidate); } catch { return processUIAdapter.parseStdoutLine(line, ts); }
+    const parsed = runToolSummarySchema.safeParse(value);
+    if (parsed.success) {
+      const summary = parsed.data;
+      const entries: TranscriptEntry[] = [{
+        kind: "tool_call", ts, name: summary.name, toolUseId: summary.callId,
+        input: {
+          clippyTool: true, summary: summary.summary, durationMs: summary.durationMs,
+          [summary.phase === "start" ? "startDetailRef" : "endDetailRef"]: summary.detailRef,
+          ...(summary.detailStatus === "unavailable" ? { detailsUnavailable: true } : {}),
+        },
+      }];
+      if (summary.phase === "end") entries.push({
+        kind: "tool_result", ts, toolUseId: summary.callId, toolName: summary.name,
+        content: summary.summary, isError: summary.isError,
+      });
+      return entries;
+    }
+  }
+  return processUIAdapter.parseStdoutLine(line, ts);
+}
 
 function AgentPoolConfigFields({ section, isCreate, values, set, config, eff, mark, companyId, agentId }: AdapterConfigFieldsProps) {
   const current = isCreate ? values?.adapterSchemaValues ?? {} : config;
@@ -85,5 +114,5 @@ export const agentPoolUIAdapter: UIAdapterModule = {
       ...(config.referenceRepositoryIds ? { referenceRepositoryIds: config.referenceRepositoryIds } : {}),
     };
   },
-  parseStdoutLine: processUIAdapter.parseStdoutLine,
+  parseStdoutLine: parseAgentPoolStdoutLine,
 };

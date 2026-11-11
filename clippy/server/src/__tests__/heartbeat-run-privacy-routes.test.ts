@@ -29,6 +29,7 @@ import { activityRoutes } from "../routes/activity.js";
 import { agentRoutes } from "../routes/agents.js";
 import { authorizationService } from "../services/authorization.js";
 import { getHeartbeatRunReadDecisions } from "../services/heartbeat-run-privacy.js";
+import { getRunToolDetailStore } from "../services/run-tool-detail-store.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -263,6 +264,7 @@ describeEmbeddedPostgres("heartbeat run privacy routes", { concurrent: false }, 
       `/api/heartbeat-runs/${fixture.privateRunId}`,
       `/api/heartbeat-runs/${fixture.privateRunId}/events`,
       `/api/heartbeat-runs/${fixture.privateRunId}/log`,
+      `/api/heartbeat-runs/${fixture.privateRunId}/tool-detail/${randomUUID()}`,
       `/api/heartbeat-runs/${fixture.privateRunId}/workspace-operations`,
       `/api/workspace-operations/${fixture.operationId}/log`,
     ]) {
@@ -320,6 +322,25 @@ describeEmbeddedPostgres("heartbeat run privacy routes", { concurrent: false }, 
       expect(linkedIssues.status).toBe(200);
       expect(linkedIssues.body[0]).toMatchObject({ issueId: fixture.issueId, title: "Confidential email triage" });
     }
+  });
+
+  it("authorizes scoped tool detail reads before storage and rejects invalid pages", async () => {
+    const fixture = await seedFixture();
+    const read = vi.spyOn(getRunToolDetailStore(), "read").mockResolvedValue({ status: "available", output: "selected detail" });
+    const chunkId = randomUUID();
+    const route = `/api/heartbeat-runs/${fixture.privateRunId}/tool-detail/${chunkId}`;
+    const denied = await request(createApp(fixture.companyId, fixture.otherAgentId)).get(route);
+    expect(denied.status).toBe(404);
+    expect(read).not.toHaveBeenCalled();
+    const allowed = await request(createApp(fixture.companyId, fixture.ownerAgentId)).get(`${route}?offset=4&limit=8`);
+    expect(allowed.status).toBe(200);
+    expect(allowed.headers["cache-control"]).toContain("no-store");
+    expect(allowed.body).toEqual({ status: "available", output: "selected detail" });
+    expect(read).toHaveBeenCalledWith(fixture.companyId, fixture.privateRunId,
+      { schema: "run_tool_detail_ref_v1", runId: fixture.privateRunId, chunkId }, 4, 8);
+    const malformed = await request(createApp(fixture.companyId, fixture.ownerAgentId)).get(`${route}?offset=-1`);
+    expect(malformed.status).toBe(400);
+    expect(read).toHaveBeenCalledTimes(1);
   });
 
   it("filters credential diagnostics in full-run and history responses by viewer", async () => {

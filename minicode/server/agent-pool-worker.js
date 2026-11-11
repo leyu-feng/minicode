@@ -252,6 +252,7 @@ export async function startAgentPoolWorker({
   azureDevOpsPublisherFactory = createAzureDevOpsPublisher,
   workspaceFactory = prepareWorkerWorkspace,
   sessionFactory = (options) => new AgentSession(options),
+  defaultHarnessName = "minicode",
   harnesses = ["default"],
   prepareHostedRepositories, hostedWorkspaceMode, hostedPublicationTool, hostedProviderTool, hostedProviderPostTool, hostedKustoSkill, gitEnvironment, onStateChange = async () => {},
   onActivity, onModelFailure,
@@ -329,6 +330,7 @@ export async function startAgentPoolWorker({
   const powerShells = new Map()
   const shellController = new AbortController()
   let previousServer = null
+  let toolDetailsSupported = false
   let retiring = false
   let idleSince = null
   let settle
@@ -400,6 +402,7 @@ export async function startAgentPoolWorker({
       throw new Error("AgentPool acknowledgement mismatch")
     }
     active.events = active.events.filter((event) => event.seq > seq)
+    if (!completed) flushEvents(active)
     if (completed) {
       if (!active.done || seq !== active.seq) throw new Error("AgentPool completed an unfinished execution")
       if (active.completing) return
@@ -426,10 +429,26 @@ export async function startAgentPoolWorker({
     }
   }
 
+  function flushEvents(run) {
+    if (!connected) return
+    let inFlightBytes = 0
+    for (const event of run.events) {
+      const bytes = Buffer.byteLength(JSON.stringify(event))
+      if (event.seq <= run.sentSeq) {
+        inFlightBytes += bytes
+        continue
+      }
+      if (toolDetailsSupported && inFlightBytes > 0 && inFlightBytes + bytes > 256 * 1024) break
+      send(event)
+      run.sentSeq = event.seq
+      inFlightBytes += bytes
+    }
+  }
+
   function enqueue(run, value) {
     const event = { ...value, runId: run.id, seq: ++run.seq }
     run.events.push(event)
-    if (connected) send(event)
+    flushEvents(run)
   }
 
   function execute(task) {
@@ -452,9 +471,9 @@ export async function startAgentPoolWorker({
         connectionRequest: reachableUrl(task.runtimeTools.rest.connectionRequest),
       },
     } : null
-    const run = { id: task.runId, agentId: task.agent?.id, session: null, seq: 0, events: [], bytes: 0, done: false,
-      execution: null, overflow: false, cancelled: false, controller: new AbortController() }
-    const harnessName = !task.harness || task.harness === "default" ? "minicode" : task.harness
+    const run = { id: task.runId, agentId: task.agent?.id, session: null, seq: 0, sentSeq: 0, events: [], bytes: 0, done: false,
+      execution: null, overflow: false, cancelled: false, detailBytes: 0, detailLimitReported: false, controller: new AbortController() }
+    const harnessName = !task.harness || task.harness === "default" ? defaultHarnessName : task.harness
     let activitySequence = 0
     let preparing = false
     let turnStarted = false
@@ -811,6 +830,25 @@ export async function startAgentPoolWorker({
         },
       })
       run.session = session
+      session.on("tool_detail", detail => {
+        if (stopped || run.done || !toolDetailsSupported) return
+        const bytes = Buffer.byteLength(JSON.stringify(detail))
+        if (run.detailBytes + bytes > 8 * 1024 * 1024) {
+          if (!run.detailLimitReported) {
+            run.detailLimitReported = true
+            writer.write(harnessName, "Tool detail upload limit reached; subsequent details are unavailable.\n", "stderr")
+          }
+          const data = JSON.stringify({
+            type: "clippy.tool", callId: detail.callId, phase: detail.phase, name: detail.name,
+            summary: detail.summary, isError: Boolean(detail.error), durationMs: detail.durationMs,
+            detailRef: null, detailStatus: "unavailable",
+          }) + "\n"
+          writer.write(harnessName, `\n${data}`)
+          return
+        }
+        run.detailBytes += bytes
+        enqueue(run, { type: "tool_detail", detail })
+      })
       session.on("activity", value => {
         if (stopped || run.done) return
         if (value.action === "round_start") {
@@ -822,8 +860,9 @@ export async function startAgentPoolWorker({
         }
         activity(value)
       })
-      session.on("output", ({ stream, data }) => {
+      session.on("output", ({ stream, data, toolSummary }) => {
         if (stopped || run.done || run.overflow) return
+        if (toolSummary && toolDetailsSupported) return
         if (outputMode === "normal" && stream === "command") return
         writer.write(harnessName, data, stream === "stderr" ? "stderr" : "stdout")
       })
@@ -963,6 +1002,7 @@ export async function startAgentPoolWorker({
             throw new Error("AgentPool server lost the execution; retry the run explicitly")
           }
           previousServer = message.serverInstanceId
+          toolDetailsSupported = message.capabilities?.includes("tool_details_v1") === true
           clearTimeout(leaseTimer)
           leaseTimer = null
           if (active) {
@@ -970,9 +1010,9 @@ export async function startAgentPoolWorker({
             await ack(message.ack, message.completed)
           } else await enterIdle()
           if (stopped || current !== socket || current.readyState !== WebSocket.OPEN) return
-          // Keep live output buffered until every unacknowledged event has been replayed.
-          for (const event of active?.events ?? []) send(event)
+          if (active) active.sentSeq = message.ack
           connected = true
+          if (active) flushEvents(active)
           log("AgentPool worker connected")
           monitorDisk()
         } else if (!connected) throw new Error("AgentPool welcome required")
@@ -1026,7 +1066,7 @@ export async function startAgentPoolWorker({
   return { stop, finished }
 }
 
-const WORKER_USAGE = "Usage: minicode worker --server <origin> --worker-id <id> [--repo-root [<branch>@]<directory>] [--workspace-mode worktree|clone|workspace] [--worker-name <short-name>] [--worker-shared <directory>] [--reference-repo [<branch>@]<name>=<directory>]... [--min-free-gib <GiB>] [--target-free-gib <GiB>] [--github-repo <owner/repo> --github-user <account> | --azure-devops-org <url> --azure-devops-project <name-or-id> --azure-devops-repo <name-or-id> --azure-devops-user <upn> [--azure-devops-alias <alias>]] [--output-mode normal|verbose] [--no-secret-store] [--tool-azure-config-dir <absolute-directory>] [--entra-user <upn> [--clippy-auth <cli.js>]]"
+const WORKER_USAGE = "Usage: minicode worker --server <origin> --worker-id <id> [--repo-root [<branch>@]<directory>] [--harness default|copilotcli] [--copilot-path <absolute-executable>] [--model <id>] [--workspace-mode worktree|clone|workspace] [--worker-name <short-name>] [--worker-shared <directory>] [--reference-repo [<branch>@]<name>=<directory>]... [--min-free-gib <GiB>] [--target-free-gib <GiB>] [--github-repo <owner/repo> --github-user <account> | --azure-devops-org <url> --azure-devops-project <name-or-id> --azure-devops-repo <name-or-id> --azure-devops-user <upn> [--azure-devops-alias <alias>]] [--output-mode normal|verbose] [--no-secret-store] [--tool-azure-config-dir <absolute-directory>] [--entra-user <upn> [--clippy-auth <cli.js>]]"
 
 // A server behind Entra sign-in answers an unauthenticated probe with Easy Auth's challenge.
 async function requiresEntra(server) {
@@ -1046,7 +1086,7 @@ export function parseWorkerCliOptions(argv) {
       options["no-secret-store"] = true
       continue
     }
-    if (!["--server", "--worker-id", "--entra-user", "--clippy-auth", "--output-mode", "--tool-azure-config-dir", "--worker-shared", "--reference-repo", "--workspace-mode", "--worker-name", "--min-free-gib", "--target-free-gib", "--github-repo", "--github-user", "--azure-devops-org", "--azure-devops-project", "--azure-devops-repo", "--azure-devops-user", "--azure-devops-alias"].includes(argv[i])
+    if (!["--server", "--worker-id", "--entra-user", "--clippy-auth", "--harness", "--copilot-path", "--output-mode", "--tool-azure-config-dir", "--worker-shared", "--reference-repo", "--workspace-mode", "--worker-name", "--min-free-gib", "--target-free-gib", "--github-repo", "--github-user", "--azure-devops-org", "--azure-devops-project", "--azure-devops-repo", "--azure-devops-user", "--azure-devops-alias"].includes(argv[i])
       || !argv[i + 1] || argv[i + 1].startsWith("--")) throw new Error(WORKER_USAGE)
     if (argv[i] === "--reference-repo") {
       referenceRepos.push(argv[++i])
@@ -1057,9 +1097,18 @@ export function parseWorkerCliOptions(argv) {
   return { options, referenceRepos, secretStore: options["no-secret-store"] !== true }
 }
 
-export async function runAgentPoolWorkerCli(argv, repoRoot) {
+export async function runAgentPoolWorkerCli(argv, repoRoot, { model } = {}) {
   const { options, referenceRepos, secretStore } = parseWorkerCliOptions(argv)
   parseWorkerReferences(referenceRepos)
+  const harness = options.harness ?? "default"
+  if (!["default", "copilotcli"].includes(harness)) throw new Error("--harness must be default or copilotcli")
+  if (options["copilot-path"] !== undefined && harness !== "copilotcli") throw new Error("--copilot-path requires --harness copilotcli")
+  let sessionFactory
+  if (harness === "copilotcli") {
+    const { CopilotCliSession, resolveCopilotExecutable } = await import("./copilot-cli-session.js")
+    const executable = await resolveCopilotExecutable(options["copilot-path"])
+    sessionFactory = assignment => new CopilotCliSession({ ...assignment, executable, model })
+  }
   const toolAzureConfigDir = options["tool-azure-config-dir"]
   if (toolAzureConfigDir !== undefined) {
     if (!path.isAbsolute(toolAzureConfigDir)) throw new Error("--tool-azure-config-dir must be an absolute directory path")
@@ -1110,6 +1159,7 @@ export async function runAgentPoolWorkerCli(argv, repoRoot) {
   }
   const worker = await startAgentPoolWorker({
     server, workerId, cwd, clientToken: state.clientToken, entraSession, outputMode, secretStore,
+    sessionFactory, defaultHarnessName: harness === "copilotcli" ? "copilotcli" : "minicode",
     workerShared: options["worker-shared"], referenceRepos, sourceBranch,
     workspaceMode: options["workspace-mode"], workerName: options["worker-name"], toolAzureConfigDir,
     minFreeGiB: options["min-free-gib"] === undefined ? undefined : Number(options["min-free-gib"]),

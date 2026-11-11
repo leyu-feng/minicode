@@ -1,4 +1,6 @@
 import { cancellationRequestId } from "../services/native-runtime/native-cancellation-request.js";
+import { runToolDetailRefSchema } from "@paperclipai/shared";
+import { getRunToolDetailStore } from "../services/run-tool-detail-store.js";
 import { agentHarnessType, type AgentRunnerChoice } from "@paperclipai/shared";
 import { resolveNewAgentRunnerForCompany } from "../services/agent-runner-selection.js";
 import { agentEnvironmentTestService } from "../services/agent-environment-test.js";
@@ -7327,6 +7329,29 @@ export function agentRoutes(
       }, currentUserRedactionOptions),
     );
     res.json(await runRedactions.redactForRun(run.companyId, run.id, redactedEvents));
+  });
+
+  router.get("/heartbeat-runs/:runId/tool-detail/:chunkId", async (req, res) => {
+    const runId = readHeartbeatRunId(req);
+    const run = await getAccessibleResource(req, res, heartbeat.getRunLogAccess(runId), "Heartbeat run not found");
+    if (!run) return;
+    if (!(await assertRunTelemetryReadAllowed(req, res, run.companyId))) return;
+    if (!(await assertRunReadAllowed(req, res, run))) return;
+    const parsed = runToolDetailRefSchema.safeParse({
+      schema: "run_tool_detail_ref_v1", runId, chunkId: req.params.chunkId,
+    });
+    const offset = Number(req.query.offset ?? 0);
+    const limit = Number(req.query.limit ?? 8192);
+    if (!parsed.success || !Number.isSafeInteger(offset) || offset < 0
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 32768) {
+      throw badRequest("Invalid tool detail reference or page");
+    }
+    const result = await getRunToolDetailStore().read(run.companyId, runId, parsed.data, offset, limit);
+    res.set("Cache-Control", "no-cache, no-store");
+    res.json(await runRedactions.redactForRun(
+      run.companyId, run.id,
+      redactCurrentUserValue(result, await getCurrentUserRedactionOptions()),
+    ));
   });
 
   router.get("/heartbeat-runs/:runId/log", async (req, res) => {

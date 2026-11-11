@@ -7,6 +7,9 @@ import { touchHeartbeatRunRuntimeStatus } from "../heartbeat-run-runtime-status.
 import { publishLiveEvent } from "../live-events.js";
 import type { RunLogHandle, RunLogStore } from "../run-log-store.js";
 import { appendExcerpt, compactRunLogChunk } from "./run-log.js";
+import { runToolDetailSchema, type RunToolDetailRef } from "@paperclipai/shared";
+import { getRunToolDetailStore } from "../run-tool-detail-store.js";
+import { logger } from "../../middleware/logger.js";
 import { isHeartbeatRunRuntimeStatusActive, publishHeartbeatRunRuntimeProgress, type createHeartbeatLifecycle } from "./run-lifecycle.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
@@ -182,6 +185,35 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
 
     const onAdapterEvent = async (event: AdapterRuntimeEvent) => {
       event = identityRedactor.redact(event);
+      if (event.eventType === "agent_pool.tool_detail") {
+        const detail = runToolDetailSchema.parse(event.payload);
+        for (const field of ["input", "output", "error", "cwd", "summary", "name"] as const) {
+          if (detail[field] !== undefined) {
+            detail[field] = compactRunLogChunk(
+              redactCurrentUserText(detail[field], currentUserRedactionOptions),
+              field === "summary" ? 200 : field === "cwd" ? 2000 : field === "name" ? 160 : 24000,
+            ).slice(0, field === "summary" ? 200 : field === "cwd" ? 2000 : field === "name" ? 160 : 24000);
+          }
+        }
+        let detailRef: RunToolDetailRef | null = null;
+        try {
+          detailRef = await getRunToolDetailStore().append(run.companyId, run.id, detail);
+          if (!detailRef) logger.warn({ runId }, "Tool detail spool is full; detail is unavailable");
+        } catch (error) {
+          logger.warn({ err: error, runId }, "Tool detail persistence failed; detail is unavailable");
+        }
+        const summary = {
+          type: "clippy.tool", callId: detail.callId, phase: detail.phase, name: detail.name,
+          summary: detail.summary, isError: Boolean(detail.error), durationMs: detail.durationMs,
+          detailRef, detailStatus: detailRef ? "available" : "unavailable",
+        };
+        await appendRunEvent(currentRun, {
+          eventType: "agent_pool.tool", stream: "system", level: detail.error ? "warn" : "info",
+          message: detail.summary, payload: summary,
+        });
+        await appendIdentityRedactedLog("stdout", `\n${JSON.stringify(summary)}\n`);
+        return;
+      }
       const eventType = event.eventType.trim();
       if (!eventType) return;
       await appendRunEvent(currentRun, {

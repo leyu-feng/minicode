@@ -5,6 +5,7 @@ import { agents, companies, createDb, heartbeatRunEvents, heartbeatRuns, issues 
 import { registerServerAdapter, unregisterServerAdapter, type AdapterExecutionContext } from "../adapters/index.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { getRunLogStore } from "../services/run-log-store.js";
+import { getRunToolDetailStore } from "../services/run-tool-detail-store.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -117,5 +118,32 @@ describePostgres("heartbeat output through adapter dispatch and finalization", (
     expect(entries.at(-1).chunk).toBe("during finalization\n");
     expect(finished.lastOutputSeq).toBe(entries.at(-1).seq);
     expect(finished.lastOutputBytes).toBe(finished.logBytes);
+  });
+
+  it("stores tool bodies separately and publishes only a compact selectable reference", async () => {
+    const chunkId = randomUUID(), callId = randomUUID();
+    const append = vi.spyOn(getRunToolDetailStore(), "append").mockImplementation(async (_companyId, runId) =>
+      ({ schema: "run_tool_detail_ref_v1", runId, chunkId }));
+    const f = await seed(async input => {
+      await input.onLog("stdout", "Assistant progress without a trailing newline");
+      await input.onEvent?.({
+        eventType: "agent_pool.tool_detail", stream: "system", level: "info",
+        payload: {
+          version: 1, id: chunkId, callId, phase: "end", name: "run_shell",
+          summary: "Check SQL", ts: new Date().toISOString(), cwd: "workspace",
+          output: "selected-only body Authorization: Bearer private-canary", durationMs: 12, truncated: false,
+        },
+      });
+    });
+    const { finished, entries } = await execute(f);
+    expect(finished.status, finished.error ?? undefined).toBe("succeeded");
+    expect(append).toHaveBeenCalledWith(f.companyId, finished.id, expect.objectContaining({ output: expect.not.stringContaining("private-canary") }));
+    expect(JSON.stringify(entries)).not.toContain("selected-only body");
+    expect(entries.map(entry => entry.chunk).join("")).toContain('without a trailing newline\n{"type":"clippy.tool"');
+    const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, finished.id));
+    expect(JSON.stringify(events)).not.toContain("selected-only body");
+    expect(events.find(event => event.eventType === "agent_pool.tool")?.payload).toMatchObject({
+      callId, detailRef: { runId: finished.id, chunkId }, durationMs: 12,
+    });
   });
 });
