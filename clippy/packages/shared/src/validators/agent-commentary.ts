@@ -5,7 +5,10 @@ export const AGENT_COMMENTARY_MAX_LENGTH = 524_288;
 export const AGENT_COMMENTARY_KINDS = ["complaint", "suggestion"] as const;
 
 export const agentCommentaryToolInputSchema = z.object({
-  body: z.string().max(AGENT_COMMENTARY_MAX_LENGTH).refine((body) => body.trim().length > 0, "Feedback must not be empty"),
+  // Preserve the UTF-16 size budget now that Zod counts Unicode code points.
+  body: z.string().max(AGENT_COMMENTARY_MAX_LENGTH)
+    .refine((body) => body.length <= AGENT_COMMENTARY_MAX_LENGTH, "Feedback exceeds the document size limit")
+    .refine((body) => body.trim().length > 0, "Feedback must not be empty"),
   idempotencyKey: z.string().trim().min(1).max(240),
 }).strict();
 

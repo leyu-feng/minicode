@@ -911,9 +911,7 @@ function assertDiscordAdapterCompatibility(adapter: Adapter, chat: Chat): void {
 }
 
 interface TeamsApiClientInternals {
-  _apiClientSettings?: unknown;
-  constructor: Function;
-  http: unknown;
+  clone(options: { serviceUrl: string }): TeamsApiClientInternals;
   serviceUrl: string;
 }
 
@@ -1049,12 +1047,9 @@ export function scopeMicrosoftTeamsEgress(
       throw new TeamsAdapterCompatibilityError(`${methodName} is unavailable`);
     }
   }
-  if (
-    typeof teams.app.api.constructor !== "function" ||
-    !("http" in teams.app.api)
-  ) {
+  if (typeof teams.app.api.clone !== "function") {
     throw new TeamsAdapterCompatibilityError(
-      "the API client constructor or HTTP transport is unavailable",
+      "the API client clone method is unavailable",
     );
   }
   const apiDescriptor = Object.getOwnPropertyDescriptor(teams.app, "api");
@@ -1190,16 +1185,7 @@ export function scopeMicrosoftTeamsEgress(
       serviceUrlValue,
       trustedConfiguredApiUrl,
     );
-    const ApiClient = defaultApi.constructor as new (
-      serviceUrl: string,
-      http: unknown,
-      settings?: unknown,
-    ) => TeamsApiClientInternals;
-    const scopedApi = new ApiClient(
-      serviceUrl,
-      defaultApi.http,
-      defaultApi._apiClientSettings,
-    );
+    const scopedApi = defaultApi.clone({ serviceUrl });
     return await apiScope.run(scopedApi, operation);
   };
   const withThreadServiceUrl = async <T>(

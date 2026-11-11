@@ -2226,7 +2226,9 @@ export const issueDocumentFormatSchema = z.enum(ISSUE_DOCUMENT_FORMATS);
 export const upsertIssueDocumentSchema = z.object({
   title: z.string().trim().max(200).nullable().optional(),
   format: issueDocumentFormatSchema,
-  body: multilineTextSchema.pipe(z.string().max(524288)),
+  // Preserve the UTF-16 size budget now that Zod counts Unicode code points.
+  body: multilineTextSchema.pipe(z.string().max(524288)
+    .refine((body) => body.length <= 524288, "Document body exceeds the size limit")),
   changeSummary: z.string().trim().max(500).nullable().optional(),
   baseRevisionId: z.string().guid().nullable().optional(),
 });

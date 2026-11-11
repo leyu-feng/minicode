@@ -92,6 +92,14 @@ vi.mock("@chat-adapter/teams", () => ({
         this.http = http;
         this._apiClientSettings = settings;
       }
+
+      clone(options: { serviceUrl: string }) {
+        return new MockTeamsApi(
+          options.serviceUrl,
+          this.http,
+          this._apiClientSettings,
+        );
+      }
     }
     const noop = async () => undefined;
     return {

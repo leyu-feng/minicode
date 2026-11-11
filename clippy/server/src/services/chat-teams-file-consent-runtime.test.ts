@@ -130,16 +130,16 @@ type FileRuntime = ChatSdkEndpointRuntime & {
     card: ReturnType<typeof buildTeamsUploadedFileCard>,
   ): Promise<{ id: string }>;
 };
+interface HttpClientSeam {
+  post(url: string, data: unknown): Promise<{ data: unknown }>;
+}
 interface AppSeam {
   server: {
     serviceTokenValidator: {
       check(header: string, body: Record<string, unknown>): Promise<unknown>;
     };
   };
-  activitySender: {
-    client: { post(url: string, data: unknown): Promise<{ data: unknown }> };
-  };
-  api: { serviceUrl: string };
+  api: { serviceUrl: string; http: HttpClientSeam };
 }
 
 // Real installed adapter/App router, App.send, ActivitySender and API client.
@@ -206,7 +206,7 @@ describe("Teams opt-in file-consent runtime", () => {
         };
       });
     const post = vi
-      .spyOn(app.activitySender.client, "post")
+      .spyOn(Object.getPrototypeOf(app.api.http) as HttpClientSeam, "post")
       .mockResolvedValue({ data: { id: "card-receipt-1" } });
     const dispatch = (
       activity: unknown,
@@ -272,7 +272,7 @@ describe("Teams opt-in file-consent runtime", () => {
       h.runtime.sendTeamsFileConsentCard(thread(), card),
     ).resolves.toEqual({ id: "card-receipt-1" });
     expect(h.post).toHaveBeenCalledTimes(1);
-    expect(h.post.mock.calls[0]).toEqual([
+    expect(h.post.mock.calls[0]?.slice(0, 2)).toEqual([
       `${amer.replace(/\/$/, "")}/v3/conversations/${conversationId}/activities`,
       expect.objectContaining({
         type: "message",

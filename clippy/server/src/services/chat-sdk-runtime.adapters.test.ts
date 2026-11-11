@@ -2385,23 +2385,19 @@ describe("Chat SDK published adapter integration", () => {
             api: {
               serviceUrl: string;
               http: {
-                put(url: string, body: unknown): Promise<{ data: unknown }>;
-              };
-            };
-            activitySender: {
-              client: {
                 post(url: string, body: unknown): Promise<{ data: unknown }>;
+                put(url: string, body: unknown): Promise<{ data: unknown }>;
               };
             };
           };
         }
       ).app;
       const post = vi
-        .spyOn(app.activitySender.client, "post")
+        .spyOn(Object.getPrototypeOf(app.api.http) as typeof app.api.http, "post")
         .mockResolvedValueOnce({ data: { id: "authored-answer" } })
         .mockResolvedValueOnce({ data: { id: "owned-progress" } });
       const put = vi
-        .spyOn(app.api.http, "put")
+        .spyOn(Object.getPrototypeOf(app.api.http) as typeof app.api.http, "put")
         .mockResolvedValue({ data: { id: "owned-progress" } });
       const conversation =
         scope === "personal"
@@ -3535,6 +3531,14 @@ describe("Chat SDK published adapter integration", () => {
           },
         };
       }
+
+      clone(options: { serviceUrl: string }) {
+        return new InstrumentedApi(
+          options.serviceUrl,
+          this.http,
+          this._apiClientSettings,
+        );
+      }
     }
     adapter.app.api = new InstrumentedApi(
       "https://smba.trafficmanager.net/teams",
@@ -3656,6 +3660,14 @@ describe("Chat SDK published adapter integration", () => {
             return { id: `conversation-${index}` };
           },
         };
+      }
+
+      clone(options: { serviceUrl: string }) {
+        return new InstrumentedOpenDmApi(
+          options.serviceUrl,
+          this.http,
+          this._apiClientSettings,
+        );
       }
     }
     adapter.app.api = new InstrumentedOpenDmApi(

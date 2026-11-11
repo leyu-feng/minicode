@@ -62,7 +62,7 @@ COPY scripts/link-plugin-dev-sdk.mjs scripts/
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
   pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile && pnpm install --frozen-lockfile
 
-FROM --platform=$BUILDPLATFORM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS esbuild-build
+FROM --platform=$BUILDPLATFORM golang:1.26.10-bookworm@sha256:5de7c99eb78ca5e515a4c340235d0955ec5964a5071c492c15503d7c267da473 AS esbuild-build
 ARG TARGETARCH
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 WORKDIR /src
@@ -70,10 +70,10 @@ ADD --checksum=sha256:04cb2d38fb6af093577aa8bf174add7286099b65ef7854480cbbb8ff06
   https://codeload.github.com/evanw/esbuild/tar.gz/609683d892977362a0f99026cb74b96263d728a9 /tmp/esbuild-source.tar.gz
 RUN tar -xzf /tmp/esbuild-source.tar.gz --strip-components=1 \
   && test "$(cat version.txt)" = "0.28.2" \
-  && test "$(go env GOVERSION)" = "go1.26.9" \
+  && test "$(go env GOVERSION)" = "go1.26.10" \
   && GOOS=linux GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -buildvcs=false -ldflags="-s -w" -o /out/esbuild ./cmd/esbuild \
   && go version -m /out/esbuild > /out/go-build-info.txt \
-  && printf '{"version":"0.28.2","goVersion":"go1.26.9","goarch":"%s","sourceCommit":"609683d892977362a0f99026cb74b96263d728a9","sourceArchiveSha256":"04cb2d38fb6af093577aa8bf174add7286099b65ef7854480cbbb8ff061cef1f","binarySha256":"%s"}\n' \
+  && printf '{"version":"0.28.2","goVersion":"go1.26.10","goarch":"%s","sourceCommit":"609683d892977362a0f99026cb74b96263d728a9","sourceArchiveSha256":"04cb2d38fb6af093577aa8bf174add7286099b65ef7854480cbbb8ff061cef1f","binarySha256":"%s"}\n' \
     "$TARGETARCH" "$(sha256sum /out/esbuild | cut -d ' ' -f 1)" > /out/provenance.json
 
 FROM deps AS runtime-deps
@@ -224,10 +224,27 @@ WORKDIR /app
 # the app copy changes on every commit — ordered the other way around, this
 # (the single most expensive layer: four CLI toolchains + apt, per arch) can
 # never hit the layer cache and rebuilds on every build.
+# Upstream npm/pnpm still bundle affected packages. Nested installs keep each
+# replacement's dependency closure private instead of changing shared tooling.
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
   --mount=type=cache,target=/root/.npm \
   echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
   && npm install --global --omit=dev @anthropic-ai/claude-code@latest "@openai/codex@${CODEX_VERSION}" opencode-ai @google/gemini-cli@latest @moonshot-ai/kimi-code@latest \
+  && npm install --prefix /tmp/paperclip-tool-security --install-strategy=nested \
+    --ignore-scripts --omit=dev --no-package-lock --no-audit --no-fund \
+    glob@14.0.2 minimatch@11.0.1 undici@6.29.1 ip-address@10.7.4 \
+  && for name in glob minimatch undici ip-address; do \
+    test -f "/usr/local/lib/node_modules/npm/node_modules/$name/package.json" \
+    && rm -rf "/usr/local/lib/node_modules/npm/node_modules/$name" \
+    && cp -a "/tmp/paperclip-tool-security/node_modules/$name" "/usr/local/lib/node_modules/npm/node_modules/$name" || exit 1; \
+  done \
+  && for name in glob minimatch; do \
+    test -f "/usr/local/lib/node_modules/pnpm/dist/node_modules/$name/package.json" \
+    && rm -rf "/usr/local/lib/node_modules/pnpm/dist/node_modules/$name" \
+    && cp -a "/tmp/paperclip-tool-security/node_modules/$name" "/usr/local/lib/node_modules/pnpm/dist/node_modules/$name" || exit 1; \
+  done \
+  && npm --version && pnpm --version \
+  && rm -rf /tmp/paperclip-tool-security \
   && find /usr/local/lib/node_modules -path '*/build/config.gypi' -type f -delete \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \

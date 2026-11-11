@@ -503,6 +503,16 @@ describe("issue validators", () => {
     expect(parsed.requestDepth).toBe(MAX_ISSUE_REQUEST_DEPTH);
   });
 
+  it("preserves the document UTF-16 size budget for non-BMP text", () => {
+    const body = "\u{1f642}".repeat(524288 / 2);
+    expect(
+      upsertIssueDocumentSchema.parse({ format: "markdown", body }).body,
+    ).toBe(body);
+    expect(
+      upsertIssueDocumentSchema.safeParse({ format: "markdown", body: body + "x" }).success,
+    ).toBe(false);
+  });
+
   it("defaults omitted create status to todo when an assignee is present", () => {
     expect(
       createIssueSchema.parse({

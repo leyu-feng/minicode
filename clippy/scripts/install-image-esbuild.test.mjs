@@ -19,14 +19,14 @@ function fixture(t, goarch = "amd64") {
   }
   const bytes = Buffer.from("rebuilt esbuild");
   const provenance = {
-    version: "0.28.2", goVersion: "go1.26.9", goarch,
+    version: "0.28.2", goVersion: "go1.26.10", goarch,
     sourceCommit: "609683d892977362a0f99026cb74b96263d728a9",
     binarySha256: createHash("sha256").update(bytes).digest("hex"),
   };
   writeFileSync(join(artifact, "esbuild"), bytes);
   const saveProvenance = () => writeFileSync(join(artifact, "provenance.json"), JSON.stringify(provenance));
   saveProvenance();
-  writeFileSync(join(artifact, "go-build-info.txt"), `/out/esbuild: go1.26.9\n\tbuild\tGOARCH=${goarch}\n`);
+  writeFileSync(join(artifact, "go-build-info.txt"), `/out/esbuild: go1.26.10\n\tbuild\tGOARCH=${goarch}\n`);
   writeFileSync(join(native, "package.json"), JSON.stringify({ name: `@esbuild/${nativeName}`, version: "0.28.2" }));
   const manifest = { name: "esbuild", version: "0.28.2", "esbuild.binaryHashes": { [`@esbuild/${nativeName}/bin/esbuild`]: "upstream-hash", "unrelated-platform/bin/esbuild": "preserved" } };
   writeFileSync(join(wrapper, "package.json"), JSON.stringify(manifest));
@@ -62,6 +62,7 @@ test("replaces CLI and API binaries without mutating pnpm's store and removes fa
 test("rejects unpatched compilers, mismatched checksums and inconsistent build information before replacing files", (t) => {
   for (const mutation of [
     (f) => { f.provenance.goVersion = "go1.26.5"; },
+    (f) => { f.provenance.goVersion = "go1.26.9"; },
     (f) => { f.provenance.binarySha256 = "0".repeat(64); },
     (f) => { f.provenance.goarch = "arm64"; },
   ]) {

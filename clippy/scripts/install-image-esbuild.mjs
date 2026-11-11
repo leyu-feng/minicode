@@ -11,8 +11,8 @@ export function installImageEsbuild(root, artifactRoot) {
   const bytes = readFileSync(binary);
   const goVersion = /^go(\d+)\.(\d+)\.(\d+)$/.exec(provenance.goVersion);
   if (!goVersion || Number(goVersion[1]) !== 1 || Number(goVersion[2]) < 26
-      || (Number(goVersion[2]) === 26 && Number(goVersion[3]) < 6)) {
-    throw new Error("Rebuilt esbuild requires stable Go 1.26.6 or newer");
+      || (Number(goVersion[2]) === 26 && Number(goVersion[3]) < 10)) {
+    throw new Error("Rebuilt esbuild requires stable Go 1.26.10 or newer");
   }
   if (sha256(bytes) !== provenance.binarySha256) throw new Error("Rebuilt esbuild checksum mismatch");
   const nativePackage = { amd64: "@esbuild/linux-x64", arm64: "@esbuild/linux-arm64" }[provenance.goarch];

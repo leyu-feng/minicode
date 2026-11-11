@@ -396,9 +396,9 @@ describe("Teams inline images through pinned runtime/App HTTP", () => {
     const app = (
       runtime.getProviderAdapter() as unknown as {
         app: {
-          api: { serviceUrl: string };
-          activitySender: {
-            client: {
+          api: {
+            serviceUrl: string;
+            http: {
               post(url: string, data: unknown): Promise<{ data: unknown }>;
             };
           };
@@ -406,7 +406,7 @@ describe("Teams inline images through pinned runtime/App HTTP", () => {
       }
     ).app;
     const post = vi
-      .spyOn(app.activitySender.client, "post")
+      .spyOn(Object.getPrototypeOf(app.api.http) as typeof app.api.http, "post")
       .mockResolvedValue({ data: { id: "image-receipt-1" } });
     return { runtime, app, post, network };
   }

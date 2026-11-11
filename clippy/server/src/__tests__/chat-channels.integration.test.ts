@@ -23312,8 +23312,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
             const app = (
               pinned.getProviderAdapter() as unknown as {
                 app: {
-                  activitySender: {
-                    client: {
+                  api: {
+                    http: {
                       post(
                         url: string,
                         body: unknown,
@@ -23323,7 +23323,10 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
                 };
               }
             ).app;
-            vi.spyOn(app.activitySender.client, "post").mockImplementation(
+            vi.spyOn(
+              Object.getPrototypeOf(app.api.http) as typeof app.api.http,
+              "post",
+            ).mockImplementation(
               async (url, body) => {
                 httpBodies.push({ url, body });
                 return {
