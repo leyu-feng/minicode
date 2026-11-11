@@ -55,14 +55,14 @@ describe("RunTranscriptView", () => {
       type: "tool_group",
       items: [
         {
-          name: "Read",
+          name: "read",
           status: "completed",
           result: "ok",
           // Later status updates merge into the original input instead of
           // spawning duplicate "Running" cards.
           input: { text: "read README.md", status: "in_progress" },
         },
-        { name: "Search", status: "running" },
+        { name: "search", status: "running" },
       ],
     });
   });
@@ -84,7 +84,7 @@ describe("RunTranscriptView", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toMatchObject({
       type: "tool_group",
-      items: [{ name: "Read", status: "completed", result: "ok" }],
+      items: [{ name: "read", status: "completed", result: "ok" }],
     });
   });
 
@@ -105,7 +105,7 @@ describe("RunTranscriptView", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toMatchObject({
       type: "tool_group",
-      items: [{ name: "Read", status: "completed", result: "ok" }],
+      items: [{ name: "read", status: "completed", result: "ok" }],
     });
   });
 
@@ -184,7 +184,7 @@ describe("RunTranscriptView", () => {
     });
   });
 
-  it("collapses multiline successful results to their first meaningful line", () => {
+  it("shows successful completion text without expansion", () => {
     const html = renderToStaticMarkup(
       <ThemeProvider>
         <RunTranscriptView
@@ -208,10 +208,41 @@ describe("RunTranscriptView", () => {
     );
 
     expect(html).toContain("Summary");
-    expect(html).toContain('aria-expanded="false"');
-    expect(html).not.toContain("fixed deploy config");
-    expect(html).not.toContain("posted issue update");
+    expect(html).not.toContain('aria-expanded="false"');
+    expect(html).toContain("fixed deploy config");
+    expect(html).toContain("posted issue update");
     expect(html).not.toContain("result");
+  });
+
+  it("keeps preparation system messages visible instead of grouping them into a fold", () => {
+    const html = renderToStaticMarkup(<RunTranscriptView entries={[
+      { kind: "system", ts: "2026-11-11T00:00:00Z", text: "[prep] Workspace ready\n[prep] Instructions loaded" },
+    ]} />);
+    expect(html).toContain("Instructions loaded");
+    expect(html).not.toContain('aria-expanded="false"');
+  });
+
+  it("keeps final assistant text visible when a terminal result event follows it", () => {
+    const html = renderToStaticMarkup(<ThemeProvider><RunTranscriptView entries={[
+      { kind: "assistant", ts: "2026-11-11T00:00:00Z", text: "Complete.\nFinal completion details." },
+      { kind: "run_result", ts: "2026-11-11T00:00:01Z", disposition: "done", summary: "Finished",
+        objectiveSatisfied: true, verification: [], remainingWork: [], blocker: null, artifacts: [] },
+    ]} /></ThemeProvider>);
+    expect(html).toContain("Final completion details.");
+    expect(html).not.toContain('aria-expanded="false"');
+  });
+
+  it.each(["shell_run", "add_comment", "update_issue"])("keeps %s in a single non-uppercase header with status and duration", name => {
+    const html = renderToStaticMarkup(<RunTranscriptView entries={[
+      { kind: "tool_call", ts: "2026-11-11T00:00:00Z", toolUseId: "call-1", name, input: { command: "Full hover command", body: "Full hover body" } },
+      { kind: "tool_result", ts: "2026-11-11T00:00:02Z", toolUseId: "call-1", toolName: name, content: "done", isError: false },
+    ]} />);
+    expect(html).toContain(`>${name}</span>`);
+    expect(html).toContain(">completed</span>");
+    expect(html).toContain(">2s</time>");
+    expect(html).not.toContain("Full hover command");
+    expect(html).not.toContain("uppercase");
+    expect(html).toContain('aria-expanded="false"');
   });
 
   it.each(["pi", "opencode"])("folds %s lifecycle lines even when a request precedes the round start", harness => {

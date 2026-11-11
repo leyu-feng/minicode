@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { TranscriptEntry } from "../../adapters";
 import { runMessageSummarySchema, type RunMessageSummary, type ToolRunDecision } from "@paperclipai/shared";
 import { MarkdownBody, type MarkdownExternalReferenceMap } from "../MarkdownBody";
-import { cn, formatTokens } from "../../lib/utils";
+import { cn, formatDurationMs, formatTokens } from "../../lib/utils";
 import { runningLabelText } from "../../lib/status-colors";
 import {
   Check,
@@ -10,6 +10,7 @@ import {
   ChevronRight,
   CircleAlert,
   GitCompare,
+  LoaderCircle,
   TerminalSquare,
   User,
 } from "lucide-react";
@@ -18,6 +19,7 @@ import { LazyToolDetails } from "./LazyToolDetails";
 import { TranscriptText, type MessageExpansion } from "./TranscriptText";
 import { parseRoundLine, TranscriptRound, type RoundBlock } from "./TranscriptRound";
 import { Button } from "../ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/tooltip";
 
 /** Family glyph for a tool block/row; the taxonomy falls back to Wrench. */
 function ToolFamilyIcon({ name, className }: { name: string; className?: string }) {
@@ -104,6 +106,7 @@ type TranscriptBlock =
       items: Array<{
         ts: string;
         endTs?: string;
+        name: string;
         toolUseId?: string;
         invocationId?: string;
         actionRequestId?: string;
@@ -337,6 +340,7 @@ function parseStructuredToolResult(result: string | undefined) {
 }
 
 function isCommandTool(name: string, input: unknown): boolean {
+  if (asRecord(input)?.clippyTool) return false;
   if (name === "command_execution" || name === "shell" || name === "shellToolCall" || name === "bash") {
     return true;
   }
@@ -347,9 +351,8 @@ function isCommandTool(name: string, input: unknown): boolean {
   return Boolean(record && (typeof record.command === "string" || typeof record.cmd === "string"));
 }
 
-function displayToolName(name: string, input: unknown): string {
-  if (isCommandTool(name, input)) return "Executing command";
-  return humanizeLabel(name);
+function isPreparationText(text: string): boolean {
+  return /(?:^|\n)(?:(?:>>|<<)\s+)?\[(?:prep|framework)\]|# assignment input/i.test(text);
 }
 
 function summarizeToolResult(result: string | undefined, isError: boolean | undefined, density: TranscriptDensity): string {
@@ -498,6 +501,7 @@ function groupCommandBlocks(blocks: TranscriptBlock[]): TranscriptBlock[] {
       pending.push({
         ts: block.ts,
         endTs: block.endTs,
+        name: block.name,
         toolUseId: block.toolUseId,
         invocationId: block.invocationId,
         actionRequestId: block.actionRequestId,
@@ -717,7 +721,7 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
       const toolBlock: Extract<TranscriptBlock, { type: "tool" }> = {
         type: "tool",
         ts: entry.ts,
-        name: displayToolName(entry.name, entry.input),
+        name: entry.name,
         toolUseId,
         invocationId: entry.invocationId,
         actionRequestId: entry.actionRequestId,
@@ -808,6 +812,10 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
       if (compactWhitespace(entry.text).toLowerCase() === "turn started") {
         continue;
       }
+      if (isPreparationText(entry.text)) {
+        blocks.push({ type: "stdout", ts: entry.ts, startTs: entry.ts, text: entry.text });
+        continue;
+      }
       const activity = parseSystemActivity(entry.text);
       if (activity) {
         const existing = activity.activityId ? pendingActivityBlocks.get(activity.activityId) : undefined;
@@ -882,7 +890,7 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
       continue;
     }
 
-    if (previous?.type === "stdout") {
+    if (previous?.type === "stdout" && isPreparationText(previous.text) === isPreparationText(entry.text)) {
       previous.text += previous.text.endsWith("\n") || entry.text.startsWith("\n") ? entry.text : `\n${entry.text}`;
       previous.ts = entry.ts;
     } else {
@@ -985,11 +993,13 @@ function TranscriptMessageBlock({
   density,
   externalReferences,
   expansion,
+  plain,
 }: {
   block: Extract<TranscriptBlock, { type: "message" }>;
   density: TranscriptDensity;
   externalReferences?: MarkdownExternalReferenceMap;
   expansion: MessageExpansion;
+  plain: boolean;
 }) {
   const isAssistant = block.role === "assistant";
   const compact = density === "compact";
@@ -1006,6 +1016,7 @@ function TranscriptMessageBlock({
         text={block.text}
         markdown
         expansion={expansion}
+        plain={plain}
         className={cn(
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           // Match the default view's chat message body (IssueChatThread:
@@ -1059,7 +1070,7 @@ function ToolDecisionBadge({ decision }: { decision: ToolRunDecision | null }) {
   const summary = summarizeToolDecision(decision);
   if (!summary) return null;
   return (
-    <span className={cn("text-(length:--text-nano) font-semibold uppercase tracking-(--tracking-eyebrow)", summary.className)}>
+    <span className={cn("shrink-0 text-(length:--text-nano) font-semibold", summary.className)}>
       {summary.label}
     </span>
   );
@@ -1108,6 +1119,52 @@ function ToolDecisionDetails({ decision, compact }: { decision: ToolRunDecision 
   );
 }
 
+function TranscriptToolHeader({
+  name, status, ts, endTs, durationMs, open, onToggle, hover, decision, kind = "tool",
+}: {
+  name: string;
+  status: "running" | "completed" | "error";
+  ts: string;
+  endTs?: string;
+  durationMs?: number;
+  open: boolean;
+  onToggle: () => void;
+  hover: ReactNode;
+  decision: ToolRunDecision | null;
+  kind?: "tool" | "command";
+}) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (status !== "running") return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [status]);
+  const elapsed = durationMs ?? (endTs || status === "running"
+    ? Math.max(0, (endTs ? Date.parse(endTs) : now) - Date.parse(ts)) : undefined);
+  const Icon = status === "running" ? LoaderCircle : status === "error" ? CircleAlert : Check;
+  return <TooltipProvider><Tooltip>
+    <TooltipTrigger asChild>
+      <button type="button" className="flex min-h-5 w-full items-center gap-1.5 text-left text-xs text-muted-foreground hover:text-foreground"
+        aria-expanded={open} aria-label={`${open ? "Collapse" : "Expand"} ${kind} details`}
+        onClick={() => { if (!hasSelectedText()) onToggle(); }}>
+        <Icon className={cn("h-3.5 w-3.5 shrink-0",
+          status === "running" ? "animate-spin motion-reduce:animate-none text-blue-600 dark:text-blue-300"
+            : status === "error" ? "text-destructive" : "text-emerald-600 dark:text-emerald-300")} />
+        <span className="min-w-0 truncate font-mono">{name}</span>
+        <span className={cn("shrink-0", status === "error" && "text-destructive")}>{status === "error" ? "failed" : status}</span>
+        {elapsed !== undefined && Number.isFinite(elapsed) && <time dateTime={ts} title={ts} className="shrink-0 font-mono">{elapsed < 1000 ? `${elapsed} ms` : formatDurationMs(elapsed)}</time>}
+        <ToolDecisionBadge decision={decision} />
+        {decision?.pendingAction && <span className="shrink-0 text-(length:--text-nano)">Action request {decision.pendingAction.actionRequestId.slice(0, 8)}</span>}
+        {open ? <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0" />}
+      </button>
+    </TooltipTrigger>
+    <TooltipContent side="top" aria-label={`Details for ${name}`} className="max-h-64 max-w-xl overflow-auto whitespace-pre-wrap break-words bg-popover text-left text-popover-foreground">
+      {hover}
+      <ToolDecisionInlineDetail decision={decision} />
+    </TooltipContent>
+  </Tooltip></TooltipProvider>;
+}
+
 function TranscriptToolCard({
   block,
   density,
@@ -1121,32 +1178,12 @@ function TranscriptToolCard({
   const [open, setOpen] = useState((!remoteInput && block.status === "error") || Boolean(decision?.pendingAction || decision?.denialReason));
   const compact = density === "compact";
   const parsedResult = parseStructuredToolResult(block.result);
-  const statusLabel =
-    block.status === "running"
-      ? "Running"
-      : block.status === "error"
-        ? "Errored"
-        : "Completed";
-  const statusTone =
-    block.status === "running"
-      ? "text-blue-700 dark:text-blue-300"
-      : block.status === "error"
-        ? "text-red-700 dark:text-red-300"
-        : "text-emerald-700 dark:text-emerald-300";
   const detailsClass = cn(
     "space-y-3",
     block.status === "error" && "rounded-xl border border-red-500/20 bg-red-500/[0.06] p-3",
   );
-  const iconClass = cn(
-    "mt-0.5 h-3.5 w-3.5 shrink-0",
-    block.status === "error"
-      ? "text-red-600 dark:text-red-300"
-      : block.status === "completed"
-        ? "text-emerald-600 dark:text-emerald-300"
-        : "text-blue-600 dark:text-blue-300",
-  );
   const summary = remoteInput
-    ? `${String(remoteInput.summary ?? "")}${typeof remoteInput.durationMs === "number" ? ` · ${remoteInput.durationMs} ms` : ""}`
+    ? String(remoteInput.summary ?? "")
     : block.status === "running"
     ? summarizeToolInput(block.name, block.input, density)
     : block.status === "completed" && parsedResult?.body
@@ -1154,41 +1191,17 @@ function TranscriptToolCard({
       : summarizeToolResult(block.result, block.isError, density);
 
   return (
-    <div className={cn(block.status === "error" && "rounded-xl border border-red-500/20 bg-red-500/[0.04] p-3")}>
-      <div className="flex items-start gap-2">
-        {block.status === "error" ? (
-          <CircleAlert className={iconClass} />
-        ) : block.status === "completed" ? (
-          <Check className={iconClass} />
-        ) : (
-          <ToolFamilyIcon name={block.name} className={iconClass} />
-        )}
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="text-(length:--text-micro) font-semibold uppercase tracking-(--tracking-caps) text-muted-foreground">
-              {block.name}
-            </span>
-            <span className={cn("text-(length:--text-nano) font-semibold uppercase tracking-(--tracking-eyebrow)", statusTone)}>
-              {statusLabel}
-            </span>
-            <ToolDecisionBadge decision={decision} />
-          </div>
-          <div className={cn("mt-1 break-words text-foreground/80", compact ? "text-xs" : "text-sm")}>
-            {summary}
-          </div>
-          <ToolDecisionInlineDetail decision={decision} />
-        </div>
-        <button
-          type="button"
-          className="mt-0.5 inline-flex h-5 w-5 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
-          onClick={() => setOpen((value) => !value)}
-          aria-label={open ? "Collapse tool details" : "Expand tool details"}
-        >
-          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        </button>
-      </div>
+    <div>
+      <TranscriptToolHeader name={block.name} status={block.status} ts={block.ts} endTs={block.endTs}
+        durationMs={typeof remoteInput?.durationMs === "number" ? remoteInput.durationMs : undefined}
+        open={open} onToggle={() => setOpen(value => !value)} decision={decision}
+        hover={<>
+          <div>{summary}</div>
+          {remoteInput ? <LazyToolDetails input={remoteInput} preview />
+            : <pre className="whitespace-pre-wrap break-words font-mono">{formatToolPayload(block.input)}</pre>}
+        </>} />
       {open && (
-        <div className="mt-3">
+        <div className="mt-1">
           <div className={detailsClass}>
             {remoteInput ? <LazyToolDetails input={remoteInput} /> : <div className={cn("grid gap-3", compact ? "grid-cols-1" : "lg:grid-cols-2")}>
               <div>
@@ -1236,7 +1249,6 @@ function TranscriptCommandGroup({
   const [open, setOpen] = useState(false);
   const compact = density === "compact";
   const runningItem = [...block.items].reverse().find((item) => item.status === "running");
-  const latestItem = block.items[block.items.length - 1] ?? null;
   const highlightedDecision =
     block.items
       .map((item) => findToolDecision(toolDecisionMaps, item))
@@ -1245,91 +1257,17 @@ function TranscriptCommandGroup({
     ?? null;
   const hasError = block.items.some((item) => item.status === "error");
   const isRunning = Boolean(runningItem);
-  const showExpandedErrorState = open && hasError;
-  const title = isRunning
-    ? "Executing command"
-    : block.items.length === 1
-      ? "Executed command"
-      : `Executed ${block.items.length} commands`;
-  const subtitle = runningItem
-    ? summarizeToolInput("command_execution", runningItem.input, density)
-    : null;
-  const statusTone = isRunning
-      ? "text-blue-700 dark:text-blue-300"
-      : "text-foreground/70";
+  const names = [...new Set(block.items.map(item => item.name))].join(", ");
+  const title = block.items.length === 1 ? names : `${names} (${block.items.length} calls)`;
 
   return (
-    <div className={cn(showExpandedErrorState && "rounded-xl border border-red-500/20 bg-red-500/[0.04] p-3")}>
-      <div
-        role="button"
-        tabIndex={0}
-        className={cn("flex cursor-pointer gap-2", subtitle ? "items-start" : "items-center")}
-        onClick={() => {
-          if (hasSelectedText()) return;
-          setOpen((value) => !value);
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            setOpen((value) => !value);
-          }
-        }}
-      >
-        <div className={cn("flex shrink-0 items-center", subtitle && "mt-0.5")}>
-          {block.items.slice(0, Math.min(block.items.length, 3)).map((_, index) => (
-            <span
-              key={index}
-              className={cn(
-                "inline-flex h-6 w-6 items-center justify-center rounded-full border shadow-sm",
-                index > 0 && "-ml-1.5",
-                isRunning
-                  ? "border-blue-500/25 bg-blue-500/[0.08] text-blue-600 dark:text-blue-300"
-                  : "border-border/70 bg-background text-foreground/55",
-                isRunning && "animate-pulse",
-              )}
-            >
-              <TerminalSquare className="h-3.5 w-3.5" />
-            </span>
-          ))}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-(length:--text-micro) font-semibold uppercase leading-none tracking-(--tracking-label) text-muted-foreground/70">
-            {title}
-          </div>
-          {highlightedDecision && (
-            <div className="mt-1">
-              <ToolDecisionBadge decision={highlightedDecision} />
-              <ToolDecisionInlineDetail decision={highlightedDecision} />
-            </div>
-          )}
-          {subtitle && (
-            <div className={cn("mt-1 break-words font-mono text-foreground/85", compact ? "text-xs" : "text-sm")}>
-              {subtitle}
-            </div>
-          )}
-          {!subtitle && latestItem?.status === "error" && open && (
-            <div className={cn("mt-1", compact ? "text-xs" : "text-sm", statusTone)}>
-              Command failed
-            </div>
-          )}
-        </div>
-        <button
-          type="button"
-          className={cn(
-            "inline-flex h-5 w-5 items-center justify-center text-muted-foreground transition-colors hover:text-foreground",
-            subtitle && "mt-0.5",
-          )}
-          onClick={(event) => {
-            event.stopPropagation();
-            setOpen((value) => !value);
-          }}
-          aria-label={open ? "Collapse command details" : "Expand command details"}
-        >
-          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        </button>
-      </div>
+    <div>
+      <TranscriptToolHeader name={title} status={hasError ? "error" : isRunning ? "running" : "completed"}
+        ts={block.ts} endTs={isRunning ? undefined : block.endTs} open={open} onToggle={() => setOpen(value => !value)}
+        decision={highlightedDecision} kind="command"
+        hover={<pre className="whitespace-pre-wrap break-words font-mono">{block.items.map(item => formatToolPayload(item.input)).join("\n\n")}</pre>} />
       {open && (
-        <div className={cn("mt-3 space-y-3", hasError && "rounded-xl border border-red-500/20 bg-red-500/[0.06] p-3")}>
+        <div className={cn("mt-1 space-y-2", hasError && "rounded-xl border border-red-500/20 bg-red-500/[0.06] p-2")}>
           {block.items.map((item, index) => (
             <div key={`${item.ts}-${index}`} className="space-y-2">
               <div className="flex items-center gap-2">
@@ -1344,7 +1282,7 @@ function TranscriptCommandGroup({
                   <TerminalSquare className="h-3 w-3" />
                 </span>
                 <span className={cn("font-mono break-all", compact ? "text-(length:--text-micro)" : "text-xs")}>
-                  {summarizeToolInput("command_execution", item.input, density)}
+                  {formatToolPayload(item.input)}
                 </span>
               </div>
               {item.result && (
@@ -1387,79 +1325,18 @@ function TranscriptToolGroup({
   const uniqueNames = [...new Set(block.items.map((item) => item.name))];
   const toolLabel =
     uniqueNames.length === 1
-      ? humanizeLabel(uniqueNames[0])
-      : `${uniqueNames.length} tools`;
-  const title = isRunning
-    ? `Using ${toolLabel}`
-    : block.items.length === 1
-      ? `Used ${toolLabel}`
-      : `Used ${toolLabel} (${block.items.length} calls)`;
-  const subtitle = runningItem
-    ? summarizeToolInput(runningItem.name, runningItem.input, density)
-    : null;
-  const statusTone = isRunning
-    ? "text-blue-700 dark:text-blue-300"
-    : "text-foreground/70";
+      ? uniqueNames[0]
+      : uniqueNames.join(", ");
+  const title = block.items.length === 1 ? toolLabel : `${toolLabel} (${block.items.length} calls)`;
 
   return (
-    <div className="rounded-xl border border-border/40 bg-muted/[0.25]">
-      <div
-        role="button"
-        tabIndex={0}
-        className={cn("flex cursor-pointer gap-2 px-3 py-2.5", subtitle ? "items-start" : "items-center")}
-        onClick={() => { if (hasSelectedText()) return; setOpen((v) => !v); }}
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((v) => !v); } }}
-      >
-        <div className={cn("flex shrink-0 items-center", subtitle && "mt-0.5")}>
-          {block.items.slice(0, Math.min(block.items.length, 3)).map((item, index) => {
-            const isItemRunning = item.status === "running";
-            const isItemError = item.status === "error";
-            return (
-              <span
-                key={`${item.ts}-${index}`}
-                className={cn(
-                  "inline-flex h-6 w-6 items-center justify-center rounded-full border shadow-sm",
-                  index > 0 && "-ml-1.5",
-                  isItemRunning
-                    ? "border-blue-500/25 bg-blue-500/[0.08] text-blue-600 dark:text-blue-300"
-                    : isItemError
-                      ? "border-red-500/25 bg-red-500/[0.08] text-red-600 dark:text-red-300"
-                      : "border-border/70 bg-background text-foreground/55",
-                  isItemRunning && "animate-pulse",
-                )}
-              >
-                <ToolFamilyIcon name={item.name} className="h-3.5 w-3.5" />
-              </span>
-            );
-          })}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className={cn("font-semibold uppercase leading-none tracking-(--tracking-label)", compact ? "text-(length:--text-nano)" : "text-(length:--text-micro)", "text-muted-foreground/70")}>
-            {title}
-          </div>
-          {highlightedDecision && (
-            <div className="mt-1">
-              <ToolDecisionBadge decision={highlightedDecision} />
-              <ToolDecisionInlineDetail decision={highlightedDecision} />
-            </div>
-          )}
-          {subtitle && (
-            <div className={cn("mt-1 break-words font-mono text-foreground/85", compact ? "text-xs" : "text-sm")}>
-              {subtitle}
-            </div>
-          )}
-        </div>
-        <button
-          type="button"
-          className={cn("inline-flex h-5 w-5 items-center justify-center text-muted-foreground transition-colors hover:text-foreground", subtitle && "mt-0.5")}
-          onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
-          aria-label={open ? "Collapse tool details" : "Expand tool details"}
-        >
-          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        </button>
-      </div>
+    <div>
+      <TranscriptToolHeader name={title} status={hasError ? "error" : isRunning ? "running" : "completed"}
+        ts={block.ts} endTs={isRunning ? undefined : block.endTs} open={open} onToggle={() => setOpen(value => !value)}
+        decision={highlightedDecision}
+        hover={<pre className="whitespace-pre-wrap break-words font-mono">{block.items.map(item => `${item.name}\n${formatToolPayload(item.input)}`).join("\n\n")}</pre>} />
       {open && (
-        <div className={cn("space-y-2 border-t border-border/30 px-3 py-3", hasError && "rounded-b-xl")}>
+        <div className="mt-1 space-y-2">
           {block.items.map((item, index) => (
             <div key={`${item.ts}-${index}`} className="space-y-1.5">
               <div className="flex items-center gap-2">
@@ -1473,8 +1350,8 @@ function TranscriptToolGroup({
                 )}>
                   <ToolFamilyIcon name={item.name} className="h-3 w-3" />
                 </span>
-                <span className={cn("text-(length:--text-nano) font-semibold uppercase tracking-(--tracking-eyebrow) text-muted-foreground")}>
-                  {humanizeLabel(item.name)}
+                <span className="font-mono text-(length:--text-nano) text-muted-foreground">
+                  {item.name}
                 </span>
                 <span className={cn("text-(length:--text-nano) font-semibold uppercase tracking-(--tracking-eyebrow)",
                   // Gallery feedback r1: running label uses brand blue, not cyan.
@@ -1579,6 +1456,7 @@ function TranscriptEventRow({
             <TranscriptText
               text={block.text}
               markdown
+              plain
               expansion={expansion}
               className={cn(
                 "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0 text-sky-700 dark:text-sky-300",
@@ -1781,14 +1659,16 @@ function TranscriptStdoutRow({
   density,
   collapseByDefault,
   expansion,
+  plain,
 }: {
   block: Extract<TranscriptBlock, { type: "stdout" }>;
   density: TranscriptDensity;
   collapseByDefault: boolean;
   expansion: MessageExpansion;
+  plain: boolean;
 }) {
   return (
-      <TranscriptText text={block.text} expansion={expansion} forceCollapse={collapseByDefault}
+      <TranscriptText text={block.text} expansion={expansion} forceCollapse={collapseByDefault} plain={plain || isPreparationText(block.text)}
         className={cn(
           "overflow-x-auto whitespace-pre-wrap break-words font-mono text-foreground/80",
           density === "compact" ? "text-(length:--text-micro)" : "text-xs",
@@ -1935,6 +1815,9 @@ export function RunTranscriptView({
     [entries, mode, streaming],
   );
   const visibleBlocks = limit ? blocks.slice(-limit) : blocks;
+  const finalMessageIndex = visibleBlocks.findLastIndex(block =>
+    block.type === "message" && block.role === "assistant"
+    || block.type === "stdout" && !isPreparationText(block.text));
   const keyedBlocks = useMemo(() => keyTranscriptBlocks(visibleBlocks), [visibleBlocks]);
   const visibleEntries = limit ? entries.slice(-limit) : entries;
 
@@ -1955,7 +1838,7 @@ export function RunTranscriptView({
   }
 
   return (
-    <div className={cn("space-y-3", className)}>
+    <div className={cn("space-y-1", className)}>
       {visibleBlocks.some(block => block.type === "message_detail" || block.type === "message" || block.type === "stdout" || block.type === "event" && block.label === "result") && (
         <div className="flex justify-end">
           <Button size="sm" variant="ghost" onClick={() => setMessageExpansion(value => ({ open: !value.open, revision: value.revision + 1 }))}>
@@ -1969,13 +1852,15 @@ export function RunTranscriptView({
           className={cn(index === keyedBlocks.length - 1 && streaming && "tc-stream-block-enter")}
         >
           {block.type === "round" && <TranscriptRound block={block} />}
-          {block.type === "message_detail" && <TranscriptText text={block.summary} label={block.label} parts={block.parts} expansion={messageExpansion} streaming={streaming} />}
+          {block.type === "message_detail" && <TranscriptText text={block.summary} label={block.label} parts={block.parts} expansion={messageExpansion} streaming={streaming}
+            plain={!block.parts[0]?.message.diagnostic && /assignment input|prep/i.test(block.label)} />}
           {block.type === "message" && (
             <TranscriptMessageBlock
               block={block}
               density={density}
               externalReferences={externalReferences}
               expansion={messageExpansion}
+              plain={index === finalMessageIndex}
             />
           )}
           {block.type === "thinking" && (
@@ -2003,7 +1888,7 @@ export function RunTranscriptView({
           {block.type === "stderr_group" && <TranscriptStderrGroup block={block} density={density} />}
           {block.type === "system_group" && <TranscriptSystemGroup block={block} density={density} />}
           {block.type === "stdout" && (
-            <TranscriptStdoutRow block={block} density={density} collapseByDefault={collapseStdout} expansion={messageExpansion} />
+            <TranscriptStdoutRow block={block} density={density} collapseByDefault={collapseStdout} expansion={messageExpansion} plain={index === finalMessageIndex} />
           )}
           {block.type === "activity" && <TranscriptActivityRow block={block} density={density} />}
           {block.type === "event" && (

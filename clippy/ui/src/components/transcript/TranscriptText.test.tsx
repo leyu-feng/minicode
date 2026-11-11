@@ -45,20 +45,25 @@ function part(index: number, last = true): RunMessageSummary {
 
 it("collapses multiline messages, expands all, and preserves a reader's choice through streaming updates", async () => {
   const entries = [{ kind: "assistant" as const, ts: "2026-11-11T00:00:00Z", text: "First line\nHidden body" }];
-  await render(<RunTranscriptView entries={entries} streaming />);
+  const tail = [
+    { kind: "thinking" as const, ts: "2026-11-11T00:00:01Z", text: "Thinking" },
+    { kind: "assistant" as const, ts: "2026-11-11T00:00:02Z", text: "Final line\nVisible completion" },
+  ];
+  await render(<RunTranscriptView entries={[...entries, ...tail]} streaming />);
   expect(host.textContent).not.toContain("Hidden body");
+  expect(host.textContent).toContain("Visible completion");
   await click("Expand all messages");
   expect(host.textContent).toContain("Hidden body");
   await click("First line");
   expect(host.textContent).not.toContain("Hidden body");
-  await render(<RunTranscriptView entries={[{ ...entries[0], text: "First line\nHidden body\nNew delta" }]} streaming />);
+  await render(<RunTranscriptView entries={[{ ...entries[0], text: "First line\nHidden body\nNew delta" }, ...tail]} streaming />);
   expect(host.textContent).not.toContain("New delta");
   await click("Collapse all messages");
   await click("Expand all messages");
   expect(host.textContent).toContain("New delta");
 });
 
-it("loads every page and part after one expansion, then copies the complete message without a load-more action", async () => {
+it("loads every assignment page and part automatically without indentation or a load-more action", async () => {
   const first = "First line\n" + "x".repeat(15000);
   const tail = "\nLAST_MESSAGE_LINE";
   toolDetail.mockImplementation(async (reference, offset): Promise<RunToolDetailPage> => {
@@ -66,20 +71,72 @@ it("loads every page and part after one expansion, then copies the complete mess
     return { status: "available", input: text.slice(offset, offset + 8192),
       ...(text.length > offset + 8192 ? { nextOffset: offset + 8192 } : {}) };
   });
-  const writeText = vi.fn(async () => {});
-  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   const entries = [part(0, false), part(1)].map(value => ({
     kind: "stdout" as const, ts: "2026-11-11T00:00:00Z", text: JSON.stringify(value),
   }));
   await render(<RunTranscriptView entries={entries} />);
-  expect(toolDetail).not.toHaveBeenCalled();
-  expect(host.querySelectorAll("button[aria-expanded]")).toHaveLength(1);
-  await click("Assignment input");
   expect(toolDetail).toHaveBeenCalledTimes(3);
+  expect(host.querySelectorAll("button[aria-expanded]")).toHaveLength(0);
   expect(host.textContent).toContain("LAST_MESSAGE_LINE");
   expect(host.textContent).not.toMatch(/Load more|message truncated/);
+  expect(host.querySelector("pre")?.textContent).toBe(first + tail);
+  expect(host.querySelector(".pl-5")).toBeNull();
+});
+
+it("keeps embedded JSON collapsed while showing assignment and preparation prose", async () => {
+  const assignment = 'Do the assigned task.\n```json\n{"context":"retained payload"}\n```\nFinish with a summary.';
+  toolDetail.mockResolvedValue({ status: "available", input: assignment });
+  const entries = [
+    { kind: "stdout" as const, ts: "2026-11-11T00:00:00Z", text: "[prep] Workspace ready\n[prep] Instructions loaded" },
+    { kind: "stdout" as const, ts: "2026-11-11T00:00:01Z", text: JSON.stringify(part(0)) },
+  ];
+  await render(<RunTranscriptView entries={entries} />);
+  expect(host.textContent).toContain("Instructions loaded");
+  expect(host.textContent).toContain("Do the assigned task.");
+  expect(host.textContent).toContain("Finish with a summary.");
+  expect(host.textContent).not.toContain("retained payload");
+  expect(host.querySelector('[aria-expanded="false"]')?.textContent).toContain("JSON");
+  await click("JSON");
+  expect(host.textContent).toContain("retained payload");
+});
+
+it("preserves complete JSON arrays and malformed JSON as readable text", async () => {
+  await render(<TranscriptText plain text={'Before\n["one", "two"]\n{\n  "nested": {"value": true}\n}\n[not JSON]\nAfter'} />);
+  expect(host.textContent).toContain("[not JSON]");
+  expect(host.textContent).toContain("After");
+  expect(host.querySelectorAll('[aria-expanded="false"]')).toHaveLength(2);
+  const buttons = [...host.querySelectorAll<HTMLButtonElement>('[aria-expanded="false"]')];
+  await act(async () => buttons.forEach(button => button.click()));
+  expect([...host.querySelectorAll("pre")].map(pre => pre.textContent).join("")).toContain('["one", "two"]');
+  expect(host.textContent).toContain('"nested": {"value": true}');
+});
+
+it("keeps verbose diagnostic records collapsed without fetching them", async () => {
+  const diagnostic = part(0);
+  diagnostic.message.diagnostic = true;
+  await render(<RunTranscriptView entries={[{ kind: "stdout", ts: "2026-11-11T00:00:00Z", text: JSON.stringify(diagnostic) }]} />);
+  expect(toolDetail).not.toHaveBeenCalled();
+  expect(host.querySelector('[aria-expanded="false"]')).not.toBeNull();
+});
+
+it("reports and retries an automatic assignment read failure", async () => {
+  toolDetail.mockRejectedValueOnce(new Error("Storage offline"))
+    .mockResolvedValue({ status: "available", input: "Recovered full assignment" });
+  await render(<TranscriptText text="Preview" parts={[part(0)]} plain />);
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("Storage offline");
+  await click("Retry loading message");
+  expect(host.textContent).toContain("Recovered full assignment");
+});
+
+it("copies the complete retained message after expansion", async () => {
+  const writeText = vi.fn(async () => {});
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  toolDetail.mockResolvedValue({ status: "available", input: "Complete retained message\nLast line" });
+  await render(<TranscriptText text="First line" parts={[part(0)]} />);
+  expect(toolDetail).not.toHaveBeenCalled();
+  await click("First line");
   await click("Copy full message");
-  expect(writeText).toHaveBeenCalledWith(first + tail);
+  expect(writeText).toHaveBeenCalledWith("Complete retained message\nLast line");
 });
 
 it("reports a failed detail read and retries rather than presenting a preview as the full message", async () => {

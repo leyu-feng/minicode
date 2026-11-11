@@ -82,12 +82,20 @@ Verbose-only diagnostics remain verbose-only. The existing per-run upload,
 spool, retention, authorization, and redaction limits still apply; unavailable
 parts are reported explicitly, never represented as a complete message.
 
-The normal transcript collapses multiline prose and stdout to a first-line
-preview. One expansion automatically reads all retained parts and pages, without
-a manual "Load more" step. Readers can copy the complete body and expand or
-collapse all messages; streaming does not override an individual choice.
+The normal transcript keeps preparation messages and the final completion text
+visible. Assignment input automatically reads all retained parts and pages and
+renders without indentation. JSON payloads stay collapsed, including JSON inside
+otherwise visible text. Other multiline prose and stdout use a first-line
+preview; one expansion reads every retained page without a manual "Load more"
+step. Readers can copy expanded messages and expand or collapse all messages;
+streaming does not override an individual choice.
 Historical worker-side truncation cannot be reversed and is labeled as capture
 loss rather than another expandable message.
+
+Tool headers use one compact line for the original tool name, status, and elapsed
+time. Hovering shows command/input details before expansion; remote input details
+load on demand. Full results remain inside the expanded tool. Pending approvals
+stay visible in the header.
 
 Updated workers emit `clippy.round` rows with execution identity, harness, round,
 action, summary, and an optional terminal status. Round numbers and model request

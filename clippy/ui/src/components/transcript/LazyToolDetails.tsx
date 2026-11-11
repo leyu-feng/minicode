@@ -3,7 +3,7 @@ import { runToolDetailRefSchema, type RunToolDetailPage, type RunToolDetailRef }
 import { heartbeatsApi } from "../../api/heartbeats";
 import { Button } from "../ui/button";
 
-function ToolDetailPart({ reference }: { reference: RunToolDetailRef }) {
+function ToolDetailPart({ reference, preview = false }: { reference: RunToolDetailRef; preview?: boolean }) {
   const [page, setPage] = useState<RunToolDetailPage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +39,7 @@ function ToolDetailPart({ reference }: { reference: RunToolDetailRef }) {
     <div className="space-y-2">
       {page?.status === "available" && <>
         {page.cwd && <div className="font-mono text-xs text-muted-foreground">{page.cwd}</div>}
-        {(["input", "output", "error"] as const).map(field => page[field] !== undefined && (
+        {(["input", "output", "error"] as const).map(field => (!preview || field === "input") && page[field] !== undefined && (
           <div key={field}>
             <div className="text-xs font-semibold text-muted-foreground">{field === "input" ? "Input" : field === "output" ? "Output" : "Error"}</div>
             <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs text-foreground">{page[field] || "<empty>"}</pre>
@@ -51,7 +51,8 @@ function ToolDetailPart({ reference }: { reference: RunToolDetailRef }) {
       {page?.status === "unavailable" && <p className="text-xs text-muted-foreground">Tool details are unavailable.</p>}
       {loading && <p role="status" className="text-xs text-muted-foreground">Loading tool details...</p>}
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-      {!loading && controller && (error || page?.nextOffset !== undefined) && (
+      {preview && page?.nextOffset !== undefined && <p className="text-xs">Expand the tool to read the remaining details.</p>}
+      {!loading && controller && (error || !preview && page?.nextOffset !== undefined) && (
         <Button variant="ghost" size="sm" onClick={() => void load(page?.nextOffset ?? 0, controller.signal)}>
           {error ? "Retry loading details" : "Load more"}
         </Button>
@@ -60,8 +61,8 @@ function ToolDetailPart({ reference }: { reference: RunToolDetailRef }) {
   );
 }
 
-export function LazyToolDetails({ input }: { input: Record<string, unknown> }) {
-  const references = [input.startDetailRef, input.endDetailRef]
+export function LazyToolDetails({ input, preview = false }: { input: Record<string, unknown>; preview?: boolean }) {
+  const references = (preview ? [input.startDetailRef ?? input.endDetailRef] : [input.startDetailRef, input.endDetailRef])
     .map(value => runToolDetailRefSchema.safeParse(value))
     .flatMap(result => result.success ? [result.data] : []);
   return (
@@ -69,8 +70,8 @@ export function LazyToolDetails({ input }: { input: Record<string, unknown> }) {
       {(input.detailsUnavailable || references.length === 0) && (
         <p className="text-xs text-muted-foreground">Some tool details were not retained or could not be uploaded.</p>
       )}
-      {references.map(reference => <ToolDetailPart key={reference.chunkId} reference={reference} />)}
-      {input.endDetailRef === undefined && <p className="text-xs text-muted-foreground">Waiting for result...</p>}
+      {references.map(reference => <ToolDetailPart key={reference.chunkId} reference={reference} preview={preview} />)}
+      {!preview && input.endDetailRef === undefined && <p className="text-xs text-muted-foreground">Waiting for result...</p>}
     </div>
   );
 }

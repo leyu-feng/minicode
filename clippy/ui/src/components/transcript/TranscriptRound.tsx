@@ -52,7 +52,7 @@ export function TranscriptRound({ block }: { block: RoundBlock }) {
   const elapsed = Math.max(0, (block.endTs ? Date.parse(block.endTs) : now) - Date.parse(block.startTs));
   return (
     <div className={failed ? "text-destructive" : "text-muted-foreground"}>
-      <button type="button" className="flex min-h-8 w-full items-center gap-2 text-left text-xs"
+      <button type="button" className="flex min-h-5 w-full items-center gap-1 text-left text-xs"
         aria-expanded={failed || open} onClick={() => setOpen(value => !value)}>
         <span className="h-px flex-1 bg-border" />
         <Icon className={block.status === "running" ? "h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none" : "h-3.5 w-3.5 shrink-0"} />
