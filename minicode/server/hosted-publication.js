@@ -31,6 +31,8 @@ function inspectionBindings(issue, companyId, inspectorAgentId) {
   }
 }
 
+export { assertInspectionReceipt, inspectionBindings, paperclipApi }
+
 async function paperclipApi(task, apiUrl, path, method, body, signal) {
   if (!task.authToken || !task.runId || !task.agent?.companyId) throw new Error("Publication requires run-scoped Paperclip authentication")
   const response = await fetch(`${apiUrl.replace(/\/+$/, "")}/api${path}`, {

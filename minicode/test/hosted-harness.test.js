@@ -608,11 +608,14 @@ test("assignment message details retain the full redacted body across immutable 
   assert.equal(details.map(detail => detail.input).join(""), prompt.replaceAll("private-run-token", "[redacted]"))
 })
 
-for (const harness of ["opencode", "pi"]) {
-  for (const overLimit of [false, true]) {
-    test(`${harness} ${overLimit ? "rejects combined output above 4 MiB" : "accepts raw protocol output between 2 and 4 MiB"}`, async t => {
+for (const harness of ["opencode", "pi", "copilotcli"]) {
+  for (const scenario of ["success", "stderr", "malformed"]) {
+    const description = scenario === "success" ? "accepts structured protocol output above 4 MiB"
+      : scenario === "stderr" ? "rejects excessive stderr" : "rejects malformed JSON after a long valid stream"
+    test(`${harness} ${description}`, async t => {
       const session = new HostedHarnessSession({
         harness, id: "output-budget", cwd: process.cwd(), env: {}, instructions: "Policy", tools: [],
+        localCopilot: harness === "copilotcli",
         modelConfig: { endpoint, model: "deployment", getAccessToken: async () => "unused" },
         prepare: async () => ({ harness, command: "trusted-shim", version: "offline-fixture" }),
         spawnProcess: (_command, _args, options) => spawn(process.execPath, ["--input-type=module", "-e", `
@@ -622,15 +625,18 @@ for (const harness of ["opencode", "pi"]) {
           lines.close();
           process.stdin.pause();
           const line = JSON.stringify({ type: "diagnostic", data: "x".repeat(16000) }) + "\\n";
-          for (let bytes = 0; bytes < 3 * 1024 * 1024; bytes += line.length) {
+          for (let bytes = 0; bytes < 5 * 1024 * 1024; bytes += line.length) {
             await new Promise(resolve => process.stdout.write(line, resolve));
           }
-          ${overLimit ? `for (let bytes = 0; bytes < 2 * 1024 * 1024; bytes += 16000) {
+          ${scenario === "stderr" ? `for (let bytes = 0; bytes < 5 * 1024 * 1024; bytes += 16000) {
             await new Promise(resolve => process.stderr.write("x".repeat(16000), resolve));
           }` : ""}
+          ${scenario === "malformed" ? 'console.log("not JSON");' : ""}
           ${harness === "pi" ? `
             console.log(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Finished" } }));
             console.log(JSON.stringify({ type: "agent_end", messages: [] }));
+          ` : harness === "copilotcli" ? `
+            console.log(JSON.stringify({ type: "result", subtype: "success", result: "Finished" }));
           ` : `
             console.log(JSON.stringify({ type: "text", part: { text: "Finished" } }));
             console.log(JSON.stringify({ type: "step_finish" }));
@@ -639,11 +645,58 @@ for (const harness of ["opencode", "pi"]) {
       })
       t.after(() => session.dispose())
       const result = await session.write("Offline output-budget reproduction")
-      if (overLimit) assert.deepEqual(result, { exitCode: 1, error: "Hosted harness output exceeded its limit" })
+      if (scenario === "stderr") assert.deepEqual(result, { exitCode: 1, error: "Hosted harness stderr exceeded its 4 MiB limit" })
+      else if (scenario === "malformed") assert.deepEqual(result, { exitCode: 1, error: "The Hosted harness emitted malformed JSON" })
       else assert.deepEqual(result, { exitCode: 0, summary: "Finished" })
     })
   }
 }
+
+for (const scenario of ["terminated", "unterminated", "multibyte"]) {
+  test(`Copilot CLI rejects an oversized ${scenario} protocol event before buffering it`, { timeout: 10000 }, async t => {
+    const session = new HostedHarnessSession({
+      harness: "copilotcli", localCopilot: true, id: "oversized-event", cwd: process.cwd(),
+      env: {}, instructions: "Policy", tools: [],
+      modelConfig: { endpoint, model: "unused" },
+      prepare: async () => ({ harness: "copilotcli", command: "trusted-shim", version: "offline-fixture" }),
+      spawnProcess: (_command, _args, options) => spawn(process.execPath, ["--input-type=module", "-e", `
+        await new Promise(resolve => { process.stdin.resume(); process.stdin.on("end", resolve); });
+        const chunk = ${scenario === "multibyte" ? '"\\u20ac".repeat(16000)' : '"x".repeat(16000)'};
+        for (let bytes = 0; bytes < 5 * 1024 * 1024; bytes += Buffer.byteLength(chunk)) {
+          await new Promise(resolve => process.stdout.write(chunk, resolve));
+        }
+        ${scenario === "unterminated" ? "" : 'process.stdout.write("\\n");'}
+        setInterval(() => {}, 1000);
+      `], options),
+    })
+    t.after(() => session.dispose())
+    assert.deepEqual(await session.write("Offline oversized-event reproduction"), {
+      exitCode: 1, error: "Hosted harness event exceeded its 4 MiB limit",
+    })
+    assert.equal(session.child, null)
+  })
+}
+
+test("Copilot CLI bounds an assistant response assembled from small protocol events", { timeout: 10000 }, async t => {
+  const session = new HostedHarnessSession({
+    harness: "copilotcli", localCopilot: true, id: "oversized-response", cwd: process.cwd(),
+    env: {}, instructions: "Policy", tools: [],
+    modelConfig: { endpoint, model: "unused" },
+    prepare: async () => ({ harness: "copilotcli", command: "trusted-shim", version: "offline-fixture" }),
+    spawnProcess: (_command, _args, options) => spawn(process.execPath, ["--input-type=module", "-e", `
+      await new Promise(resolve => { process.stdin.resume(); process.stdin.on("end", resolve); });
+      const event = JSON.stringify({ type: "assistant.message_delta", data: { deltaContent: "x".repeat(16000) } }) + "\\n";
+      for (let bytes = 0; bytes < 5 * 1024 * 1024; bytes += 16000) {
+        await new Promise(resolve => process.stdout.write(event, resolve));
+      }
+      setInterval(() => {}, 1000);
+    `], options),
+  })
+  t.after(() => session.dispose())
+  assert.deepEqual(await session.write("Offline oversized-response reproduction"), {
+    exitCode: 1, error: "Hosted harness response exceeded its 4 MiB limit",
+  })
+})
 
 test("external harness rejects missing or multiline package versions before handoff", async t => {
   for (const version of [undefined, "1.4.0-beta.1\nunexpected output"]) {

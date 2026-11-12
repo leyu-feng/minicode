@@ -145,7 +145,7 @@ export async function prepareWorkerWorkspace({
         const refreshed = repo.sync ? await repo.sync.prepare({ signal }) : null
         const directory = repo.worktrees
           ? await repo.worktrees.assign(agentId, { commit: refreshed.primaryCommit }) : repo.source
-        manifest.push({ name: repo.id, path: directory, branch: repo.branch,
+        manifest.push({ name: repo.id, source: repo.sourceUrl, path: directory, branch: repo.branch,
           commit: await git(directory, ["rev-parse", "--verify", "HEAD^{commit}"], { signal }),
           readOnly: repo.readOnly, supervisory: repo.supervisory === true })
       }
@@ -162,7 +162,8 @@ export async function prepareWorkerWorkspace({
         throw new Error("Worker run manifest must be a regular file")
       }
       await fs.writeFile(manifestPath, JSON.stringify({ version: 1, repositories: manifest }, null, 2))
-      return { repositories: manifest, artifacts, manifestPath, reviews: path.join(artifacts, "reviews") }
+      return { repositories: manifest, artifacts, manifestPath, reviews: path.join(artifacts, "reviews"),
+        publicationStorage: path.join(storage, "publications") }
     },
   }
 }

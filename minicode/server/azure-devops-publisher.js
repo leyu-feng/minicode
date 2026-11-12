@@ -30,6 +30,8 @@ function repositoryUrl(value) {
   return { organization, project: parts[0], repository: parts[2] }
 }
 
+export { repositoryUrl as parseAzureDevOpsRepositoryUrl }
+
 export function createAzureDevOpsTokenProvider({ organization, user, repoRoot, env,
   clippyAuth = DEFAULT_CLIPPY_AUTH, run = publicationCommand }) {
   let cached, pending
@@ -160,5 +162,28 @@ export async function createAzureDevOpsPublisher({ repoRoot, organization, proje
   publisher.repository = identity
   publisher.pullRequestUrl = number => `${webUrl}/pullrequest/${number}`
   publisher.branchForCommit = branchForCommit
+  publisher.verifyRepository = async signal => {
+    const info = await readRepository(signal)
+    if (!same(info.id, bound.id) || !same(info.project.id, bound.project.id))
+      throw new Error("Azure DevOps repository changed; restart the worker")
+    return { repositoryId: bound.id, projectId: bound.project.id }
+  }
+  publisher.readPullRequest = async (number, signal) => {
+    await publisher.verifyRepository(signal)
+    const pr = await api(`/pullrequests/${number}`, { signal })
+    if (pr?.pullRequestId !== number || !["active", "completed"].includes(pr.status)
+      || !same(pr.repository?.id, bound.id) || !same(pr.repository?.project?.id, bound.project.id)
+      || !/^refs\/heads\/u\/[a-z0-9_-]+\/[a-z0-9-]+$/i.test(pr.sourceRefName ?? "")
+      || typeof pr.targetRefName !== "string"
+      || !/^[a-f0-9]{40}$/.test(pr.lastMergeSourceCommit?.commitId ?? ""))
+      throw new Error("Azure DevOps returned an unexpected inspection PR identity")
+    const commit = await api(`/commits/${pr.lastMergeSourceCommit.commitId}`, { signal })
+    if (commit?.commitId !== pr.lastMergeSourceCommit.commitId || typeof commit.comment !== "string"
+      || commit.commentTruncated === true)
+      throw new Error("Azure DevOps did not confirm the PR's full commit message")
+    return { verification: "provider_verified", number, state: pr.status,
+      url: publisher.pullRequestUrl(number), branch: pr.sourceRefName.slice("refs/heads/".length),
+      target: pr.targetRefName, remoteCommit: commit.commitId, commitMessage: commit.comment }
+  }
   return publisher
 }

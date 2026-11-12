@@ -10,6 +10,7 @@ import { SESSION_HEADER, createEntraSession, isEasyAuthChallenge } from "./entra
 import { startEntraProxy } from "./entra-proxy.js"
 import { createGitHubPublisher } from "./github-publisher.js"
 import { createAzureDevOpsPublisher } from "./azure-devops-publisher.js"
+import { createDevboxInspectionPublication } from "./devbox-inspection-publication.js"
 import { paperclipPublicationTool } from "./paperclip-publication.js"
 import { assertDirectPublicationAllowed, createPrInspectorPostback, INSPECTOR_BLOCKED_GUIDANCE } from "./hosted-publication.js"
 import { createPaperclipTaskTools } from "./paperclip-task-tools.js"
@@ -643,6 +644,12 @@ export async function startAgentPoolWorker({
       else if (task.prPolicy?.isInspector) {
         run.publication = createPrInspectorPostback({ task, apiUrl: agentApiUrl, separateBranch: true,
           workerName: workerName ?? `w-${workerId.slice(0, 12)}` })
+      } else if (devboxRoot && task.prPolicy?.inspectorAgentId && task.prPolicy.isInspector === false) {
+        run.publication = createDevboxInspectionPublication({
+          repositories: hostedRepositories, storage: workspaceArtifacts.publicationStorage,
+          workerName: workerName ?? `w-${workerId.slice(0, 12)}`, task, apiUrl: agentApiUrl, server: origin.origin,
+          user: entraSession?.user?.(), clippyAuth,
+        })
       } else if (task.prPolicy?.inspectorAgentId === null && task.prPolicy?.isInspector === false
         && (azurePublication || githubRepo || githubUser)) {
         publisher ??= azurePublication
@@ -681,6 +688,7 @@ export async function startAgentPoolWorker({
         assertCanComplete: () => run.publication?.assertCanComplete?.(),
       })
       if (taskTools.length) writer.write("framework", `Harness capability: ${taskTools.map(tool => tool.name).join(", ")} (assigned issue, direct-parent reports and child creation; company-scoped assignment; run-scoped authentication; confirmed writes; no automatic transport replay).\n`)
+      if (run.publication?.tools.length) writer.write("framework", `Harness capability: ${run.publication.tools.map(tool => tool.name).join(", ")} (managed publication and inspection handoff).\n`)
       if (provider) writer.write("framework", "Harness capability: provider_read (read-only; managed identity; no Azure CLI or user credentials).\n")
       if (providerPost) writer.write("framework", "Harness capability: provider_post (allowlisted mutations; managed identity; no automatic transport replay).\n")
       if (run.kusto) writer.write("framework", "Harness capability: platform/kusto (run-scoped token API; direct Kusto access using the worker managed identity).\n")
@@ -733,7 +741,7 @@ export async function startAgentPoolWorker({
               "A POST timeout, cancellation, connection failure or unexpected response can leave the external outcome unknown. Never blindly replay the request or retry the same observed attempt after an uncertain result. Stage reads through provider_read can lag ADO; unchanged stage state is not proof that the POST did nothing. Only a confirmed newer failed or succeededWithIssues attempt can justify another retry; otherwise stop and report the unknown outcome. On 401/403, report required service access without switching hosts or credentials.",
             ] : []),
             ...(hostedRoot ? ["When a company PR Inspector exists, use submit_branch_for_inspection with the writable repository name and local commit. The Devbox inspector reviews the exact remote commit and creates the PR externally. Without an inspector, use publish_pull_request."] : [
-              "This Devbox workspace mode supplies record_pull_request only to the designated PR Inspector. It does not provide generic branch submission or direct publication; stop and report that missing capability for other agents.",
+              "When a company PR Inspector exists, producers use submit_branch_for_inspection and retire_submission_branch for listed writable Azure Repos repositories. The harness uses existing local user credentials; never push or delete branches yourself. Only the designated inspector receives record_pull_request. Direct PR publication is not available in workspace mode.",
             ]),
             "Duplicate skills across writable repositories are qualified as Repository/skill; use them only in that repository.",
           ] : []),

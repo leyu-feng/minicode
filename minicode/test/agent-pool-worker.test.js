@@ -148,10 +148,12 @@ test("Devbox workspace-root sessions use supervisory guidance, isolated bundles 
     workspaceFactory: async () => ({
       workerShared: shared, release() {}, async checkDisk() {}, async ensureDiskSpace() {},
       async prepare() {
-        return { artifacts, manifestPath: path.join(artifacts, "workspace.json"), reviews: path.join(artifacts, "reviews"),
+        return { artifacts, publicationStorage: path.join(root, ".workers", "pi1", "publications"),
+          manifestPath: path.join(artifacts, "workspace.json"), reviews: path.join(artifacts, "reviews"),
           repositories: [
             { name: "supervisor", path: shared, readOnly: true, supervisory: true, branch: "dev", commit: "a".repeat(40) },
-            { name: "application", path: writable, readOnly: false, supervisory: false, branch: "main", commit: "b".repeat(40) },
+            { name: "application", source: "https://dev.azure.com/fixture/Project/_git/Application",
+              path: writable, readOnly: false, supervisory: false, branch: "main", commit: "b".repeat(40) },
           ] }
       },
     }),
@@ -198,6 +200,9 @@ test("Devbox workspace-root sessions use supervisory guidance, isolated bundles 
     prPolicy: { isInspector: false, inspectorAgentId: randomUUID() } })
   assert.doesNotMatch(sessionOptions.instructions, /Devbox inspector diagnostic publication exception/)
   assert.match(sessionOptions.instructions, /never push or create PRs through shell commands/)
+  assert.ok(sessionOptions.tools.some(tool => tool.name === "submit_branch_for_inspection"))
+  assert.ok(sessionOptions.tools.some(tool => tool.name === "retire_submission_branch"))
+  assert.ok(!sessionOptions.tools.some(tool => ["publish_pull_request", "record_pull_request"].includes(tool.name)))
 })
 
 for (const selectedHarness of ["claudecode", "copilotcli"]) {

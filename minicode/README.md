@@ -159,6 +159,13 @@ and tool results sent to the harness are unchanged. When Academy failed-prompt
 capture is enabled, external model failures use its existing protected evidence
 path and 1 MiB limit; prompt evidence is not included in ordinary result JSON.
 
+External harness JSON streams are bounded per event (4 MiB), not by cumulative
+protocol traffic across an assignment. Long builds and tool-heavy turns can
+therefore finish without exhausting a raw-output lifetime budget. Oversized
+events, unterminated oversized lines, assembled assistant responses above 4 MiB,
+and stderr above 4 MiB still fail explicitly and stop the harness. Run-log and
+diagnostic limits remain separate and unchanged.
+
 Hosted model errors inside HTTP 200 SSE responses retain the bounded provider
 error code, model-request number and upstream request ID, without logging the
 provider's raw error message. A later confirmed completion of the identical
@@ -597,6 +604,18 @@ resolved manifest and isolated skill cache live under
 agent-writable scratch storage. Save durable results through task/artifact APIs.
 Editing `workspace.json` requires restarting the workers.
 
+With a configured company PR Inspector, local producers receive managed
+`submit_branch_for_inspection` and `retire_submission_branch` tools for the
+manifest's writable Azure Repos repositories. The harness uses the paired
+worker's signed-in Entra user and existing Git credentials. It verifies the
+current assignment, company policy, repository identity and worker-owned worktree,
+and publishes only the requested committed revision. Create-only branches use
+`u/<worker-name>/<readable-feature-title>` with suffixes `-1` through `-10`.
+Credential-free allocation receipts under `.workers\<worker-id>\publications`
+survive process restarts and reconcile uncertain pushes without duplicating them.
+Completion stays blocked until saved submissions are verified and retired.
+GitHub workspace submissions are not supported; direct PR publication is unchanged.
+
 The designated Devbox PR Inspector may inspect a trusted handoff's exact
 repository/branch/commit with existing CLI sign-in, create the reviewed PR
 externally from its separate `u/<worker-name>/<readable-feature-title>` branch.
@@ -608,14 +627,17 @@ with the original submission ID and reviewed commit. Partial postbacks reconcile
 without duplicate work products/comments. This records an external link, not
 independent provider verification. The producer uses `retire_submission_branch`
 to verify the separate PR and delete only its original, unchanged submission
-through the managed provider; no CLI branch deletion is authorized. Logical
-ownership follows the submitting company/agent across worker-machine changes,
-not the local checkout or shared ADO credential identity. The provider must
-support `delete_submitted_branch`; older deployments fail explicitly and retain
-the source branch. Workspace mode has no generic branch-submission,
-direct-publication or `sync_repositories` tool. Initial writable worktrees are
-fetched/reset before each assignment; source and read-only checkouts stay intact.
-Other agents must report missing publication capabilities rather than improvise.
+through the managed provider; no CLI branch deletion is authorized. Local
+retirement requires this worker's durable receipt, the inspector's matching
+server-validated approval and PR work product, and independent Azure DevOps/Git
+verification of the repository, target, exact reviewed commit and both distinct
+branch tips. It deletes only the unchanged producer branch with an exact lease.
+Hosted ownership follows the submitting company/agent through its provider;
+local receipts are not portable to another worker. Older providers without
+`delete_submitted_branch` fail explicitly and retain the source branch.
+Workspace mode has no direct-publication or `sync_repositories` tool. Initial
+writable worktrees are fetched/reset before each assignment; source and read-only
+checkouts stay intact. Unsupported publication must be reported, not improvised.
 Named Devbox publishers create new PR branches as
 `u/<worker-name>/<readable-feature-title>`, with the existing `-1` through `-10`
 collision retries and durable allocation/reconciliation. Existing saved branches

@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events"
 import { spawn, execFile } from "node:child_process"
 import readline from "node:readline"
+import { Transform } from "node:stream"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -12,7 +13,8 @@ import { createHostedHarnessWorkspaceTools } from "./agent-session.js"
 
 const MAX_LOG_CHARS = 24000
 const MAX_DIAGNOSTIC_BYTES = 512 * 1024
-const MAX_HARNESS_OUTPUT_BYTES = 4 * 1024 * 1024
+const MAX_HARNESS_EVENT_BYTES = 4 * 1024 * 1024
+const MAX_HARNESS_STDERR_BYTES = 4 * 1024 * 1024
 const MAX_RECOVERY_EVIDENCE_BYTES = 128 * 1024
 const MAX_MODEL_STALL_RETRIES = 2
 
@@ -142,7 +144,9 @@ export class HostedHarnessSession extends EventEmitter {
     let temporary
     let failure = null
     let completed = false
-    let bytes = 0
+    let eventBytes = 0
+    let stderrBytes = 0
+    let outputRejected = false
     let finalText = ""
     let diagnosticBytes = 0
     let turn = 0
@@ -208,6 +212,12 @@ export class HostedHarnessSession extends EventEmitter {
       this.emit("output", { stream: "command", data, messageSummary: true })
     }
     const fail = message => { failure ??= safe(message) }
+    const rejectOutput = message => {
+      if (outputRejected) return
+      outputRejected = true
+      fail(message)
+      this.kill()
+    }
     const capture = request => {
       const requestBody = safe(JSON.parse(request.requestBody))
       return Buffer.byteLength(requestBody) > 1024 * 1024
@@ -428,26 +438,35 @@ export class HostedHarnessSession extends EventEmitter {
         child.once("error", error => fail(error.message))
         child.once("close", (code, terminationSignal) => resolve({ code, terminationSignal }))
       })
-      const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity })
-      child.stdout.on("data", data => {
-        bytes += data.length
-        if (bytes > MAX_HARNESS_OUTPUT_BYTES) {
-          fail("Hosted harness output exceeded its limit")
-          this.kill()
-        }
+      const protocol = new Transform({
+        transform: (chunk, _encoding, callback) => {
+          if (outputRejected) return callback()
+          // Bound each JSON event before readline buffers it, not the whole assignment.
+          for (let start = 0; start < chunk.length;) {
+            const newline = chunk.indexOf(10, start)
+            const end = newline === -1 ? chunk.length : newline
+            eventBytes += end - start
+            if (eventBytes > MAX_HARNESS_EVENT_BYTES) {
+              rejectOutput("Hosted harness event exceeded its 4 MiB limit")
+              return callback()
+            }
+            if (newline !== -1) eventBytes = 0
+            start = end + 1
+          }
+          callback(null, chunk)
+        },
       })
+      const lines = readline.createInterface({ input: child.stdout.pipe(protocol), crlfDelay: Infinity })
       lines.on("line", line => {
-        if (bytes > MAX_HARNESS_OUTPUT_BYTES) return
+        if (outputRejected) return
         let event
         try { event = JSON.parse(line) }
         catch {
-          fail("The Hosted harness emitted malformed JSON")
-          this.kill()
+          rejectOutput("The Hosted harness emitted malformed JSON")
           return
         }
         if (!event || typeof event !== "object" || Array.isArray(event)) {
-          fail("The Hosted harness emitted an invalid event")
-          this.kill()
+          rejectOutput("The Hosted harness emitted an invalid event")
           return
         }
         if (this.harness === "pi") {
@@ -550,12 +569,15 @@ export class HostedHarnessSession extends EventEmitter {
         if (isPi && event.type === "tool_execution_update" && !trustedTools.has(event.toolName)) {
           diagnostic(`tool pi:${safe(event.toolCallId)} ${safe(event.toolName)} update`, event.partialResult?.content)
         }
+        if (Buffer.byteLength(finalText) > MAX_HARNESS_EVENT_BYTES) {
+          rejectOutput("Hosted harness response exceeded its 4 MiB limit")
+        }
       })
       child.stderr.on("data", data => {
-        bytes += data.length
-        if (bytes > MAX_HARNESS_OUTPUT_BYTES) {
-          fail("Hosted harness output exceeded its limit")
-          this.kill()
+        if (outputRejected) return
+        stderrBytes += data.length
+        if (stderrBytes > MAX_HARNESS_STDERR_BYTES) {
+          rejectOutput("Hosted harness stderr exceeded its 4 MiB limit")
         } else output("stderr", data.toString())
       })
       child.stdin.on("error", error => {
@@ -572,6 +594,7 @@ export class HostedHarnessSession extends EventEmitter {
       const exit = await result
       processStopped = child.exitCode !== null || child.signalCode !== null
       lines.close()
+      protocol.destroy()
       if (this.controller.signal.aborted) return { exitCode: 130 }
       try {
         const final = JSON.parse(finalText.trim())
