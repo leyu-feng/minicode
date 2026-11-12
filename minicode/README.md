@@ -114,6 +114,24 @@ AgentPool provider's live worker view. Prompts, model actions, tool results and 
 the current run and binding identity; monitoring failures are reported without
 blocking task execution.
 
+Hosted OpenCode and Pi model requests have an absolute five-minute deadline,
+including authentication, response headers, and streamed response bodies. This
+is a model-request limit, not a silence timeout on tools or an assignment limit.
+Internal CLI retries of an identical unfinished request share its original
+deadline; a confirmed completed request releases that budget.
+A deadline stops the current harness and closes its bridge before starting at
+most two fresh harness turns in the same assignment and workspace. Completed,
+redacted tool evidence accompanies the fresh prompt, which must reconcile saved
+task/provider state instead of replaying commands or mutations. A retry is
+withheld if process termination is unverified, a tool is unfinished or failed,
+or the complete recovery evidence exceeds 128 KiB. Cancellation never retries.
+Exhaustion or an unsafe retry produces a model-stall alert in the existing run
+log/live activity and fails the assignment for normal operator recovery. No
+machine reboot, execution-hold bypass, or cross-assignment retry is performed.
+Native Claude/Copilot model requests are owned by those CLIs and do not pass
+through this deadline. Warm Hosted workers must reload the updated package
+before this policy applies.
+
 Pi and OpenCode assignments print `using <harness>.contained.<version> harness`
 before launching the restored CLI. Their assignment input, model-request summaries,
 native tool calls, and trusted MCP tool calls/results use the same run log and live
@@ -140,6 +158,12 @@ and inline image/audio data are redacted or omitted before logging. Model inputs
 and tool results sent to the harness are unchanged. When Academy failed-prompt
 capture is enabled, external model failures use its existing protected evidence
 path and 1 MiB limit; prompt evidence is not included in ordinary result JSON.
+
+Hosted model errors inside HTTP 200 SSE responses retain the bounded provider
+error code, model-request number and upstream request ID, without logging the
+provider's raw error message. A later confirmed completion of the identical
+request can recover the failure; closing the stream or completing a different
+request cannot.
 
 An AgentPool provider's interactive session can also launch `Minicode.Contained`
 as a regular terminal REPL, without `hosted-worker`. Set

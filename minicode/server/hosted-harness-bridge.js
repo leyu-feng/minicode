@@ -6,6 +6,7 @@ import { pipeline } from "node:stream/promises"
 
 const MAX_BODY = 4 * 1024 * 1024
 const MAX_EVENT_CHARS = 4 * 1024 * 1024
+export const HOSTED_MODEL_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
 
 async function body(request) {
   const chunks = []
@@ -18,7 +19,7 @@ async function body(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"))
 }
 
-function trackModelCompletion(chatCompletions, onCompletion) {
+function trackModelCompletion(chatCompletions, onCompletion, onFailure) {
   const decoder = new TextDecoder()
   let pending = ""
   let data = ""
@@ -49,6 +50,11 @@ function trackModelCompletion(chatCompletions, onCompletion) {
                 }
                 if (event?.error || ["error", "response.failed", "response.incomplete"].includes(event?.type)) {
                   invalid = true
+                  if (event?.type !== "response.incomplete") {
+                    const code = event?.error?.code ?? event?.response?.error?.code ?? event?.code
+                    onFailure(typeof code === "string" && /^[a-zA-Z0-9_.-]{1,100}$/.test(code)
+                      ? code : "model_stream_error")
+                  }
                   break
                 }
                 if (!chatCompletions && event?.type === "response.completed" && event.response?.status === "completed") onCompletion(true)
@@ -70,17 +76,23 @@ function trackModelCompletion(chatCompletions, onCompletion) {
   })
 }
 
-export async function startHostedHarnessBridge({ endpoint, model, getAccessToken, tools, signal, onError, onModelRequest, onModelComplete, onToolEvent, modelEnabled = true }) {
+export async function startHostedHarnessBridge({ endpoint, model, getAccessToken, tools, signal, onError, onModelRequest, onModelComplete, onToolEvent, modelEnabled = true, modelRequestTimeoutMs = HOSTED_MODEL_REQUEST_TIMEOUT_MS }) {
+  if (!Number.isSafeInteger(modelRequestTimeoutMs) || modelRequestTimeoutMs <= 0) throw new Error("Invalid Hosted model request deadline")
   const upstream = modelEnabled ? new URL(endpoint) : null
   if (upstream && (upstream.protocol !== "https:" || upstream.username || upstream.password
     || !upstream.pathname.endsWith("/responses"))) throw new Error("Invalid Hosted model endpoint")
   const secret = randomBytes(32).toString("hex")
   const toolMap = new Map(tools.map(tool => [tool.name, tool]))
+  const modelDeadlines = new Map()
   let modelRequests = 0
   let toolCalls = 0
   const server = createServer((request, response) => {
     let modelRequest
     let modelCompleted = false
+    let deadline
+    let deadlineFired = false
+    let requestDeadline
+    let streamFailure = false
     const json = (status, value) => {
       response.writeHead(status, { "Content-Type": "application/json" })
       response.end(JSON.stringify(value))
@@ -139,18 +151,40 @@ export async function startHostedHarnessBridge({ endpoint, model, getAccessToken
         turn: ++modelRequests, requestBody,
         requestKey: createHash("sha256").update(request.url).update("\0").update(requestBody).digest("hex"),
       }
-      const token = await getAccessToken({ signal })
-      signal.throwIfAborted()
+      const requestController = new AbortController()
+      const requestSignal = AbortSignal.any([signal, requestController.signal])
+      requestDeadline = modelDeadlines.get(modelRequest.requestKey) ?? { expiresAt: Date.now() + modelRequestTimeoutMs }
+      modelDeadlines.set(modelRequest.requestKey, requestDeadline)
+      const expireRequest = () => {
+        if (signal.aborted) return
+        deadlineFired = true
+        const error = new Error(`Hosted model request exceeded its ${modelRequestTimeoutMs / 1000}s deadline`)
+        error.code = "hosted_model_request_timeout"
+        requestController.abort(error)
+        onError(error.message, { ...modelRequest, code: error.code })
+        if (response.headersSent) response.destroy()
+        else json(504, { error: { message: error.message, type: error.code } })
+      }
+      const remainingMs = requestDeadline.expiresAt - Date.now()
+      if (remainingMs <= 0) { expireRequest(); return }
+      deadline = setTimeout(expireRequest, remainingMs)
+      deadline.unref()
+      const token = await getAccessToken({ signal: requestSignal })
+      requestSignal.throwIfAborted()
       onModelRequest?.(modelRequest, token)
       const remote = await fetch(target, {
-        method: "POST", redirect: "error", signal,
+        method: "POST", redirect: "error", signal: requestSignal,
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: modelRequest.requestBody,
       })
+      const requestId = remote.headers.get("x-request-id") ?? remote.headers.get("apim-request-id")
+      modelRequest = {
+        ...modelRequest, httpStatus: remote.status,
+        ...(requestId && /^[a-zA-Z0-9_.-]{1,200}$/.test(requestId) ? { requestId } : {}),
+      }
       if (!remote.ok) {
         onError(`Hosted model request failed (HTTP ${remote.status})`, {
-          ...modelRequest, code: `http_${remote.status}`, httpStatus: remote.status,
-          requestId: remote.headers.get("x-request-id") ?? remote.headers.get("apim-request-id"),
+          ...modelRequest, code: `http_${remote.status}`,
         })
         await remote.body?.cancel()
         json(remote.status, { error: { message: `Hosted model request failed (HTTP ${remote.status})`, type: "hosted_model_error" } })
@@ -161,14 +195,25 @@ export async function startHostedHarnessBridge({ endpoint, model, getAccessToken
       if (remote.body) {
         const streams = [Readable.fromWeb(remote.body)]
         if (/^text\/event-stream(?:;|$)/i.test(contentType)) {
-          streams.push(trackModelCompletion(request.url.endsWith("/chat/completions"), completed => { modelCompleted = completed }))
+          streams.push(trackModelCompletion(request.url.endsWith("/chat/completions"),
+            completed => { modelCompleted = completed },
+            code => {
+              streamFailure = true
+              onError(`Hosted model stream failed (${code}; model request ${modelRequest.turn}${modelRequest.requestId ? `; request ID ${modelRequest.requestId}` : ""})`,
+                { ...modelRequest, code, streamFailure: true })
+            }))
         }
-        await pipeline(...streams, response, { signal })
+        await pipeline(...streams, response, { signal: requestSignal })
       } else response.end()
+      if (modelDeadlines.get(modelRequest.requestKey) === requestDeadline) modelDeadlines.delete(modelRequest.requestKey)
       if (modelCompleted) onModelComplete?.(modelRequest)
     })().catch(error => {
+      if (deadlineFired) return
+      // Preserve the reported provider error instead of its secondary client disconnect.
+      if (!signal.aborted && streamFailure && error.code === "ERR_STREAM_PREMATURE_CLOSE") return
       // Harnesses can close a completed SSE response before the upstream HTTP EOF.
       if (!signal.aborted && modelCompleted && error.code === "ERR_STREAM_PREMATURE_CLOSE") {
+        if (modelDeadlines.get(modelRequest.requestKey) === requestDeadline) modelDeadlines.delete(modelRequest.requestKey)
         onModelComplete?.(modelRequest)
         return
       }
@@ -176,7 +221,7 @@ export async function startHostedHarnessBridge({ endpoint, model, getAccessToken
         modelRequest ? { ...modelRequest, code: error.cause?.code ?? error.code } : undefined)
       if (response.headersSent) response.destroy()
       else json(500, { error: { message: "Hosted harness request failed", type: "hosted_bridge_error" } })
-    })
+    }).finally(() => clearTimeout(deadline))
   })
   server.listen(0, "127.0.0.1")
   await once(server, "listening")

@@ -316,7 +316,11 @@ for (const scenario of [
   { name: "unsuccessful Responses completion", frame: 'data: {"type":"response.completed","response":{"status":"incomplete"}}\n\n' },
   { name: "unterminated completion event", frame: 'data: {"type":"response.completed","response":{"status":"completed"}}\n' },
   { name: "malformed stream before completion", frame: 'data: {invalid}\n\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n' },
-  { name: "failed Chat Completions stream", route: "chat/completions", frame: 'data: {"error":{"message":"Request failed"}}\n\ndata: [DONE]\n\n' },
+  { name: "failed Chat Completions stream", route: "chat/completions", frame: 'data: {"error":{"message":"Request failed"}}\n\ndata: [DONE]\n\n', providerCode: "model_stream_error" },
+  { name: "Responses capacity error", frame: 'data: {"type":"error","error":{"code":"no_capacity","message":"PRIVATE_PROVIDER_DETAIL"}}\n\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"no_capacity"}}}\n\n', providerCode: "no_capacity" },
+  { name: "Responses capacity error with normal upstream EOF", frame: 'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"no_capacity"}}}\n\n', providerCode: "no_capacity", upstreamEnds: true },
+  { name: "Responses capacity error followed by a confirmed retry", frame: 'data: {"type":"error","code":"no_capacity"}\n\n', providerCode: "no_capacity", retry: "same", success: true },
+  { name: "Responses error with an unsafe provider code", frame: 'data: {"type":"error","code":"PRIVATE_PROVIDER_DETAIL\\ninvalid"}\n\n', providerCode: "model_stream_error" },
   { name: "non-SSE response", frame: 'data: {"type":"response.completed","response":{"status":"completed"}}\n\n', contentType: "application/json" },
 ]) {
   test(`client closing ${scenario.name} preserves the correct assignment outcome`, { timeout: 10000 }, async t => {
@@ -337,6 +341,12 @@ for (const scenario of [
           : 'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
         { headers: { "Content-Type": "text/event-stream" } })
         : new Response('{"output":[]}')
+      if (scenario.upstreamEnds) {
+        cancelled()
+        return new Response(scenario.frame, { headers: {
+          "Content-Type": "text/event-stream", "apim-request-id": "fixture-request",
+        } })
+      }
       return new Response(new ReadableStream({
         start(controller) {
           const bytes = Buffer.from(scenario.frame)
@@ -345,7 +355,10 @@ for (const scenario of [
           } else controller.enqueue(bytes)
         },
         cancel() { cancelled() },
-      }), { headers: { "Content-Type": scenario.contentType ?? "text/event-stream" } })
+      }), { headers: {
+        "Content-Type": scenario.contentType ?? "text/event-stream",
+        ...(scenario.providerCode ? { "apim-request-id": "fixture-request" } : {}),
+      } })
     })
     let toolCalls = 0
     const session = new HostedHarnessSession({
@@ -374,6 +387,7 @@ for (const scenario of [
           received.push(Buffer.from(chunk.value));
         }
         if (Buffer.concat(received).toString("utf8") !== ${JSON.stringify(scenario.frame)}) throw new Error("Response bytes changed");
+        ${scenario.upstreamEnds ? 'if (!(await reader.read()).done) throw new Error("Expected normal upstream EOF");' : ""}
         await reader.cancel();
         const tool = await post("/mcp", {
           jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "provider_read", arguments: {} }
@@ -397,11 +411,20 @@ for (const scenario of [
     assert.equal(requests, scenario.priorCompletion ? 3 : 2, output.join(""))
     assert.equal(toolCalls, 1)
     assert.ok(output.join("").includes("Finished"))
+    assert.ok(!output.join("").includes("PRIVATE_PROVIDER_DETAIL"))
+    if (scenario.providerCode) {
+      assert.ok(output.join("").includes(`Hosted model stream failed (${scenario.providerCode}; model request 1; request ID fixture-request)`))
+    }
     if (scenario.success) assert.deepEqual(result, { exitCode: 0, summary: "Finished" })
     else {
       assert.equal(result.exitCode, 1)
-      assert.equal(result.error, "Premature close")
-      assert.equal(result.modelFailure.code, "ERR_STREAM_PREMATURE_CLOSE")
+      assert.equal(result.error, scenario.providerCode
+        ? `Hosted model stream failed (${scenario.providerCode}; model request 1; request ID fixture-request)` : "Premature close")
+      assert.equal(result.modelFailure.code, scenario.providerCode ?? "ERR_STREAM_PREMATURE_CLOSE")
+      if (scenario.providerCode) {
+        assert.equal(result.modelFailure.requestId, "fixture-request")
+        assert.equal(result.modelFailure.httpStatus, 200)
+      }
     }
   })
 }
@@ -719,6 +742,248 @@ test("large repeated model diagnostics are explicitly truncated without failing 
   assert.equal(diagnostics.filter(data => data.includes("[Hosted diagnostic log limit reached]")).length, 1)
   assert.ok(Buffer.byteLength(diagnostics.join("")) <= 512 * 1024 + 100)
 })
+
+for (const stage of ["authentication", "headers", "stream"]) {
+  test(`Hosted model deadline aborts stalled ${stage} exactly once`, { timeout: 5000 }, async t => {
+    const fetchOriginal = globalThis.fetch
+    let upstreamSignal
+    let streamCancelled = false
+    let chunks = 0
+    const waitForAbort = signal => new Promise((resolve, reject) => {
+      upstreamSignal = signal
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+    })
+    t.mock.method(globalThis, "fetch", async (url, options) => {
+      if (!String(url).startsWith("https://model.example")) return fetchOriginal(url, options)
+      upstreamSignal = options.signal
+      if (stage === "headers") return waitForAbort(options.signal)
+      return new Response(new ReadableStream({
+        start(controller) {
+          const interval = setInterval(() => {
+            chunks++
+            controller.enqueue(Buffer.from(": upstream still sending bytes\n\n"))
+          }, 20)
+          this.stop = () => clearInterval(interval)
+        },
+        cancel() { this.stop(); streamCancelled = true },
+      }), { headers: { "Content-Type": "text/event-stream" } })
+    })
+    const errors = []
+    let report
+    const reported = new Promise(resolve => { report = resolve })
+    const controller = new AbortController()
+    const bridge = await startHostedHarnessBridge({
+      endpoint, model: "deployment", tools: [], signal: controller.signal, modelRequestTimeoutMs: 120,
+      getAccessToken: async ({ signal }) => stage === "authentication" ? waitForAbort(signal) : "private-model-token",
+      onError: (message, request) => { errors.push({ message, code: request?.code }); report() },
+    })
+    t.after(async () => { controller.abort(); await bridge.close() })
+    const response = await fetchOriginal(`${bridge.baseUrl}/openai/v1/responses`, {
+      method: "POST", headers: { Authorization: `Bearer ${bridge.secret}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ stream: true, input: "Offline request" }),
+    })
+    if (stage === "stream") await assert.rejects(response.text())
+    else {
+      assert.equal(response.status, 504)
+      assert.equal((await response.json()).error.type, "hosted_model_request_timeout")
+    }
+    await reported
+    assert.equal(upstreamSignal.aborted, true)
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0].code, "hosted_model_request_timeout")
+    if (stage === "stream") {
+      assert.ok(chunks > 1, "The deadline is absolute, even when stream bytes arrive")
+      assert.equal(streamCancelled, true)
+    }
+  })
+}
+
+test("Hosted model deadlines are per request and do not time out quiet tools", { timeout: 5000 }, async t => {
+  const fetchOriginal = globalThis.fetch
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    if (!String(url).startsWith("https://model.example")) return fetchOriginal(url, options)
+    await new Promise(resolve => setTimeout(resolve, 150))
+    return Response.json({ output: [] })
+  })
+  const controller = new AbortController()
+  const errors = []
+  const bridge = await startHostedHarnessBridge({
+    endpoint, model: "deployment", signal: controller.signal, modelRequestTimeoutMs: 250,
+    getAccessToken: async () => "private-model-token", onError: message => errors.push(message),
+    tools: [{ name: "quiet_tool", parameters: {}, execute: async () => {
+      await new Promise(resolve => setTimeout(resolve, 300))
+      return "Completed without model timeout"
+    } }],
+  })
+  t.after(async () => { controller.abort(); await bridge.close() })
+  const post = (route, body) => fetchOriginal(bridge.baseUrl + route, {
+    method: "POST", headers: { Authorization: `Bearer ${bridge.secret}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+  for (let i = 0; i < 2; i++) {
+    const response = await post("/openai/v1/responses", { input: "Separate request" })
+    assert.equal(response.status, 200)
+    await response.json()
+  }
+  const tool = await (await post("/mcp", {
+    jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "quiet_tool", arguments: {} },
+  })).json()
+  assert.equal(tool.result.isError, undefined)
+  assert.equal(tool.result.content[0].text, "Completed without model timeout")
+  assert.deepEqual(errors, [])
+})
+
+for (const completed of [false, true]) {
+  test(`Hosted identical request ${completed ? "completion resets" : "unfinished retries retain"} its deadline`, { timeout: 5000 }, async t => {
+    const fetchOriginal = globalThis.fetch
+    const started = Date.now()
+    let upstreamCalls = 0
+    t.mock.method(globalThis, "fetch", async (url, options) => {
+      if (!String(url).startsWith("https://model.example")) return fetchOriginal(url, options)
+      upstreamCalls++
+      return completed ? Response.json({ output: [] }) : new Response(new ReadableStream({
+        start(controller) { controller.enqueue(Buffer.from('data: {"type":"response.output_text.delta","delta":"partial"}\n\n')) },
+      }), { headers: { "Content-Type": "text/event-stream" } })
+    })
+    const controller = new AbortController()
+    let report
+    const reported = new Promise(resolve => { report = resolve })
+    const errors = []
+    const bridge = await startHostedHarnessBridge({
+      endpoint, model: "deployment", signal: controller.signal, tools: [], modelRequestTimeoutMs: 1000,
+      getAccessToken: async () => "private-model-token",
+      onError: (message, request) => { errors.push(request.code); report() },
+    })
+    t.after(async () => { controller.abort(); await bridge.close() })
+    const post = () => fetchOriginal(bridge.baseUrl + "/openai/v1/responses", {
+      method: "POST", headers: { Authorization: `Bearer ${bridge.secret}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ stream: true, input: "Same logical request" }),
+    })
+    const first = await post()
+    if (completed) await first.json()
+    else {
+      const reader = first.body.getReader()
+      await reader.read()
+      await reader.cancel()
+      await reported
+      assert.deepEqual(errors, ["ERR_STREAM_PREMATURE_CLOSE"])
+    }
+    t.mock.method(Date, "now", () => started + 2000)
+    const next = await post()
+    if (completed) {
+      assert.equal(next.status, 200)
+      await next.json()
+      assert.equal(upstreamCalls, 2)
+      assert.deepEqual(errors, [])
+    } else {
+      assert.equal(next.status, 504)
+      assert.equal((await next.json()).error.type, "hosted_model_request_timeout")
+      assert.equal(upstreamCalls, 1, "Expired unfinished requests must not reach upstream again")
+      assert.deepEqual(errors, ["ERR_STREAM_PREMATURE_CLOSE", "hosted_model_request_timeout"])
+    }
+  })
+}
+
+for (const scenario of ["recover", "exhausted", "failed tool", "unfinished tool", "oversized evidence", "cancelled"]) {
+  test(`Hosted model-stall recovery: ${scenario}`, { timeout: 10000 }, async t => {
+    const fetchOriginal = globalThis.fetch
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "model-stall-"))
+    t.after(() => fs.rm(cwd, { recursive: true, force: true }))
+    const children = []
+    const logs = []
+    let toolCalls = 0
+    let session
+    let previousBridge
+    t.mock.method(globalThis, "fetch", async (url, options) => {
+      if (!String(url).startsWith("https://model.example")) return fetchOriginal(url, options)
+      if (scenario === "recover" && children.length > 1) return Response.json({ output: [] })
+      if (scenario === "cancelled") setImmediate(() => session.interrupt())
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true })
+      })
+    })
+    session = new HostedHarnessSession({
+      harness: "opencode", id: "recovery-run", cwd, env: {}, instructions: "Trusted policy",
+      modelRequestTimeoutMs: 150, captureFailedPrompt: scenario === "exhausted",
+      tools: [{ name: "save_checkpoint", parameters: {}, execute: async (input, { signal }) => {
+        toolCalls++
+        if (scenario === "failed tool") throw new Error("Uncertain provider outcome")
+        if (scenario === "unfinished tool") return new Promise((resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("Tool stopped with uncertain outcome")), { once: true })
+        })
+        await fs.writeFile(path.join(cwd, "saved.txt"), "preserved")
+        return scenario === "oversized evidence" ? "x".repeat(128 * 1024) : { savedId: "provider-receipt-1", token: "private-value" }
+      } }],
+      modelConfig: { endpoint, model: "deployment", getAccessToken: async () => "private-model-token" },
+      prepare: async () => {
+        if (previousBridge) await assert.rejects(fetchOriginal(previousBridge), /fetch failed/, "Previous bridge must close before retry")
+        return { harness: "opencode", command: "trusted-shim", version: "2.2.5-beta.2" }
+      },
+      spawnProcess: (_command, _args, options) => {
+        previousBridge = JSON.parse(options.env.OPENCODE_CONFIG_CONTENT).mcp.hosted.url
+        const attempt = children.length
+        if (attempt) {
+          assert.ok(children.at(-1).exitCode !== null || children.at(-1).signalCode !== null, "Previous process must exit before retry")
+          assert.equal(readFileSync(path.join(cwd, "saved.txt"), "utf8"), "preserved")
+        }
+        const child = spawn(process.execPath, ["--input-type=module", "-e", `
+          import fs from "node:fs/promises";
+          let prompt = "";
+          for await (const chunk of process.stdin) prompt += chunk;
+          if (!prompt.includes("Assigned task")) throw new Error("Missing task");
+          if (${attempt} > 0) {
+            if (!prompt.includes("HOSTED MODEL-STALL RECOVERY") || !prompt.includes("provider-receipt-1")) throw new Error("Missing recovery evidence");
+            if (prompt.includes("private-value")) throw new Error("Leaked credential");
+            if (await fs.readFile("saved.txt", "utf8") !== "preserved") throw new Error("Lost saved work");
+          }
+          const configuration = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT).mcp.hosted;
+          const base = configuration.url.replace(/\\/mcp$/, "");
+          const post = (route, body) => fetch(base + route, {
+            method: "POST", headers: { ...configuration.headers, "Content-Type": "application/json" }, body: JSON.stringify(body)
+          });
+          console.log(JSON.stringify({ type: "step_start" }));
+          if (${attempt} === 0) {
+            const tool = post("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call",
+              params: { name: "save_checkpoint", arguments: {} } });
+            ${scenario === "unfinished tool" ? 'tool.catch(() => {}); await new Promise(resolve => setTimeout(resolve, 50));' : "await (await tool).text();"}
+          }
+          await (await post("/openai/v1/responses", { input: "Offline model request" })).text();
+          console.log(JSON.stringify({ type: "text", part: { text: "Recovered" } }));
+          console.log(JSON.stringify({ type: "step_finish" }));
+        `], options)
+        children.push(child)
+        return child
+      },
+    })
+    t.after(() => session.dispose())
+    session.on("output", event => logs.push(event.data))
+    const result = await session.write("Assigned task")
+    assert.equal(toolCalls, 1, "A fresh turn must not replay completed or uncertain tools")
+    assert.ok(children.every(child => child.exitCode !== null || child.signalCode !== null))
+    assert.equal(session.child, null)
+    assert.ok(!logs.join("").includes("private-value"))
+    assert.ok(!logs.join("").includes("private-model-token"))
+    if (scenario === "recover") {
+      assert.equal(children.length, 2)
+      assert.deepEqual(result, { exitCode: 0, summary: "Recovered" })
+      assert.match(logs.join(""), /fresh-turn retry 1\/2/)
+    } else if (scenario === "cancelled") {
+      assert.equal(children.length, 1)
+      assert.deepEqual(result, { exitCode: 130 })
+      assert.doesNotMatch(logs.join(""), /fresh-turn retry/)
+    } else {
+      assert.equal(children.length, scenario === "exhausted" ? 3 : 1)
+      assert.equal(result.exitCode, 1)
+      assert.equal(result.modelFailure.code, "hosted_model_request_timeout")
+      assert.match(result.error, /operator attention required/)
+      assert.match(result.error, scenario === "exhausted" ? /two fresh-turn retries exhausted/ : /safe retry could not be verified/)
+      if (scenario === "exhausted") {
+        assert.ok(result.promptEvidence.requestBody.includes("Offline model request"))
+        assert.equal(Object.keys(result).includes("promptEvidence"), false)
+      }
+    }
+  })
+}
 
 test("trusted tool errors produce a correlated result without becoming a model failure", async t => {
   const controller = new AbortController()
