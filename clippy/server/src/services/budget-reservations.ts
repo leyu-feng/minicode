@@ -66,3 +66,24 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
     return { ...reservation, reused: false };
   });
 }
+
+/** Only the owner of an undispatched admission may withdraw its exact hold.
+ * This is not accounting closure and cannot release an unknown provider bill. */
+export async function releaseUndispatchedRunBudget(
+  db: Db, companyId: string, runId: string, reservationId: string,
+) {
+  return withAccountingTransaction(db, companyId, async (tx) => {
+    const [run] = await tx.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId),
+    )).for("update");
+    if (!run || run.costAccountedAt) return;
+    const [released] = await tx.delete(budgetReservations).where(and(
+      eq(budgetReservations.id, reservationId), eq(budgetReservations.companyId, companyId),
+      eq(budgetReservations.runId, runId), eq(budgetReservations.state, "held"),
+    )).returning({ id: budgetReservations.id });
+    if (released) await tx.update(heartbeatRuns).set({
+      costAccountingPending: false,
+      usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) - 'accountingReceiptReady'`,
+    }).where(eq(heartbeatRuns.id, runId));
+  });
+}

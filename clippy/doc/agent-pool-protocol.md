@@ -264,10 +264,11 @@ the selected repositories' `id`, `name` and `branch`. Only workers advertising
 `hosted_repositories_v1` may receive these assignments. References are read-only
 code context, not operational instruction authority.
 
-Hosted runs request capacity using the current waiting-run count and wait at
-most two minutes for an actual idle, compatible worker connection. Admission,
-cancellation and timeout update the backlog. Provider counts never authorize
-dispatch. No compatible worker produces a visible, retriable bootstrap failure.
+Hosted demand is reconciled from the durable queued-run count, including after
+restart and when the queue drains. Runs remain queued without a capacity deadline
+until an actual idle, compatible worker can be reserved. Provider counts never
+authorize dispatch. The bounded two-minute preparation wait remains only for
+direct broker callers outside normal heartbeat queue admission.
 The trusted provider parent validates every selected ID, name and branch against
 the trusted provider catalog and restores repository snapshots. Before model
 execution, Minicode fetches the exact branches, prepares an owned primary
@@ -506,13 +507,16 @@ server-owned stop receipt bound to the run, company, worker process and result
 sequence. A result without `ready`, a lost process, an expired reconnect lease,
 or unacknowledged cancellation is not evidence of a stopped assignment.
 
-For Devbox pools, if no idle compatible worker is available, the broker fails the run with
-`agent_pool_worker_unavailable` and records bootstrap evidence that no assignment
-was dispatched. This remains a failed, explicitly retriable run, not an
-unknown-action reconciliation hold, even after repeated availability failures.
-Connect an eligible worker and retry to start a fresh assignment. A failure
-after dispatch does not receive this no-dispatch evidence. Hosted pools first
-perform the bounded capacity-request/wait flow described above.
+For Devbox and Hosted pools, heartbeat admission reserves a connected compatible
+worker before marking a queued run running. Excess tasks remain durably queued,
+respecting agent concurrency and existing task priority, until capacity returns.
+Waiting does not fail the run or consume retries. A reservation lost before
+dispatch returns the same undispatched work to the queue after startup cleanup.
+Stop, pause, budgets and task authority are rechecked through normal admission.
+Direct broker calls without queue admission still return
+`agent_pool_worker_unavailable` with no-dispatch bootstrap evidence when no worker
+is available. A failure after dispatch never receives this evidence and never
+automatically replays the assignment.
 
 When human input is needed, save the question, progress and durable artifacts
 through the task APIs, leave the task waiting/blocked, and finish the assignment
@@ -554,8 +558,8 @@ before delivering larger tasks.
 
 Unversioned legacy hellos mean protocol 1 with no capabilities. Updated servers
 skip workers without `skill_bundle_v1` and `pr_inspector_v1`; tasks with instructions additionally
-require the explicit inline capability. If none is compatible the run fails
-with an upgrade/connect instruction. New Minicode workers still accept legacy
+require the explicit inline capability. If none is compatible, normal heartbeat
+work remains queued until a compatible worker connects. New Minicode workers still accept legacy
 tasks from older servers with no inline instructions or skill metadata, but those
 servers do not provide managed operational skills or integrity validation.
 Unknown capabilities and additive optional fields may be ignored; unsupported

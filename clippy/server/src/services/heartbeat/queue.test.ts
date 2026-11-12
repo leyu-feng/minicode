@@ -184,4 +184,21 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     expect(deps.treeControlSvc.getActivePauseHoldGate).not.toHaveBeenCalled();
     expect(deps.executeRun).not.toHaveBeenCalled();
   });
+
+  it("dispatches earlier successful claims when a later batch claim fails", async () => {
+    const { run, agent, company } = await fixture("queued");
+    const [later] = await db.insert(heartbeatRuns).values({
+      companyId: company.id, agentId: agent.id, status: "queued", invocationSource: "on_demand",
+    }).returning();
+    const deps = callbacks(db);
+    const concurrentAgent = { ...agent, runtimeConfig: { heartbeat: { maxConcurrentRuns: 20 } } };
+    const failure = new Error("Fixture claim lookup failed");
+    deps.getAgent.mockResolvedValueOnce(concurrentAgent).mockResolvedValueOnce(concurrentAgent)
+      .mockResolvedValueOnce(concurrentAgent).mockRejectedValueOnce(failure);
+    deps.resolveResponsibleUserIdForRun = vi.fn(async () => "queue-owner");
+    await expect(createHeartbeatQueue(db, deps).startNextQueuedRunForAgent(agent.id)).rejects.toThrow(failure);
+    expect(deps.executeRun).toHaveBeenCalledExactlyOnceWith(run.id);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, later.id)))[0]?.status).toBe("queued");
+    await Promise.all(deps.activeRunExecutionPromises);
+  });
 });

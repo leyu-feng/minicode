@@ -63,14 +63,25 @@ interface Peer {
   run: Run | null;
   expiry?: ReturnType<typeof setTimeout>;
   reservedRunId?: string;
+  retiring?: boolean;
+}
+
+export type AgentPoolWorkerRequest = Pick<AdapterExecutionContext, "runId" | "agent" | "config" | "context">;
+
+export class AgentPoolCapacityWaitError extends Error {
+  constructor() {
+    super("Waiting for a connected, compatible AgentPool worker");
+    this.name = "AgentPoolCapacityWaitError";
+  }
 }
 
 export class AgentPoolBroker {
   readonly serverInstanceId = randomUUID();
   private peers = new Map<string, Peer>();
+  private reservations = new Set<string>();
   private deliveries = new Map<string, Promise<void>>();
   private revokedWorkers = new Set<string>();
-  prepareExecution?: (ctx: AdapterExecutionContext) => Promise<void | {
+  prepareExecution?: (ctx: AdapterExecutionContext, options?: { waitForWorker: boolean }) => Promise<void | {
     githubCredential?: AgentPoolGitHubCredential; gitIdentity?: AgentPoolGitIdentity; prPolicy?: AgentPoolPrPolicy;
   }>;
 
@@ -89,7 +100,7 @@ export class AgentPoolBroker {
       && (peer.ready || peer.run !== null) && peer.socket?.readyState === WebSocket.OPEN);
   }
 
-  private requiredCapabilities(ctx: AdapterExecutionContext) {
+  private requiredCapabilities(ctx: AgentPoolWorkerRequest) {
     const selection = ctx.context.paperclipHostedRepositories;
     const allRepositories = selection !== null && typeof selection === "object"
       && "mode" in selection && selection.mode === "all_repositories";
@@ -101,7 +112,7 @@ export class AgentPoolBroker {
       ...(selection ? [allRepositories ? AGENT_POOL_HOSTED_WORKSPACE : AGENT_POOL_HOSTED_REPOSITORIES] : [])];
   }
 
-  hasAvailableWorker(ctx: AdapterExecutionContext): boolean {
+  hasAvailableWorker(ctx: AgentPoolWorkerRequest): boolean {
     return [...this.peers.values()].some((peer) => peer.identity.companyId === ctx.agent.companyId
       && peer.identity.poolName === (ctx.config.name ?? "default") && peer.ready && !peer.run
       && peer.socket?.readyState === WebSocket.OPEN
@@ -109,7 +120,13 @@ export class AgentPoolBroker {
       && this.requiredCapabilities(ctx).every((capability) => peer.capabilities.includes(capability)));
   }
 
-  reserveAvailableWorker(ctx: AdapterExecutionContext): boolean {
+  reserveAvailableWorker(ctx: AgentPoolWorkerRequest): boolean {
+    const reserved = [...this.peers.values()].find(peer => peer.reservedRunId === ctx.runId);
+    if (reserved && reserved.identity.companyId === ctx.agent.companyId
+      && reserved.identity.poolName === (ctx.config.name ?? "default") && !reserved.retiring && !reserved.run
+      && reserved.socket?.readyState === WebSocket.OPEN && this.executionAvailable(reserved, ctx.runId)
+      && this.requiredCapabilities(ctx).every(capability => reserved.capabilities.includes(capability))) return true;
+    this.releaseReservation(ctx.runId);
     const available = [...this.peers.values()].filter((candidate) => candidate.identity.companyId === ctx.agent.companyId
       && candidate.identity.poolName === (ctx.config.name ?? "default") && candidate.ready && !candidate.run
       && candidate.socket?.readyState === WebSocket.OPEN
@@ -119,6 +136,7 @@ export class AgentPoolBroker {
     if (!peer) return false;
     peer.ready = false;
     peer.reservedRunId = ctx.runId;
+    this.reservations.add(ctx.runId);
     return true;
   }
 
@@ -132,11 +150,12 @@ export class AgentPoolBroker {
       && ((other.run && other.run.id !== runId) || (other.reservedRunId && other.reservedRunId !== runId)));
   }
 
-  private releaseReservation(runId: string) {
+  releaseReservation(runId: string) {
+    this.reservations.delete(runId);
     for (const peer of this.peers.values()) {
       if (peer.reservedRunId !== runId) continue;
       delete peer.reservedRunId;
-      if (!peer.run && peer.socket?.readyState === WebSocket.OPEN) peer.ready = true;
+      if (!peer.retiring && !peer.run && peer.socket?.readyState === WebSocket.OPEN) peer.ready = true;
     }
   }
 
@@ -216,6 +235,7 @@ export class AgentPoolBroker {
             peer.socket?.close(1000, "replaced connection");
             peer.socket = socket;
             peer.ready = false;
+            peer.retiring = false;
             delete peer.reservedRunId;
           } else {
             if (hello.runId) throw new Error("AgentPool server lost the execution; retry the run explicitly");
@@ -240,6 +260,7 @@ export class AgentPoolBroker {
           if (peer.run && !peer.run.completed) throw new Error("Worker cannot become idle during a run");
           const run = peer.run;
           peer.run = null;
+          peer.retiring = ready.data.retiring === true;
           peer.ready = !ready.data.retiring && !peer.reservedRunId;
           if (run?.result) {
             run.cleanup();
@@ -322,14 +343,15 @@ export class AgentPoolBroker {
   }
 
   async execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+    const queuedAdmission = this.reservations.has(ctx.runId);
     try {
-      return await this.executeRun(ctx);
+      return await this.executeRun(ctx, queuedAdmission);
     } finally {
       this.releaseReservation(ctx.runId);
     }
   }
 
-  private async executeRun(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  private async executeRun(ctx: AdapterExecutionContext, queuedAdmission: boolean): Promise<AdapterExecutionResult> {
     const name = ctx.config.name ?? "default";
     const parsedName = agentPoolNameSchema.safeParse(name);
     if (!parsedName.success || parsedName.data !== name) {
@@ -348,7 +370,7 @@ export class AgentPoolBroker {
     let gitIdentity: AgentPoolGitIdentity | undefined;
     let prPolicy: AgentPoolPrPolicy = { inspectorAgentId: null, isInspector: false };
     try {
-      const prepared = await this.prepareExecution?.(ctx);
+      const prepared = await this.prepareExecution?.(ctx, { waitForWorker: !queuedAdmission });
       prPolicy = prepared?.prPolicy ?? prPolicy;
       githubCredential = prepared?.githubCredential;
       if (agentPoolRequiresGitHubLogin(ctx.config.harness)) {
@@ -362,20 +384,27 @@ export class AgentPoolBroker {
         githubCredential = parsed.data;
       } else githubCredential = undefined;
     } catch (error) {
-      if (ctx.signal?.aborted) throw error;
+      if (ctx.signal?.aborted || error instanceof AgentPoolCapacityWaitError) throw error;
       return unavailable(error instanceof Error ? error.message : "Hosted worker preparation failed");
     }
     if (ctx.signal?.aborted) throw new Error("AgentPool run was cancelled before dispatch");
     const available = [...this.peers.values()].filter((candidate) =>
       candidate.identity.companyId === ctx.agent.companyId && candidate.identity.poolName === name
-      && (candidate.ready || candidate.reservedRunId === ctx.runId) && !candidate.run && candidate.socket?.readyState === WebSocket.OPEN);
+      && !candidate.retiring && (candidate.ready || candidate.reservedRunId === ctx.runId) && !candidate.run
+      && candidate.socket?.readyState === WebSocket.OPEN);
     const eligible = available.filter(candidate => this.executionAvailable(candidate, ctx.runId));
-    if (!eligible.length) return unavailable(`AgentPool '${name}' has no available connected worker; connect a worker and retry`);
+    if (!eligible.length) {
+      if (queuedAdmission) throw new AgentPoolCapacityWaitError();
+      return unavailable(`AgentPool '${name}' has no available connected worker; connect a worker and retry`);
+    }
     const required = this.requiredCapabilities(ctx);
     const compatible = eligible.filter(candidate => required.every(capability => candidate.capabilities.includes(capability)));
     const peer = compatible.find(candidate => candidate.reservedRunId === ctx.runId)
       ?? compatible.find(candidate => candidate.capabilities.includes(AGENT_POOL_FRAME_512K)) ?? compatible[0];
-    if (!peer) return unavailable(`AgentPool '${name}' has no available worker supporting ${required.join(", ")}; upgrade or connect a compatible worker and retry`);
+    if (!peer) {
+      if (queuedAdmission) throw new AgentPoolCapacityWaitError();
+      return unavailable(`AgentPool '${name}' has no available worker supporting ${required.join(", ")}; upgrade or connect a compatible worker and retry`);
+    }
     const { paperclipAgentInstructions: _instructions, paperclipHostedRepositories: repositories, ...context } = ctx.context;
     if (ctx.executionContinuation != null) {
       if (isDeepStrictEqual(context.executionContinuation, ctx.executionContinuation))

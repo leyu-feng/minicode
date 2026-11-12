@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
-import { agents, agentPools, agentPoolWorkers, companies, heartbeatRuns, type Db } from "@paperclipai/db";
+import { agents, agentPools, agentPoolWorkers, companies, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { AGENT_POOL_CLAUDECODE_DEFAULT_MODEL, agentPoolNameSchema, agentPoolHarnessIdSchema, agentPoolHarnessModelSchema,
   agentPoolRequiresGitHubLogin, hostedAgentRepositoriesSchema, type AgentPool, type HostedWorkerRepository,
   type hostedAgentPoolWorkerSchema, type hostedAgentPoolSlotsSchema } from "@paperclipai/shared";
@@ -8,14 +8,25 @@ import type { z } from "zod";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "../errors.js";
 import type { HostedWorkerProviderGrant } from "./entra-hosted-workers.js";
 import { defaultHostedWorkerConfig, hostedWorkerClient } from "./hosted-worker-client.js";
-import { agentPoolBroker } from "./agent-pool-broker.js";
+import { AgentPoolCapacityWaitError, agentPoolBroker } from "./agent-pool-broker.js";
 import type { AdapterExecutionContext } from "../adapters/types.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { logger } from "../middleware/logger.js";
 import { agentGitHubAuthService } from "./agent-github-auth.js";
 import { prInspectorService } from "./pr-inspector.js";
+import { parseObject } from "../adapters/utils.js";
+import { parseIssueAssigneeAdapterOverrides } from "./execution-workspace-policy.js";
 
 type Pool = typeof agentPools.$inferSelect;
+type QueueAgent = Pick<typeof agents.$inferSelect, "id" | "companyId" | "name" | "adapterType" | "adapterConfig">;
+type QueueIssue = Pick<typeof issues.$inferSelect, "assigneeAgentId" | "assigneeAdapterOverrides">;
+const waiting = new Map<string, { runs: Set<string>; tail: Promise<void> }>();
+
+function queuedExecutionConfig(agent: QueueAgent, issue: QueueIssue | null) {
+  const overrides = issue?.assigneeAgentId === agent.id
+    ? parseIssueAssigneeAdapterOverrides(issue.assigneeAdapterOverrides)?.adapterConfig : null;
+  return { ...parseObject(agent.adapterConfig), ...overrides };
+}
 
 function poolView(pool: Pool): AgentPool {
   return { ...pool, type: pool.type === "freelance" ? "devbox" : pool.type };
@@ -26,8 +37,6 @@ export function hashAgentPoolToken(token: string) {
 }
 
 export function agentPoolService(db: Db) {
-  const waiting = new Map<string, { runs: Set<string>; tail: Promise<void> }>();
-
   function hostedConfig(pool: Pool) {
     if (pool.type !== "hosted" || pool.name !== "default") {
       throw conflict("Only the default pool uses the built-in agent host.");
@@ -79,6 +88,39 @@ export function agentPoolService(db: Db) {
       .where(and(eq(agentPools.id, poolId), eq(agentPools.companyId, companyId)));
     if (!pool) throw notFound("Agent pool not found");
     return poolView(pool);
+  }
+
+  async function reportDemand(pool: Pool, signal: AbortSignal) {
+    const pending = waiting.get(pool.id) ?? { runs: new Set<string>(), tail: Promise.resolve() };
+    waiting.set(pool.id, pending);
+    const send = async () => {
+      signal.throwIfAborted();
+      const queued = await db.select({ id: heartbeatRuns.id, agent: agents, issue: {
+        assigneeAgentId: issues.assigneeAgentId, assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
+      } }).from(heartbeatRuns)
+        .innerJoin(agents, and(eq(agents.id, heartbeatRuns.agentId), eq(agents.companyId, heartbeatRuns.companyId)))
+        .leftJoin(issues, and(eq(issues.companyId, heartbeatRuns.companyId),
+          sql`${issues.id}::text = ${heartbeatRuns.contextSnapshot}->>'issueId'`))
+        .where(and(eq(heartbeatRuns.status, "queued"), eq(agents.adapterType, "agent_pool"),
+          eq(heartbeatRuns.companyId, pool.companyId)));
+      const runIds = new Set(queued.filter(({ agent, issue }) =>
+        (queuedExecutionConfig(agent, issue).name ?? "default") === pool.name).map(run => run.id));
+      for (const id of pending.runs) runIds.add(id);
+      signal.throwIfAborted();
+      const { client, poolId } = provider(await provision(pool.companyId, pool.id, signal));
+      await client.report(poolId, runIds.size, signal);
+    };
+    const report = pending.tail = pending.tail.then(send, send);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => reject(signal.reason);
+        signal.addEventListener("abort", abort, { once: true });
+        report.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+        if (signal.aborted) abort();
+      });
+    } finally {
+      if (!pending.runs.size && pending.tail === report && waiting.get(pool.id) === pending) waiting.delete(pool.id);
+    }
   }
 
   function resolveRepositories(config: Record<string, unknown>, repos: HostedWorkerRepository[]) {
@@ -181,6 +223,28 @@ export function agentPoolService(db: Db) {
   }
 
   return {
+    reserveQueuedRun(run: Pick<typeof heartbeatRuns.$inferSelect, "id">, agent: QueueAgent, issue: QueueIssue | null) {
+      if (agent.adapterType !== "agent_pool") return true;
+      const config = queuedExecutionConfig(agent, issue);
+      return agentPoolBroker.reserveAvailableWorker({
+        runId: run.id, agent, config,
+        context: { paperclipAgentInstructions: Boolean(config.instructionsFilePath) },
+      });
+    },
+    async reportQueuedDemand() {
+      if (!defaultHostedWorkerConfig()) return;
+      const pools = await db.select({ pool: agentPools }).from(agentPools)
+        .innerJoin(companies, eq(companies.id, agentPools.companyId))
+        .where(and(eq(agentPools.type, "hosted"), eq(companies.status, "active")));
+      if (!pools.length) return;
+      await Promise.all(pools.map(async ({ pool }) => {
+        try {
+          await reportDemand(pool, AbortSignal.timeout(2_000));
+        } catch (error) {
+          logger.warn({ err: error, poolId: pool.id }, "Hosted durable queue demand report failed");
+        }
+      }));
+    },
     async hostedOrganizationNames(grant: HostedWorkerProviderGrant) {
       const config = defaultHostedWorkerConfig();
       if (!config || config.apiUrl.replace(/\/+$/, "") !== grant.apiUrl.replace(/\/+$/, "")
@@ -274,7 +338,7 @@ export function agentPoolService(db: Db) {
         await client.delete(remoteId);
       }
     },
-    async prepareExecution(ctx: AdapterExecutionContext) {
+    async prepareExecution(ctx: AdapterExecutionContext, options?: { waitForWorker: boolean }) {
       const prPolicy = await prInspectorService(db).assignmentPolicy(ctx.agent.companyId, ctx.agent.id);
       const name = agentPoolNameSchema.parse(ctx.config.name ?? "default");
       const harness = agentPoolHarnessIdSchema.parse(ctx.config.harness ?? "default");
@@ -310,22 +374,11 @@ export function agentPoolService(db: Db) {
         return true;
       };
       if (await reserve()) return { githubCredential, gitIdentity, prPolicy };
+      if (options?.waitForWorker === false) throw new AgentPoolCapacityWaitError();
       const pending = waiting.get(pool.id) ?? { runs: new Set<string>(), tail: Promise.resolve() };
       waiting.set(pool.id, pending);
       pending.runs.add(ctx.runId);
-      const report = (reportSignal: AbortSignal) => {
-        const send = () => {
-          reportSignal.throwIfAborted();
-          return client.report(remoteId, pending.runs.size, reportSignal);
-        };
-        pending.tail = pending.tail.then(send, send);
-        return new Promise<void>((resolve, reject) => {
-          const abort = () => reject(reportSignal.reason);
-          reportSignal.addEventListener("abort", abort, { once: true });
-          pending.tail.then(resolve, reject).finally(() => reportSignal.removeEventListener("abort", abort));
-          if (reportSignal.aborted) abort();
-        });
-      };
+      const report = (reportSignal: AbortSignal) => reportDemand(pool, reportSignal);
       try {
         await client.status(remoteId, signal);
         await report(signal);

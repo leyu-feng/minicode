@@ -18,8 +18,10 @@ Each company gets a default named pool on first access; other pool names are
 company-unique. Board-authorized company settings manages pools, expiring
 one-time worker pairing, and revocation. A worker generates its own client
 credential, which the server hashes and validates on WebSocket connection.
-One idle Minicode worker receives each admitted assignment. No available worker
-fails the run; it does not create an indefinite queue. A network drop may resume
+One idle Minicode worker is reserved before each queued run starts. Excess work
+remains in the durable queue until a compatible worker is available, without a
+capacity deadline or consuming failure retries. Stop and admission gates still
+apply while waiting. A network drop after dispatch may resume
 the same live execution for 60 seconds without replay, but process loss requires
 an explicit retry. Normal assignment, approval, budget and cancellation gates
 remain in force. Each worker retains an independent Git checkout per agent,

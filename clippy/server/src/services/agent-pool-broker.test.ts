@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
-import { AgentPoolBroker } from "./agent-pool-broker.js";
+import { AgentPoolBroker, AgentPoolCapacityWaitError } from "./agent-pool-broker.js";
 import type { AdapterExecutionContext } from "../adapters/types.js";
 
 const resources: Array<() => Promise<void>> = [];
@@ -256,6 +256,7 @@ describe("AgentPool execution channel", () => {
     const other = context();
     other.config.name = "other";
     expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
     expect(broker.reservedWorker(ctx.runId)).toMatchObject({ id: first.id, executionId });
     expect(broker.reserveAvailableWorker(other)).toBe(false);
     broker.prepareExecution = async () => { throw new Error("Organization busy limit reached"); };
@@ -277,6 +278,32 @@ describe("AgentPool execution channel", () => {
     await client.take("retired");
     await expect(result).resolves.toMatchObject({ exitCode: 0 });
     expect(broker.hasAvailableWorker(context())).toBe(false);
+  });
+
+  it("does not revive a retiring worker when releasing a queued reservation", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker();
+    const ctx = context();
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    client.send({ type: "ready", retiring: true });
+    await client.take("retired");
+    broker.releaseReservation(ctx.runId);
+    expect(broker.reserveAvailableWorker(context())).toBe(false);
+    expect(client.messages).toEqual([]);
+  });
+
+  it("releases a reservation before changing its required capabilities", async () => {
+    const { broker, worker } = await harness();
+    const legacy = await worker();
+    const hosted = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1", "hosted_repositories_v1"]);
+    const ctx = context();
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    ctx.context.paperclipHostedRepositories = { primary: { id: "main", name: "Main", branch: "main" }, references: [] };
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    expect(broker.reservedWorker(ctx.runId)?.id).toBe(hosted.id);
+    expect(broker.status(legacy.id)).toBe("idle");
+    broker.releaseReservation(ctx.runId);
+    expect(broker.status(hosted.id)).toBe("idle");
   });
 
   it("reserves a compatible Hosted worker for only one waiter and releases it before an aborted dispatch", async () => {
@@ -328,7 +355,7 @@ describe("AgentPool execution channel", () => {
     expect(broker.reserveAvailableWorker(ctx)).toBe(true);
     if (kind === "reconnect") await first.disconnect();
     const replacement = await worker(first.id, first.instanceId, null, false);
-    await expect(broker.execute(ctx)).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
+    await expect(broker.execute(ctx)).rejects.toBeInstanceOf(AgentPoolCapacityWaitError);
     expect(replacement.messages).toEqual([]);
     expect(broker.hasAvailableWorker(ctx)).toBe(false);
     replacement.send({ type: "ready" });

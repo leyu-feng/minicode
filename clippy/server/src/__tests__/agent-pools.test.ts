@@ -13,7 +13,7 @@ import { WebSocket } from "ws";
 import { ManagedIdentityCredential } from "@azure/identity";
 import { and, eq } from "drizzle-orm";
 import { beforeAll, beforeEach, afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createDb, companies, agents, authUsers, heartbeatRuns, agentPools, agentPoolWorkers, activityLog } from "@paperclipai/db";
+import { createDb, companies, agents, authUsers, heartbeatRuns, agentPools, agentPoolWorkers, activityLog, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentPoolService, hashAgentPoolToken } from "../services/agent-pools.js";
 import { agentGitHubAuthService } from "../services/agent-github-auth.js";
@@ -21,7 +21,7 @@ import { prInspectorService } from "../services/pr-inspector.js";
 import { agentPoolPairingRoutes, agentPoolRoutes } from "../routes/agent-pools.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { setupAgentPoolWebSocketServer } from "../realtime/agent-pool-ws.js";
-import { agentPoolBroker } from "../services/agent-pool-broker.js";
+import { AgentPoolCapacityWaitError, agentPoolBroker } from "../services/agent-pool-broker.js";
 import { deleteCompany } from "../services/company-deletion.js";
 import * as hostedWorkers from "../services/hosted-worker-client.js";
 import * as remoteHttp from "../services/remote-http-fetch.js";
@@ -112,6 +112,34 @@ const execFileAsync = promisify(execFile);
     expect(await svc.validateAgentRepositories(companyId, { name: "default", harness: "claudecode", harnessModel: "claude-opus-4.6" }))
       .toMatchObject({ harnessModel: "claude-opus-4.6" });
     expect(await svc.validateAgentRepositories(companyId, { name: "default" })).not.toHaveProperty("harnessModel");
+  });
+
+  it("reports durable Hosted queue demand across service recreation and clears it after cancellation", async () => {
+    const provider = hostedProvider();
+    const svc = agentPoolService(db);
+    await svc.ensureDefault(companyId);
+    const [hosted, devbox] = await db.insert(agents).values([
+      { companyId, name: "Hosted queue", adapterType: "agent_pool", adapterConfig: { name: "default" } },
+      { companyId, name: "Devbox queue", adapterType: "agent_pool", adapterConfig: { name: "windows" } },
+    ]).returning();
+    const [override] = await db.insert(issues).values({
+      companyId, title: "Use Hosted", assigneeAgentId: devbox.id,
+      assigneeAdapterOverrides: { adapterConfig: { name: "default" } },
+    }).returning();
+    await db.insert(heartbeatRuns).values([
+      { companyId, agentId: hosted.id, status: "queued", invocationSource: "assignment" },
+      { companyId, agentId: devbox.id, status: "queued", invocationSource: "assignment",
+        contextSnapshot: { issueId: override.id } },
+      { companyId, agentId: devbox.id, status: "queued", invocationSource: "assignment" },
+      { companyId, agentId: hosted.id, status: "running", invocationSource: "assignment" },
+    ]);
+    await agentPoolService(db).reportQueuedDemand();
+    expect(provider.client.report).toHaveBeenCalledWith(provider.poolId, 2, expect.any(AbortSignal));
+    provider.client.report.mockClear();
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.companyId, companyId));
+    await agentPoolService(db).reportQueuedDemand();
+    expect(provider.client.report).toHaveBeenCalledWith(provider.poolId, 0, expect.any(AbortSignal));
+    expect(agentPoolBroker.hasConnectedWorker(companyId, "default")).toBe(false);
   });
 
   it("discovers provider harnesses only for the owning company and validates agent choices", async () => {
@@ -381,6 +409,28 @@ const execFileAsync = promisify(execFile);
       releaseReport?.();
     }
     expect(ctx.onDispatch).not.toHaveBeenCalled();
+  });
+
+  it("preserves durable capacity waiting through the production WebSocket preparation callback", async () => {
+    const provider = hostedProvider();
+    const pool = await agentPoolService(db).ensureDefault(companyId);
+    const http = createServer(app());
+    const closeWs = setupAgentPoolWebSocketServer(http, db);
+    const timeout = AbortSignal.timeout.bind(AbortSignal);
+    vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => timeout(ms === 118_000 ? 300 : ms));
+    try {
+      const prepare = agentPoolBroker.prepareExecution;
+      if (!prepare) throw new Error("Expected production worker preparation");
+      await expect(prepare({
+        runId: randomUUID(), agent: { id: randomUUID(), companyId, name: "Hosted", adapterType: "agent_pool", adapterConfig: {} },
+        config: { name: pool.name }, context: {},
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        onLog: vi.fn(async () => {}), onDispatch: vi.fn(),
+      }, { waitForWorker: false })).rejects.toBeInstanceOf(AgentPoolCapacityWaitError);
+      expect(provider.client.report).not.toHaveBeenCalled();
+    } finally {
+      closeWs();
+    }
   });
 
   it("preserves saving a Devbox agent before its workers or named pool exist", async () => {

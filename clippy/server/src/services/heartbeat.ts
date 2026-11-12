@@ -1,4 +1,5 @@
 import { createHeartbeatPreparationTiming } from "./heartbeat/preparation-timing.js";
+import { AgentPoolCapacityWaitError, agentPoolBroker } from "./agent-pool-broker.js";
 import { createHeartbeatInstructionCopyRelease, createHeartbeatInstructionWorkingCopy } from "./heartbeat/instruction-working-copy.js";
 import { prepareHeartbeatRuntimeServiceIntents, startHeartbeatRuntimeServices, recordHeartbeatAdapterRuntimeServices } from "./heartbeat/runtime-services.js";
 import { prepareHeartbeatExecutionConfiguration } from "./heartbeat/execution-configuration.js";
@@ -224,7 +225,7 @@ import {
   NativeWorkspaceFinalizationOwnershipLostError,
 } from "./native-runtime/native-workspace-finalization-ownership.js";
 
-import { reserveRunBudget } from "./budget-reservations.js";
+import { releaseUndispatchedRunBudget, reserveRunBudget } from "./budget-reservations.js";
 import { accountRunCost, createCostAccountingReconciler } from "./run-cost-accounting.js";
 
 import { toolActionDeliveryService } from "./tool-action-delivery.js";
@@ -1259,6 +1260,7 @@ export function heartbeatService(
     withChatControlRecoveryGate,
     trackWakeup,
     resumeQueuedRuns,
+    requeueRunForWorkerCapacity,
     parseHeartbeatPolicy,
     claimDueTimerHeartbeat,
   } = heartbeatQueue;
@@ -1800,6 +1802,20 @@ export function heartbeatService(
       nativeRestartRecovery?: NativeRestartRecoveryClaim;
     } = {},
   ) {
+    try {
+      return await executeRunWithWorkerReservation(runId, runOptions);
+    } finally {
+      agentPoolBroker.releaseReservation(runId);
+    }
+  }
+
+  async function executeRunWithWorkerReservation(
+    runId: string,
+    runOptions: {
+      nativeLeaseOwner?: string;
+      nativeRestartRecovery?: NativeRestartRecoveryClaim;
+    } = {},
+  ) {
     const attemptStartedAtMs = Date.now();
     let attestedQuestionResponseAtMs: number | null = null;
     if ((await getSchedulingSuppression()).suppressed) {
@@ -1815,6 +1831,7 @@ export function heartbeatService(
     }
 
     let legacyAdapterEntered = false;
+    let workerCapacityDeferred = false;
     let persistUsageCaptureFailure: (() => Promise<void>) | undefined;
     let run = await getRun(runId);
     if (!run) return;
@@ -2844,9 +2861,16 @@ export function heartbeatService(
           readNonEmptyString(runLedgerScope.projectId), runLedgerScope, runOptions.nativeLeaseOwner);
         let entered = false;
         try {
-          return await dispatchResolvedInteractionContinuationAfterAdmission((markDispatchStarted) => {
+          return await dispatchResolvedInteractionContinuationAfterAdmission(async (markDispatchStarted) => {
             entered = true;
-            return dispatch(markDispatchStarted);
+            try {
+              return await dispatch(markDispatchStarted);
+            } catch (error) {
+              if (agent.adapterType === "agent_pool" && error instanceof AgentPoolCapacityWaitError && !reservation.reused) {
+                await releaseUndispatchedRunBudget(db, run.companyId, run.id, reservation.id);
+              }
+              throw error;
+            }
           });
         } finally {
           if (!entered && !reservation.reused) {
@@ -3478,6 +3502,10 @@ export function heartbeatService(
           issueContext, onLog,
         });
       } catch (err) {
+        if (err instanceof AgentPoolCapacityWaitError) {
+          workerCapacityDeferred = true;
+          return;
+        }
         await persistUsageCaptureFailure?.();
         if (err instanceof NativeControllerDetachedForRestartError) {
           nativeSessionResumeScheduled = true;
@@ -3688,6 +3716,7 @@ export function heartbeatService(
         // released, so the UI never shows a finished task as "Live".
         if (
           latestRun &&
+          !workerCapacityDeferred &&
           !nativeSessionResumeScheduled &&
           !nativeWorkspaceFinalizeScheduled &&
           !nativeOwnershipHeld
@@ -3854,6 +3883,10 @@ export function heartbeatService(
         if (adapterExecutionControls.get(run.id) === executionControl) {
           adapterExecutionControls.delete(run.id);
         }
+      }
+      if (workerCapacityDeferred) {
+        await requeueRunForWorkerCapacity(run.id);
+        return;
       }
       // Terminalization precedes lease and adapter cleanup. Only now is the
       // owner gone; retry pending input for ordinary completions as well as Stop.

@@ -153,6 +153,8 @@ import {
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import { isUuidLike } from "@paperclipai/shared";
 import { retryChatControlAdmission } from "../chat-control-admission-retry.js";
+import { agentPoolService } from "../agent-pools.js";
+import { agentPoolBroker } from "../agent-pool-broker.js";
 
 import type { HeartbeatServiceOptions } from "../heartbeat.js";
 import type { createHeartbeatRunState } from "./run-state.js";
@@ -939,6 +941,20 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     companyAgents?: AgentOrgRow[],
     deferredPostCommitEffects?: WakeQueuePostCommitEffect[],
   ) {
+    let claimed: typeof heartbeatRuns.$inferSelect | null = null;
+    try {
+      claimed = await claimQueuedRunWithWorkerReservation(run, companyAgents, deferredPostCommitEffects);
+      return claimed;
+    } finally {
+      if (!claimed) agentPoolBroker.releaseReservation(run.id);
+    }
+  }
+
+  async function claimQueuedRunWithWorkerReservation(
+    run: typeof heartbeatRuns.$inferSelect,
+    companyAgents?: AgentOrgRow[],
+    deferredPostCommitEffects?: WakeQueuePostCommitEffect[],
+  ) {
     if (run.status !== "queued") return run;
     // Claim is the first execution boundary. startedAt survives same-run
     // retries; restart recovery may also enter executeRun already running.
@@ -1122,19 +1138,19 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       }
     }
 
-    const claimedAt = new Date();
+    const issueContext = issueId ? await getIssueExecutionContext(run.companyId, issueId) : null;
     const responsibleUserId = await resolveResponsibleUserIdForRun({
       run,
       contextSnapshot: context,
-      issueContext: issueId
-        ? await getIssueExecutionContext(run.companyId, issueId)
-        : null,
+      issueContext,
       routineEnvContext: {
         routineId: null,
         env: null,
         responsibleUserId: null,
       },
     });
+    if (!agentPoolService(db).reserveQueuedRun(run, agent, issueContext)) return null;
+    const claimedAt = new Date();
     // All ordinary and comment claims use the same company-scoped issue
     // lock. A batch may claim several runs before executeRun tracks any owner.
     async function lockIssueExecutionClaim(tx: Db) {
@@ -1642,9 +1658,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
   // activeRunExecutionPromises while the wakeup stayed "claimed" or the
   // issue stayed locked to a queued run — task-drain status would then read
   // quiescent while the database still held part of the old claim.
-  async function releaseRunClaimedJustBeforeSuppression(runId: string) {
+  async function releaseUndispatchedRunClaim(runId: string) {
     const now = new Date();
-    await db.transaction(async (tx) => {
+    const released = await db.transaction(async (tx) => {
       const released = await tx
         .update(heartbeatRuns)
         .set({
@@ -1658,7 +1674,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         )
         .returning()
         .then((rows) => rows[0] ?? null);
-      if (!released) return;
+      if (!released) return null;
 
       if (released.wakeupRequestId) {
         await tx
@@ -1686,6 +1702,20 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             ),
           );
       }
+      return released;
+    });
+    if (released) publishLiveEvent({
+      companyId: released.companyId, type: "heartbeat.run.status",
+      payload: { runId: released.id, agentId: released.agentId, status: "queued", startedAt: null, finishedAt: null },
+    });
+    return released;
+  }
+
+  async function requeueRunForWorkerCapacity(runId: string) {
+    const released = await releaseUndispatchedRunClaim(runId);
+    if (released) await appendRunEvent(released, {
+      eventType: "lifecycle", stream: "system", level: "info",
+      message: "Worker capacity changed before dispatch; work remains queued",
     });
   }
 
@@ -1856,6 +1886,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     for (const agentId of agentIds) {
       await startNextQueuedRunForAgent(agentId);
     }
+    await agentPoolService(db).reportQueuedDemand();
   }
 
   // A 403 from claimQueuedRun comes from the run's own persisted identity
@@ -2011,44 +2042,46 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       });
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-      for (const queuedRun of prioritizedRuns) {
-        if (claimedRuns.length >= availableSlots) break;
-        let claimed: typeof heartbeatRuns.$inferSelect | null;
-        try {
-          claimed = await claimQueuedRun(queuedRun, companyAgents, deferredPostCommitEffects);
-        } catch (err) {
-          if (isPermanentClaimRejection(err)) {
-            rejectedClaims.push({ run: queuedRun, err });
+      try {
+        for (const queuedRun of prioritizedRuns) {
+          if (claimedRuns.length >= availableSlots) break;
+          let claimed: typeof heartbeatRuns.$inferSelect | null;
+          try {
+            claimed = await claimQueuedRun(queuedRun, companyAgents, deferredPostCommitEffects);
+          } catch (err) {
+            if (isPermanentClaimRejection(err)) {
+              rejectedClaims.push({ run: queuedRun, err });
+              continue;
+            }
+            if (!isDeferrableClaimRejection(err)) throw err;
+            logger.warn(
+              { err, runId: queuedRun.id, agentId: queuedRun.agentId, companyId: queuedRun.companyId },
+              "queued heartbeat run claim was rejected; leaving it queued for the next recovery pass",
+            );
             continue;
           }
-          if (!isDeferrableClaimRejection(err)) throw err;
-          logger.warn(
-            { err, runId: queuedRun.id, agentId: queuedRun.agentId, companyId: queuedRun.companyId },
-            "queued heartbeat run claim was rejected; leaving it queued for the next recovery pass",
-          );
-          continue;
+          if (claimed) claimedRuns.push(claimed);
         }
-        if (claimed) claimedRuns.push(claimed);
-      }
-      if (claimedRuns.length === 0) return [];
-
-      for (const claimedRun of claimedRuns) {
-        const execution = executeRun(claimedRun.id).catch((err) => {
-          logger.error(
-            { err, runId: claimedRun.id },
-            "queued heartbeat execution failed",
-          );
-        });
-        // Register the in-flight execution so drainActiveRunExecutions() can await
-        // it. executeRun resolves only after its finally block finishes flushing
-        // run rows/events, so awaiting this promise guarantees the run's writes
-        // have landed before a caller (e.g. a test's afterEach) mutates the DB.
-        activeRunExecutionPromises.add(execution);
-        void execution.finally(() => {
-          // drainActiveRunExecutions loops on activeRunExecutionPromises.size,
-          // so an entry that never clears here would hang it forever.
-          activeRunExecutionPromises.delete(execution);
-        });
+      } finally {
+        // Earlier successful claims still own workers if a later claim fails.
+        for (const claimedRun of claimedRuns) {
+          const execution = executeRun(claimedRun.id).catch((err) => {
+            logger.error(
+              { err, runId: claimedRun.id },
+              "queued heartbeat execution failed",
+            );
+          });
+          // Register the in-flight execution so drainActiveRunExecutions() can await
+          // it. executeRun resolves only after its finally block finishes flushing
+          // run rows/events, so awaiting this promise guarantees the run's writes
+          // have landed before a caller (e.g. a test's afterEach) mutates the DB.
+          activeRunExecutionPromises.add(execution);
+          void execution.finally(() => {
+            // drainActiveRunExecutions loops on activeRunExecutionPromises.size,
+            // so an entry that never clears here would hang it forever.
+            activeRunExecutionPromises.delete(execution);
+          });
+        }
       }
       return claimedRuns;
     }).finally(async () => {
@@ -4663,7 +4696,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     dispatchPendingNativeStatusWakeups,
     startNextQueuedRunForAgent,
     countRunningRunsForAgent,
-    releaseRunClaimedJustBeforeSuppression,
+    releaseRunClaimedJustBeforeSuppression: releaseUndispatchedRunClaim,
+    requeueRunForWorkerCapacity,
     claimQueuedRun,
     withChatControlRecoveryGate,
     trackWakeup,
