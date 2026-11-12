@@ -616,6 +616,15 @@ survive process restarts and reconcile uncertain pushes without duplicating them
 Completion stays blocked until saved submissions are verified and retired.
 GitHub workspace submissions are not supported; direct PR publication is unchanged.
 
+An explicit human task message or operator continuation may authorize a named,
+inspected local onebox helper for the Devbox PR Inspector. This permits restoring
+declared dependencies and creating/tearing down only that run's isolated local
+SQL/IIS test environment; it does not permit shared/production deployment,
+machine-wide changes or direct writes outside the assigned filesystem scopes.
+Ports must be free, caches/logs stay in writable scopes, and existing feed
+authentication is used without interactive sign-in. Producers and Hosted workers
+do not receive this exception.
+
 The designated Devbox PR Inspector may inspect a trusted handoff's exact
 repository/branch/commit with existing CLI sign-in, create the reviewed PR
 externally from its separate `u/<worker-name>/<readable-feature-title>` branch.
