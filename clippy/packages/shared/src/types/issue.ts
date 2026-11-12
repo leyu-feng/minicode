@@ -48,6 +48,11 @@ import type {
 export type { IssueWorkMode };
 
 export type IssueVisibility = "open" | "private";
+
+export interface HideIssueSubtreeResponse {
+  hiddenIssueIds: string[];
+}
+
 /** Management hints for this task; never includes protected project/parent identity. */
 export interface IssuePrivacyConstraints {
   publicBlockedBy: "parent" | "project" | null;

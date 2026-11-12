@@ -1111,6 +1111,7 @@ export type {
   Issue,
   IssueVisibility,
   IssuePrivacyConstraints,
+  HideIssueSubtreeResponse,
   IssueAccessGrant,
   IssueAccessGrantAgentVisibility,
   IssueAccessGrantSubjectType,

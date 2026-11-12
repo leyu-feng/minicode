@@ -71,6 +71,25 @@ remaining operations before qualifying the whole capability.
 Gaps: Search/filter API exists; sorting/grouping/presentation defaults are not
 necessarily shared server preferences.
 
+Scoped hiding API: `POST /api/issues/{id}/hide-subtree` requires board identity,
+write-enabled company membership and `issue:read` plus `issue:mutate` access to every existing
+descendant, including hidden intermediates. It atomically stamps only previously
+visible tasks and persists per-task audit events. Foreign-company descendants are
+never included. Ordinary `PATCH /api/issues/{id}` with `hiddenAt` remains single-task.
+Neither path changes execution status or privacy, and unhiding does not cascade.
+
+Scoped agent access: `restricted` for subtree hiding. Agent identity, including
+native REST fallback, cannot pass the board gate. An agent may request an authorized
+operator's action; ordinary per-task writes retain their existing route policy.
+Hidden history remains readable under the usual task-access checks.
+
+Scoped evidence: `source-only` — [route](../../server/src/routes/issues.ts),
+[service](../../server/src/services/issues.ts), and
+[isolated regressions](../../server/src/__tests__/issues-hiding.test.ts). No live
+agent or deployed behavior is claimed. Verification: exercise operator allow,
+private-descendant all-or-nothing denial, agent/viewer/foreign-company denial,
+idempotent retry, and independent unhide. Gaps: live access verification not run.
+
 ## `properties`
 
 Review: `baseline`.

@@ -13227,6 +13227,16 @@ export function issueRoutes(
     },
   );
 
+  router.post("/issues/:id/hide-subtree", async (req, res) => {
+    assertBoard(req);
+    const root = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Task not found");
+    if (!root || !(await assertIssueReadAllowed(req, res, root))) return;
+    const result = await svc.hideSubtree(root.companyId, root.id, getActorInfo(req),
+      async (issue) => (await decideIssueAccess(req, issue, "issue:read")).allowed
+        && (await decideIssueAccess(req, issue, "issue:mutate")).allowed);
+    res.json(result);
+  });
+
   router.post("/issues/:id/monitor/check-now", async (req, res) => {
     const id = req.params.id as string;
     const issue = await getAccessibleResource(

@@ -119,7 +119,7 @@ import {
   isUuidLike,
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
 } from "@paperclipai/shared";
-import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { isForeignKeyViolation } from "../db-errors.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
@@ -208,6 +208,7 @@ import {
   persistActivity,
   publishActivity,
   type ActivityPublication,
+  type LogActivityInput,
 } from "./activity-log.js";
 import { buildIssueChanges } from "./issue-change-receipt.js";
 import { ensurePersonalPrivateProject } from "./projects.js";
@@ -10774,6 +10775,55 @@ export function issueService(db: Db) {
         await insertRowsInChunks(tx, assets, assetRows);
         await insertRowsInChunks(tx, issueAttachments, attachmentRows);
       });
+    },
+
+    hideSubtree: async (
+      companyId: string,
+      rootIssueId: string,
+      actor: Pick<LogActivityInput, "actorType" | "actorId" | "agentId" | "runId" | "agentApiKeyId">,
+      canMutate: (issue: typeof issues.$inferSelect) => Promise<boolean>,
+    ) => {
+      const publications: ActivityPublication[] = [];
+      const result = await db.transaction(async (tx) => {
+        // Share the topology lock with task creation and reparenting.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${companyId}`}, 0))`);
+        const subtreeIds = sql`with recursive subtree(id) as (
+          select id from ${issues} where id = ${rootIssueId} and company_id = ${companyId}
+          union
+          select child.id from ${issues} child
+          join subtree on child.parent_id = subtree.id
+          where child.company_id = ${companyId}
+        ) select id from subtree`;
+        const rows = await tx.select().from(issues)
+          .where(and(eq(issues.companyId, companyId), inArray(issues.id, sql`(${subtreeIds})`)))
+          .orderBy(asc(issues.id))
+          .for("update");
+        if (!rows.some((row) => row.id === rootIssueId)) throw notFound("Task not found");
+        for (const row of rows) {
+          if (!(await canMutate(row))) {
+            throw forbidden("Cannot hide this subtree because one or more tasks cannot be modified.");
+          }
+        }
+        const hiddenIssueIds = rows.filter((row) => !row.hiddenAt).map((row) => row.id);
+        if (hiddenIssueIds.length === 0) return { hiddenIssueIds };
+        const hiddenAt = new Date();
+        await tx.update(issues).set({ hiddenAt, updatedAt: hiddenAt })
+          .where(and(eq(issues.companyId, companyId), inArray(issues.id, hiddenIssueIds)));
+        for (const id of hiddenIssueIds) {
+          const { publication } = await persistActivity(tx as unknown as Db, {
+            ...actor,
+            companyId,
+            action: "issue.updated",
+            entityType: "issue",
+            entityId: id,
+            details: { hiddenAt: hiddenAt.toISOString(), source: "hide_subtree", rootIssueId },
+          });
+          publications.push(publication);
+        }
+        return { hiddenIssueIds };
+      });
+      for (const publication of publications) publishActivity(publication);
+      return result;
     },
 
     update: async (

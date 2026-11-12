@@ -681,6 +681,7 @@ export type {
   IssueSubtreeDiagnosticsResponse,
   IssueVisibility,
   IssuePrivacyConstraints,
+  HideIssueSubtreeResponse,
   IssueAccessGrant,
   IssueAccessGrantAgentVisibility,
   IssueAccessGrantSubjectType,

@@ -15,6 +15,7 @@ import type {
   IssueAccessGrantSubjectType,
   IssueVisibility,
   IssuePrivacyConstraints,
+  HideIssueSubtreeResponse,
   IssueChanges,
   IssueAttachment,
   IssueCostSummary,
@@ -238,6 +239,8 @@ export const issuesApi = {
     options
       ? api.get<Issue>(`/issues/${id}`, options)
       : api.get<Issue>(`/issues/${id}`),
+  hideSubtree: (id: string) =>
+    api.post<HideIssueSubtreeResponse>(`/issues/${id}/hide-subtree`, {}),
   getRunnerGoal: (id: string, agentId?: string | null) => {
     const query = agentId ? `?agentId=${encodeURIComponent(agentId)}` : "";
     return api.get<RunnerGoalProjection>(`/issues/${id}/runner-goal${query}`);

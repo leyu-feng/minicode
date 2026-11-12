@@ -1097,6 +1097,7 @@ interface InboxMobileToolbarProps {
   onCopy: () => void;
   onProperties: () => void;
   onHide: () => void;
+  onHideSubtree?: () => void;
 }
 
 function InboxMobileToolbar({
@@ -1109,6 +1110,7 @@ function InboxMobileToolbar({
   onCopy,
   onProperties,
   onHide,
+  onHideSubtree,
 }: InboxMobileToolbarProps) {
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -1183,6 +1185,18 @@ function InboxMobileToolbar({
               >
                 <EyeOff className="h-3 w-3" />
                 Hide this task
+              </button>
+            )}
+            {issueIdProp && onHideSubtree && (
+              <button
+                className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 text-destructive"
+                onClick={() => {
+                  onHideSubtree();
+                  setMenuOpen(false);
+                }}
+              >
+                <EyeOff className="h-3 w-3" />
+                Hide task and all subtasks
               </button>
             )}
           </PopoverContent>
@@ -3129,6 +3143,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [galleryIndex, setGalleryIndex] = useState(0);
   const [treeControlOpen, setTreeControlOpen] = useState(false);
+  const [hideSubtreeOpen, setHideSubtreeOpen] = useState(false);
   const [treeControlWakeWarning, setTreeControlWakeWarning] = useState<
     string | null
   >(null);
@@ -4225,6 +4240,22 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
       }
     },
   });
+
+  const hideSubtree = useMutation({
+    mutationFn: () => issuesApi.hideSubtree(issueId!),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["issues"] });
+      invalidateIssueCollections();
+      setHideSubtreeOpen(false);
+      navigate("/issues/all");
+    },
+  });
+
+  const openHideSubtree = () => {
+    hideSubtree.reset();
+    setHideSubtreeOpen(true);
+    setMoreOpen(false);
+  };
 
   const updateIssue = useMutation({
     mutationFn: (data: Record<string, unknown>) =>
@@ -6381,6 +6412,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
         { onSuccess: () => navigate("/issues/all") },
       );
     },
+    onHideSubtree: openHideSubtree,
   });
   inboxToolbarCallbacksRef.current = {
     onArchive: () => {
@@ -6395,6 +6427,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
         { onSuccess: () => navigate("/issues/all") },
       );
     },
+    onHideSubtree: openHideSubtree,
   };
 
   const backHref = sourceBreadcrumb.href ?? "/inbox";
@@ -6420,6 +6453,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
         onCopy={() => inboxToolbarCallbacksRef.current.onCopy()}
         onProperties={() => inboxToolbarCallbacksRef.current.onProperties()}
         onHide={() => inboxToolbarCallbacksRef.current.onHide()}
+        onHideSubtree={canManageTreeControl ? () => inboxToolbarCallbacksRef.current.onHideSubtree() : undefined}
       />,
     );
 
@@ -6432,6 +6466,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     issue?.id,
     issueHidden,
     archivePending,
+    canManageTreeControl,
     setMobileToolbar,
   ]);
 
@@ -7583,6 +7618,15 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   <EyeOff className="h-3 w-3" />
                   Hide this task
                 </button>
+                {canManageTreeControl && (
+                  <button
+                    className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 text-destructive"
+                    onClick={openHideSubtree}
+                  >
+                    <EyeOff className="h-3 w-3" />
+                    Hide task and all subtasks
+                  </button>
+                )}
               </PopoverContent>
             </Popover>
                 )}
@@ -8400,6 +8444,29 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
               </TabsContent>
             )}
           </Tabs>
+
+          <Dialog open={hideSubtreeOpen} onOpenChange={(open) => {
+            if (!hideSubtree.isPending) setHideSubtreeOpen(open);
+          }}>
+            <DialogContent showCloseButton={!hideSubtree.isPending} className="sm:max-w-sm">
+              <DialogHeader>
+                <DialogTitle>Hide task and all subtasks?</DialogTitle>
+                <DialogDescription>
+                  Hide this task and every existing descendant from task lists. History remains accessible.
+                  This does not pause or cancel work. Unhiding this task will not unhide its subtasks.
+                </DialogDescription>
+              </DialogHeader>
+              {hideSubtree.error && <p role="alert" className="text-sm text-destructive">{hideSubtree.error.message}</p>}
+              <DialogFooter>
+                <Button variant="outline" disabled={hideSubtree.isPending} onClick={() => setHideSubtreeOpen(false)}>
+                  Keep tasks
+                </Button>
+                <Button variant="destructive" disabled={hideSubtree.isPending} onClick={() => hideSubtree.mutate()}>
+                  {hideSubtree.isPending ? "Hiding..." : "Hide task and all subtasks"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
 
           <TaskTreeControlDialog
             open={treeControlOpen}

@@ -3,24 +3,26 @@ import type { Issue } from "@paperclipai/shared";
 /** Context never promotes an unrelated or orphaned automated task to a result. */
 export function includeIssueHierarchyContext(matches: Issue[], context: Issue[]): Issue[] {
   const byId = new Map([...context, ...matches].map((issue) => [issue.id, issue]));
-  const result = new Map(matches.map((issue) => [issue.id, issue]));
-  for (const match of matches) {
+  const visibleMatches = matches.filter((issue) => !issue.hiddenAt);
+  const result = new Map(visibleMatches.map((issue) => [issue.id, issue]));
+  for (const match of visibleMatches) {
     const visited = new Set([match.id]);
     let parentId = match.parentId;
     while (parentId && !visited.has(parentId)) {
       visited.add(parentId);
       const parent = byId.get(parentId);
-      if (!parent) break;
+      if (!parent || parent.hiddenAt) break;
       result.set(parent.id, parent);
       parentId = parent.parentId;
     }
   }
   // Descendants are rooted at matches, not at contextual ancestors.
-  const descendantIds = new Set(matches.map((issue) => issue.id));
+  const descendantIds = new Set(visibleMatches.map((issue) => issue.id));
   let changed = true;
   while (changed) {
     changed = false;
     for (const issue of context) {
+      if (issue.hiddenAt || byId.get(issue.id)?.hiddenAt) continue;
       if (!descendantIds.has(issue.id) && issue.parentId && descendantIds.has(issue.parentId)) {
         descendantIds.add(issue.id);
         result.set(issue.id, issue);
@@ -40,7 +42,7 @@ export async function loadIssueHierarchyChildren(
   readChildren: (parentId: string, limit: number, offset: number) => Promise<Issue[]>,
 ): Promise<{ issues: Issue[]; hasMore: boolean }> {
   const context: Issue[] = [];
-  const queue = matches.map((issue) => ({ issue, offset: 0 }));
+  const queue = matches.filter((issue) => !issue.hiddenAt).map((issue) => ({ issue, offset: 0 }));
   const visited = new Set<string>();
   const fetched = new Set<string>();
   let requests = 0;
@@ -53,7 +55,7 @@ export async function loadIssueHierarchyChildren(
     const rows = await readChildren(issue.id, limit, offset);
     requests += 1;
     for (const child of rows) {
-      if (child.companyId !== companyId || fetched.has(child.id)) continue;
+      if (child.companyId !== companyId || child.hiddenAt || fetched.has(child.id)) continue;
       fetched.add(child.id);
       context.push(child);
       if (!collapsed) queue.push({ issue: child, offset: 0 });

@@ -57,6 +57,18 @@ Manual: Seed human-created, agent-created, scheduled routine, human-initiated ch
 
 Manual: Filter by status and assignee, change grouping/sort, open a task, and return. Verify the correct records and selected view survive navigation and reload. Include an empty result and a failed request.
 
+Manual: **Hide this task** hides only the selected task. Its visible children remain
+independently listed, without reintroducing the hidden parent as hierarchy context.
+Use **Hide task and all subtasks** in the task's More menu (including the mobile inbox
+toolbar) and confirm to hide the existing subtree, even when the parent was already
+hidden. Direct history stays readable. Hiding does not pause/cancel execution or change
+privacy; later-created subtasks do not inherit hiding, and unhiding a parent does not
+unhide descendants. An inaccessible descendant rejects the whole operation.
+
+Automated: [hiding routes](../../server/src/__tests__/issues-hiding.test.ts),
+[hierarchy helpers](../../ui/src/lib/issue-hierarchy-context.test.ts), and
+[task detail](../../ui/src/pages/IssueDetail.test.tsx) cover these contracts in isolation.
+
 ### `task-detail`
 
 Automated: [task detail](../../ui/src/pages/IssueDetail.test.tsx) covers component behavior, while [issue service](../../server/src/__tests__/issues-service.test.ts) covers server contracts.

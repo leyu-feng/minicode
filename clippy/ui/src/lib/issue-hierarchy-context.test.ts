@@ -17,6 +17,16 @@ describe("task hierarchy context", () => {
     const match = task("human", "parent");
     expect(includeIssueHierarchyContext([match], [match, task("parent", "human")]).map((issue) => issue.id)).toEqual(["human", "parent"]);
   });
+  it("omits hidden ancestors and stale hidden matches without hiding independently visible children", () => {
+    const hiddenParent = { ...task("hidden-parent", "grandparent"), hiddenAt: new Date() };
+    const child = task("child", hiddenParent.id);
+    expect(includeIssueHierarchyContext([child], [hiddenParent, task("grandparent")]).map((issue) => issue.id))
+      .toEqual(["child"]);
+    expect(includeIssueHierarchyContext([hiddenParent], [task("grandchild", hiddenParent.id)])).toEqual([]);
+    expect(includeIssueHierarchyContext([task("root")], [
+      { ...task("hidden-child", "root"), hiddenAt: new Date() }, task("grandchild", "hidden-child"),
+    ]).map((issue) => issue.id)).toEqual(["root"]);
+  });
 });
 
 describe("bounded hierarchy reads", () => {
@@ -46,5 +56,16 @@ describe("bounded hierarchy reads", () => {
     expect(calls).toEqual([["root", 1]]);
     expect(await loadIssueHierarchyChildren("company", [task("root")], [], 1,
       async () => [{ ...task("foreign", "root"), companyId: "other" }])).toEqual({ issues: [], hasMore: true });
+  });
+  it("does not fetch hidden matches or expand hidden children returned by a stale read", async () => {
+    const calls: string[] = [];
+    const result = await loadIssueHierarchyChildren("company", [task("root"), {
+      ...task("hidden-root"), hiddenAt: new Date(),
+    }], [], 5, async (id) => {
+      calls.push(id);
+      return [{ ...task("hidden-child", id), hiddenAt: new Date() }];
+    });
+    expect(calls).toEqual(["root"]);
+    expect(result.issues).toEqual([]);
   });
 });

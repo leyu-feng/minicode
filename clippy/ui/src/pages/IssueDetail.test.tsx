@@ -68,6 +68,7 @@ const mockIssuesApi = vi.hoisted(() => ({
   discardQueuedComment: vi.fn(),
   markRead: vi.fn(),
   update: vi.fn(),
+  hideSubtree: vi.fn(),
   resolveRecoveryAction: vi.fn(),
   previewTreeControl: vi.fn(),
   getTreeControlState: vi.fn(),
@@ -1337,6 +1338,7 @@ describe("IssueDetail", () => {
     } as Response);
 
     mockIssuesApi.list.mockResolvedValue([]);
+    mockIssuesApi.hideSubtree.mockReset();
     mockIssuesApi.listAll.mockImplementation((...args) => mockIssuesApi.list(...args));
     mockIssuesApi.listComments.mockResolvedValue([]);
     mockIssuesApi.listAttachments.mockResolvedValue([]);
@@ -1430,6 +1432,73 @@ describe("IssueDetail", () => {
     mockLocation.state = null;
     mockRouteParams.issueId = "PAP-1";
     mockRouteParams.companyPrefix = "PAP";
+  });
+
+  it.each([false, true])("confirms explicit subtree hiding separately from ordinary Hide (mobile: %s)", async (isMobile) => {
+    mockSidebarState.isMobile = isMobile;
+    mockLocation.state = createIssueDetailLocationState("Inbox", "/inbox/mine", "inbox");
+    mockAuthApi.getSession.mockResolvedValue({ session: { userId: "user-1" }, user: { id: "user-1" } });
+    mockIssuesApi.get.mockResolvedValue(createIssue({ hiddenAt: new Date() }));
+    let resolve!: (value: { hiddenIssueIds: string[] }) => void;
+    mockIssuesApi.hideSubtree.mockReturnValue(new Promise((done) => { resolve = done; }));
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    await act(async () => { renderIssueView(); });
+    await waitForAssertion(() => {
+      expect(Array.from(container.querySelectorAll("button")).some((button) =>
+        button.textContent?.trim() === "Hide task and all subtasks")).toBe(true);
+    });
+    if (isMobile) {
+      const toolbar = mockSetMobileToolbar.mock.calls.map(([node]) => node).filter(Boolean).at(-1);
+      expect(toolbar.props.onHideSubtree).toBeTypeOf("function");
+      await act(async () => { toolbar.props.onHideSubtree(); });
+    } else {
+      const menuAction = Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.trim() === "Hide task and all subtasks")!;
+      await act(async () => { menuAction.click(); });
+    }
+    expect(mockIssuesApi.hideSubtree).not.toHaveBeenCalled();
+    const dialog = container.querySelector('[data-slot="dialog-content"]')!;
+    expect(dialog.textContent).toContain("does not pause or cancel work");
+    const confirm = Array.from(dialog.querySelectorAll("button")).find((button) =>
+      button.textContent?.trim() === "Hide task and all subtasks")!;
+    await act(async () => { confirm.click(); });
+    await waitForAssertion(() => {
+      expect(mockIssuesApi.hideSubtree).toHaveBeenCalledExactlyOnceWith("PAP-1");
+      expect(confirm.disabled).toBe(true);
+    });
+    expect(mockNavigate).not.toHaveBeenCalled();
+    await act(async () => { resolve({ hiddenIssueIds: ["child-1"] }); });
+    await waitForAssertion(() => expect(mockNavigate).toHaveBeenCalledWith("/issues/all"));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["issues"] });
+  });
+
+  it("keeps subtree hiding failures visible and allows an explicit retry", async () => {
+    mockAuthApi.getSession.mockResolvedValue({ session: { userId: "user-1" }, user: { id: "user-1" } });
+    mockIssuesApi.get.mockResolvedValue(createIssue());
+    mockIssuesApi.hideSubtree.mockRejectedValueOnce(new Error("Cannot modify a descendant"))
+      .mockResolvedValueOnce({ hiddenIssueIds: ["issue-1"] });
+    await act(async () => { renderIssueView(); });
+    let menuAction: HTMLButtonElement | undefined;
+    await waitForAssertion(() => {
+      menuAction = Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.trim() === "Hide task and all subtasks");
+      expect(menuAction).toBeTruthy();
+    });
+    await act(async () => { menuAction!.click(); });
+    const cancel = Array.from(container.querySelector('[data-slot="dialog-content"]')!.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === "Keep tasks")!;
+    await act(async () => { cancel.click(); });
+    expect(container.querySelector('[data-slot="dialog-content"]')).toBeNull();
+    expect(mockIssuesApi.hideSubtree).not.toHaveBeenCalled();
+    await act(async () => { menuAction!.click(); });
+    const confirm = Array.from(container.querySelector('[data-slot="dialog-content"]')!.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === "Hide task and all subtasks")!;
+    await act(async () => { confirm.click(); });
+    await waitForAssertion(() => expect(container.querySelector('[role="alert"]')?.textContent).toContain("Cannot modify a descendant"));
+    expect(mockNavigate).not.toHaveBeenCalled();
+    await act(async () => { confirm.click(); });
+    await waitForAssertion(() => expect(mockNavigate).toHaveBeenCalledWith("/issues/all"));
+    expect(mockIssuesApi.hideSubtree).toHaveBeenCalledTimes(2);
   });
 
   it("clears only the monitor after confirmation and refreshes the task", async () => {

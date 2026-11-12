@@ -19,7 +19,7 @@ export function useIssueHierarchyContext(companyId: string | null, matches: Issu
         visited.add(id);
         try {
           const parent: Issue = await issuesApi.get(id, { signal });
-          if (parent.companyId !== companyId) break;
+          if (parent.companyId !== companyId || parent.hiddenAt) break;
           ancestors.push(parent);
           id = parent.parentId;
         } catch (error) {
