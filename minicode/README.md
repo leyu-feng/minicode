@@ -10,6 +10,9 @@ Both drive the same `AgentSession` class and the same `auth.js`, so there is one
 agent implementation and one credential path to maintain. Nothing here needs
 native modules (no `node-pty`, no platform binaries).
 
+For a persistent Windows frontend, coordinator, and worker layout, see
+[Run Minicode in Herdr on Windows](HERDR.md).
+
 The core agent guidance requires nonrecursive discovery of one task-relevant
 folder's immediate children per request: `git ls-tree --name-only HEAD` or
 `git ls-tree --name-only HEAD:<known-folder>`, never `-r`. These list committed
