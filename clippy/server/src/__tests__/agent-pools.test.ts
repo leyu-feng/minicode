@@ -19,6 +19,8 @@ import { agentPoolService, hashAgentPoolToken } from "../services/agent-pools.js
 import { agentGitHubAuthService } from "../services/agent-github-auth.js";
 import { prInspectorService } from "../services/pr-inspector.js";
 import { agentPoolPairingRoutes, agentPoolRoutes } from "../routes/agent-pools.js";
+import { issueRoutes } from "../routes/issues.js";
+import { routeApp, seedCompanyWithBoardAccess } from "./helpers/route-test-harness.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { setupAgentPoolWebSocketServer } from "../realtime/agent-pool-ws.js";
 import { AgentPoolCapacityWaitError, agentPoolBroker } from "../services/agent-pool-broker.js";
@@ -51,6 +53,147 @@ const execFileAsync = promisify(execFile);
   });
   afterAll(async () => { agentPoolBroker.close(); await cleanup?.(); });
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+  const instructionResources: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    for (const close of instructionResources.splice(0).reverse()) await close();
+  });
+
+  async function instructionFixture() {
+    const seeded = await seedCompanyWithBoardAccess(db, "Targeted worker instructions");
+    const application = routeApp(db, seeded.actor, agentPoolRoutes, issueRoutes);
+    const svc = agentPoolService(db);
+    const pool = await svc.create(seeded.companyId, "operator");
+    const [agent] = await db.insert(agents).values({
+      companyId: seeded.companyId, name: "Paused operator agent", status: "paused",
+      adapterType: "agent_pool", adapterConfig: { name: pool.name },
+    }).returning();
+    const http = createServer(application);
+    const closeWs = setupAgentPoolWebSocketServer(http, db);
+    http.listen(0, "127.0.0.1");
+    await once(http, "listening");
+    instructionResources.push(async () => {
+      closeWs();
+      await new Promise<void>(resolve => http.close(() => resolve()));
+    });
+    const address = http.address();
+    if (!address || typeof address === "string") throw new Error("Expected server port");
+    const workers = [];
+    for (const name of ["operator-spare", "operator-target"]) {
+      const pairing = await svc.issuePairing(seeded.companyId, pool.id, name);
+      const token = createHash("sha256").update(randomUUID()).digest("hex");
+      await svc.pair(pairing.workerId, pairing.serverToken, token);
+      const socket = new WebSocket(
+        `ws://127.0.0.1:${address.port}/api/agent-pool/worker?workerId=${pairing.workerId}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      await once(socket, "open");
+      const instanceId = randomUUID();
+      const messages: Array<Record<string, unknown>> = [];
+      socket.on("message", data => messages.push(JSON.parse(data.toString())));
+      socket.send(JSON.stringify({
+        type: "hello", protocolVersion: 1, instanceId, runId: null,
+        capabilities: ["skill_bundle_v1", "pr_inspector_v1", "pr_inspection_result_v1", "task_frame_512k_v1"],
+      }));
+      await vi.waitFor(() => expect(messages.some(message => message.type === "welcome")).toBe(true));
+      socket.send(JSON.stringify({ type: "ready" }));
+      await vi.waitFor(() => expect(agentPoolBroker.status(pairing.workerId)).toBe("idle"));
+      workers.push({ id: pairing.workerId, instanceId, socket, messages });
+    }
+    const [spare, target] = workers;
+    const base = `/api/companies/${seeded.companyId}/agent-pools/${pool.id}/workers`;
+    const payload = {
+      title: "Read-only local smoke test", description: "Report your working directory; do not modify any files.",
+      assigneeAgentId: agent.id, idempotencyKey: randomUUID(),
+    };
+    return { ...seeded, application, svc, pool, agent, spare, target, base, payload };
+  }
+
+  it("identifies a worker and creates idempotent audited tasks with durable exact-worker pins", async () => {
+    const f = await instructionFixture();
+    const detail = await request(f.application).get(`${f.base}/${f.target.id}`).expect(200);
+    expect(detail.body).toMatchObject({
+      id: f.target.id, name: "operator-target", poolId: f.pool.id, paired: true, revoked: false, status: "idle",
+      connection: { instanceId: f.target.instanceId, capabilities: expect.arrayContaining(["skill_bundle_v1"]) },
+    });
+    expect(detail.headers["cache-control"]).toBe("no-store");
+    expect(JSON.stringify(detail.body)).not.toMatch(/Hash|Token/);
+    const first = await request(f.application).post(`${f.base}/${f.target.id}/instructions`).send(f.payload).expect(201);
+    expect(first.body).toMatchObject({
+      status: "todo", assigneeAgentId: f.agent.id, description: f.payload.description,
+      assigneeAdapterOverrides: { adapterConfig: { name: f.pool.name, targetWorkerId: f.target.id } },
+    });
+    const replay = await request(f.application).post(`${f.base}/${f.target.id}/instructions`).send(f.payload).expect(200);
+    expect(replay.body).toMatchObject({ id: first.body.id, deduplicated: true, deduplicationReason: "idempotency_key" });
+    const other = await request(f.application).post(`${f.base}/${f.spare.id}/instructions`).send(f.payload).expect(201);
+    expect(other.body.id).not.toBe(first.body.id);
+    expect(other.body.assigneeAdapterOverrides.adapterConfig.targetWorkerId).toBe(f.spare.id);
+    const [saved] = await db.select().from(issues).where(eq(issues.id, first.body.id));
+    const run = { id: randomUUID() };
+    expect(agentPoolService(db).reserveQueuedRun(run, f.agent, saved)).toBe(true);
+    expect(agentPoolBroker.reservedWorker(run.id)?.id).toBe(f.target.id);
+    await request(f.application).post(`${f.base}/${f.target.id}/instructions`)
+      .send({ ...f.payload, idempotencyKey: randomUUID() }).expect(409);
+    agentPoolBroker.releaseReservation(run.id);
+    expect(await db.select().from(issues).where(eq(issues.companyId, f.companyId))).toHaveLength(2);
+    const audit = await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, f.companyId), eq(activityLog.entityId, first.body.id), eq(activityLog.action, "issue.created"),
+    ));
+    expect(audit).toHaveLength(1);
+    expect(audit[0].details).toMatchObject({ targetWorkerId: f.target.id, agentPoolId: f.pool.id });
+    expect(f.spare.messages.some(message => message.type === "task")).toBe(false);
+    expect(f.target.messages.some(message => message.type === "task")).toBe(false);
+  });
+
+  it("rejects foreign identities, non-board callers and malformed instruction bodies without creating work", async () => {
+    const f = await instructionFixture();
+    const other = await seedCompanyWithBoardAccess(db, "Unrelated company");
+    const foreign = await f.svc.create(other.companyId, "foreign");
+    const unpaired = await f.svc.issuePairing(f.companyId, f.pool.id, "unpaired-target");
+    const [foreignAgent, nonPoolAgent, wrongPoolAgent] = await db.insert(agents).values([
+      { companyId: other.companyId, name: "Foreign agent", adapterType: "agent_pool", adapterConfig: { name: f.pool.name } },
+      { companyId: f.companyId, name: "Other adapter", adapterType: "process" },
+      { companyId: f.companyId, name: "Other pool", adapterType: "agent_pool", adapterConfig: { name: "another" } },
+    ]).returning();
+    await request(f.application).get(`/api/companies/${f.companyId}/agent-pools/${foreign.id}/workers/${f.target.id}`).expect(404);
+    await request(f.application).post(`${f.base}/${randomUUID()}/instructions`).send(f.payload).expect(404);
+    await request(f.application).post(`${f.base}/${unpaired.workerId}/instructions`).send(f.payload).expect(409);
+    for (const [agentId, status] of [[foreignAgent.id, 404], [nonPoolAgent.id, 400], [wrongPoolAgent.id, 400]] as const) {
+      await request(f.application).post(`${f.base}/${f.target.id}/instructions`)
+        .send({ ...f.payload, assigneeAgentId: agentId }).expect(status);
+    }
+    for (const patch of [
+      { description: " " }, { idempotencyKey: "not-a-uuid" }, { assigneeAgentId: null },
+      { status: "in_progress" }, { assigneeAdapterOverrides: { adapterConfig: { targetWorkerId: f.spare.id } } },
+    ]) {
+      await request(f.application).post(`${f.base}/${f.target.id}/instructions`).send({ ...f.payload, ...patch }).expect(400);
+    }
+    const agentApp = routeApp(db, { type: "agent", agentId: f.agent.id, companyId: f.companyId, source: "api_key" }, agentPoolRoutes, issueRoutes);
+    await request(agentApp).get(`${f.base}/${f.target.id}`).expect(403);
+    await request(agentApp).post(`${f.base}/${f.target.id}/instructions`).send(f.payload).expect(403);
+    const foreignBoard = routeApp(db, other.actor, agentPoolRoutes, issueRoutes);
+    await request(foreignBoard).post(`${f.base}/${f.target.id}/instructions`).send(f.payload).expect(403);
+    expect(await db.select().from(issues).where(eq(issues.companyId, f.companyId))).toEqual([]);
+  });
+
+  it("rejects offline, reconnecting, revoked and incompatible targets even with an idle spare", async () => {
+    const f = await instructionFixture();
+    await db.update(agents).set({ adapterConfig: { name: f.pool.name, instructionsFilePath: "managed/AGENTS.md" } })
+      .where(eq(agents.id, f.agent.id));
+    await request(f.application).post(`${f.base}/${f.target.id}/instructions`).send(f.payload).expect(409);
+    await db.update(agents).set({ adapterConfig: { name: f.pool.name } }).where(eq(agents.id, f.agent.id));
+    const closed = once(f.target.socket, "close");
+    f.target.socket.terminate();
+    await closed;
+    await vi.waitFor(() => expect(agentPoolBroker.status(f.target.id)).toBe("reconnecting"));
+    await request(f.application).post(`${f.base}/${f.target.id}/instructions`).send(f.payload).expect(409);
+    agentPoolBroker.disconnect(f.target.id, "Test target disconnected");
+    await request(f.application).post(`${f.base}/${f.target.id}/instructions`).send(f.payload).expect(409);
+    await f.svc.revoke(f.companyId, f.pool.id, f.target.id);
+    await request(f.application).post(`${f.base}/${f.target.id}/instructions`).send(f.payload).expect(409);
+    expect(agentPoolBroker.status(f.spare.id)).toBe("idle");
+    expect(f.spare.messages.some(message => message.type === "task")).toBe(false);
+    expect(await db.select().from(issues).where(eq(issues.companyId, f.companyId))).toEqual([]);
+  });
 
   function hostedProvider() {
     const poolId = randomUUID();

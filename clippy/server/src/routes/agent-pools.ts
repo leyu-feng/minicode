@@ -1,7 +1,8 @@
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
 import type { Db } from "@paperclipai/db";
 import { createAgentPoolSchema, createAgentPoolWorkerSchema, pairAgentPoolWorkerSchema,
-  hostedWorkerDemandSchema, hostedAgentPoolWorkerSchema, hostedAgentPoolSlotsSchema } from "@paperclipai/shared";
+  hostedWorkerDemandSchema, hostedAgentPoolWorkerSchema, hostedAgentPoolSlotsSchema,
+  createAgentPoolWorkerInstructionSchema } from "@paperclipai/shared";
 import { z } from "zod";
 import { validate } from "../middleware/validate.js";
 import { assertBoard, assertBoardOrAgent, assertCompanyAccess } from "./authz.js";
@@ -14,6 +15,28 @@ import { authenticateHostedWorkerProvider } from "../services/entra-hosted-worke
 import { agentGitHubAuthService } from "../services/agent-github-auth.js";
 import { agentPoolGitIdentitySchema } from "@paperclipai/shared";
 import { prInspectorService } from "../services/pr-inspector.js";
+
+export const agentPoolWorkerInstructionPath = "/companies/:companyId/agent-pools/:poolId/workers/:workerId/instructions";
+
+export function prepareAgentPoolWorkerInstruction(db: Db): RequestHandler {
+  const svc = agentPoolService(db);
+  return async (req, _res, next) => {
+    if (!req.params.workerId) { next(); return; }
+    assertBoard(req);
+    const companyId = z.string().uuid().parse(req.params.companyId);
+    const poolId = z.string().uuid().parse(req.params.poolId);
+    const workerId = z.string().uuid().parse(req.params.workerId);
+    assertCompanyAccess(req, companyId);
+    const input = createAgentPoolWorkerInstructionSchema.parse(req.body);
+    const pool = await svc.assertInstructionTarget(companyId, poolId, workerId, input.assigneeAgentId);
+    req.body = {
+      ...input, status: "todo", allowDuplicate: true,
+      idempotencyKey: `worker:${workerId}:${input.idempotencyKey}`,
+      assigneeAdapterOverrides: { adapterConfig: { name: pool.name, targetWorkerId: workerId } },
+    };
+    next();
+  };
+}
 
 export function agentPoolPairingRoutes(db: Db) {
   const router = Router();
@@ -192,11 +215,21 @@ export function agentPoolRoutes(db: Db) {
   });
   router.get(`${base}/:poolId/workers`, async (req, res) => {
     const workers = await svc.workers(company(req.params.companyId), id(req.params.poolId));
+    res.setHeader("Cache-Control", "no-store");
     res.json(workers.map((worker) => ({
       id: worker.id, poolId: worker.poolId, name: worker.name,
       paired: /^W\d\d$/.test(worker.name) || Boolean(worker.clientTokenHash), revoked: Boolean(worker.revokedAt),
       status: agentPoolBroker.status(worker.id),
     })));
+  });
+  router.get(`${base}/:poolId/workers/:workerId`, async (req, res) => {
+    const worker = await svc.worker(company(req.params.companyId), id(req.params.poolId), id(req.params.workerId));
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      id: worker.id, poolId: worker.poolId, name: worker.name,
+      paired: /^W\d\d$/.test(worker.name) || Boolean(worker.clientTokenHash), revoked: Boolean(worker.revokedAt),
+      status: agentPoolBroker.status(worker.id), connection: agentPoolBroker.connection(worker.id),
+    });
   });
   router.post(`${base}/:poolId/workers`, validate(createAgentPoolWorkerSchema), async (req, res) => {
     const companyId = company(req.params.companyId);

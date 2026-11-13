@@ -231,6 +231,8 @@ POST /api/companies/{companyId}/agent-pools/{poolId};
 GET /api/companies/{companyId}/agent-pools/{poolId}/status;
 GET /api/companies/{companyId}/agent-pools/{poolId}/repos;
 GET/POST /api/companies/{companyId}/agent-pools/{poolId}/workers;
+GET /api/companies/{companyId}/agent-pools/{poolId}/workers/{workerId};
+POST /api/companies/{companyId}/agent-pools/{poolId}/workers/{workerId}/instructions;
 DELETE /api/companies/{companyId}/agent-pools/{poolId}/workers/{workerId}.
 POST /api/agent-pool/pair consumes a ten-minute, single-use server token and binds
 a worker-generated client credential. WebSocket /api/agent-pool/worker requires
@@ -243,6 +245,16 @@ Agent access: `operator-only` for pool/worker administration; normal agent keys
 are denied. Minicode's `worker` CLI is the worker entry point. It receives only
 its assigned run context and transient run-scoped tool credentials, not board
 authority or the credentials of another pool.
+Worker detail and targeted instruction endpoints also require board identity
+and company access. Details expose connection instance/capabilities, never
+credentials. Instructions create ordinary audited tasks for a same-company,
+same-pool agent, with a durable exact-worker pin and no fallback. Busy, offline,
+unpaired, revoked or incompatible targets are rejected before creating work;
+normal task governance still applies after admission. The pin is task-scoped,
+not a per-agent worker binding. See the [instruction contract](../../doc/agent-pool-protocol.md#targeted-worker-instructions).
+Focused route and broker fixtures cover admission, persistence, idempotency,
+agent/cross-company denial and no-fallback dispatch. These are local controls,
+not deployed evidence or a permitted-agent journey.
 Hosted provider calls use Clippy's managed identity, not agent credentials.
 The provider allowlists the caller and scopes persisted pool IDs to it.
 New defaults are Hosted; additional pool creation accepts only a name and

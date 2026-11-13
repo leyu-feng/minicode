@@ -91,7 +91,18 @@ export class AgentPoolBroker {
     const peer = this.peers.get(workerId);
     if (!peer) return "offline";
     if (!peer.socket) return "reconnecting";
-    return peer.ready && !peer.run ? "idle" : "busy";
+    return peer.ready && !peer.run && !peer.reservedRunId && !peer.retiring
+      && peer.socket.readyState === WebSocket.OPEN && this.executionAvailable(peer, "") ? "idle" : "busy";
+  }
+
+  connection(workerId: string) {
+    const peer = this.peers.get(workerId);
+    return peer?.socket?.readyState === WebSocket.OPEN
+      ? { instanceId: peer.instanceId, capabilities: [...peer.capabilities] } : null;
+  }
+
+  private targetWorkerId(ctx: AgentPoolWorkerRequest) {
+    return ctx.config.targetWorkerId === undefined ? undefined : z.string().uuid().parse(ctx.config.targetWorkerId);
   }
 
   hasConnectedWorker(companyId: string, poolName: string): boolean {
@@ -113,22 +124,29 @@ export class AgentPoolBroker {
   }
 
   hasAvailableWorker(ctx: AgentPoolWorkerRequest): boolean {
+    const targetWorkerId = this.targetWorkerId(ctx);
     return [...this.peers.values()].some((peer) => peer.identity.companyId === ctx.agent.companyId
+      && (targetWorkerId === undefined || peer.identity.id === targetWorkerId)
       && peer.identity.poolName === (ctx.config.name ?? "default") && peer.ready && !peer.run
+      && !peer.retiring
       && peer.socket?.readyState === WebSocket.OPEN
       && this.executionAvailable(peer, ctx.runId)
       && this.requiredCapabilities(ctx).every((capability) => peer.capabilities.includes(capability)));
   }
 
   reserveAvailableWorker(ctx: AgentPoolWorkerRequest): boolean {
+    const targetWorkerId = this.targetWorkerId(ctx);
     const reserved = [...this.peers.values()].find(peer => peer.reservedRunId === ctx.runId);
     if (reserved && reserved.identity.companyId === ctx.agent.companyId
+      && (targetWorkerId === undefined || reserved.identity.id === targetWorkerId)
       && reserved.identity.poolName === (ctx.config.name ?? "default") && !reserved.retiring && !reserved.run
       && reserved.socket?.readyState === WebSocket.OPEN && this.executionAvailable(reserved, ctx.runId)
       && this.requiredCapabilities(ctx).every(capability => reserved.capabilities.includes(capability))) return true;
     this.releaseReservation(ctx.runId);
     const available = [...this.peers.values()].filter((candidate) => candidate.identity.companyId === ctx.agent.companyId
+      && (targetWorkerId === undefined || candidate.identity.id === targetWorkerId)
       && candidate.identity.poolName === (ctx.config.name ?? "default") && candidate.ready && !candidate.run
+      && !candidate.retiring
       && candidate.socket?.readyState === WebSocket.OPEN
       && this.executionAvailable(candidate, ctx.runId)
       && this.requiredCapabilities(ctx).every((capability) => candidate.capabilities.includes(capability)));
@@ -352,6 +370,7 @@ export class AgentPoolBroker {
   }
 
   private async executeRun(ctx: AdapterExecutionContext, queuedAdmission: boolean): Promise<AdapterExecutionResult> {
+    const targetWorkerId = this.targetWorkerId(ctx);
     const name = ctx.config.name ?? "default";
     const parsedName = agentPoolNameSchema.safeParse(name);
     if (!parsedName.success || parsedName.data !== name) {
@@ -390,6 +409,7 @@ export class AgentPoolBroker {
     if (ctx.signal?.aborted) throw new Error("AgentPool run was cancelled before dispatch");
     const available = [...this.peers.values()].filter((candidate) =>
       candidate.identity.companyId === ctx.agent.companyId && candidate.identity.poolName === name
+      && (targetWorkerId === undefined || candidate.identity.id === targetWorkerId)
       && !candidate.retiring && (candidate.ready || candidate.reservedRunId === ctx.runId) && !candidate.run
       && candidate.socket?.readyState === WebSocket.OPEN);
     const eligible = available.filter(candidate => this.executionAvailable(candidate, ctx.runId));

@@ -6,6 +6,44 @@ company and named pool; the control plane chooses an idle compatible worker.
 Workers do not need access to the control plane's filesystem or Git checkout.
 Workers in a pool must be interchangeable across all agents assigned to it;
 different worker setups belong in different pools, not per-agent worker pins.
+Board operators can explicitly target an individual worker for a tracked task;
+ordinary pool scheduling remains unchanged.
+
+### Targeted worker instructions
+
+These board-only, company-scoped endpoints use the `/api` prefix:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/companies/{companyId}/agent-pools/{poolId}/workers` | List registered worker IDs, names, pairing/revocation and live status |
+| GET | `/companies/{companyId}/agent-pools/{poolId}/workers/{workerId}` | Worker identity plus current connection instance and advertised capabilities |
+| POST | `/companies/{companyId}/agent-pools/{poolId}/workers/{workerId}/instructions` | Create a normal task pinned to that exact worker |
+
+Instruction bodies require `assigneeAgentId`, a nonblank `description` and a
+caller-generated UUID `idempotencyKey`. Optional fields are `title`, `projectId`,
+`goalId`, `parentId`, `priority` and `workMode`. The agent must belong to the same
+company and use the selected pool. The endpoint rejects unpaired, revoked,
+offline, reconnecting, busy or incompatible targets with `409`, before creating
+work. Reservations and other runs sharing the worker's hosted execution count
+as busy.
+
+Accepted instructions use the normal task-creation, authorization, audit,
+assignment, budget, approval, pause and checkout machinery. The response is the
+normal task (`201`, or `200` for an idempotent retry); read its status, comments
+and run logs through the existing issue APIs. The key is scoped to the target
+worker. Same-titled instructions for different workers are distinct tasks.
+Retry admission still checks worker availability; if a retry receives `409`,
+inspect the already accepted task rather than treating it as cancelled.
+
+The task stores `assigneeAdapterOverrides.adapterConfig` with the pool `name`
+and UUID `targetWorkerId`. Availability, reservation and final dispatch all
+respect that pin, including after server restart. No other worker can receive
+the assignment if the selected worker becomes unavailable. Acceptance observes
+current availability, not a promise of immediate execution: ordinary gates and
+competing scheduling still apply, and accepted work waits for its pinned worker
+if availability changes before dispatch. Connection loss never replays work.
+This is not an out-of-band shell or a way to interrupt a busy worker; no worker
+protocol upgrade is required.
 
 Minicode's default worktree mode isolates each worker/agent pair in a short
 sibling checkout, for example `w1a1`, `w1a2`, and `w2a1`. Agent slots are

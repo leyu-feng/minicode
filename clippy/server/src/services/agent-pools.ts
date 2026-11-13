@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { and, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import { agents, agentPools, agentPoolWorkers, companies, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { AGENT_POOL_CLAUDECODE_DEFAULT_MODEL, agentPoolNameSchema, agentPoolHarnessIdSchema, agentPoolHarnessModelSchema,
@@ -88,6 +88,14 @@ export function agentPoolService(db: Db) {
       .where(and(eq(agentPools.id, poolId), eq(agentPools.companyId, companyId)));
     if (!pool) throw notFound("Agent pool not found");
     return poolView(pool);
+  }
+
+  async function worker(companyId: string, poolId: string, workerId: string) {
+    await get(companyId, poolId);
+    const [found] = await db.select().from(agentPoolWorkers)
+      .where(and(eq(agentPoolWorkers.poolId, poolId), eq(agentPoolWorkers.id, workerId)));
+    if (!found) throw notFound("AgentPool worker not found");
+    return found;
   }
 
   async function reportDemand(pool: Pool, signal: AbortSignal) {
@@ -223,6 +231,25 @@ export function agentPoolService(db: Db) {
   }
 
   return {
+    worker,
+    async assertInstructionTarget(companyId: string, poolId: string, workerId: string, agentId: string) {
+      const pool = await get(companyId, poolId);
+      const target = await worker(companyId, poolId, workerId);
+      const [agent] = await db.select().from(agents)
+        .where(and(eq(agents.companyId, companyId), eq(agents.id, agentId)));
+      if (!agent) throw notFound("Agent not found");
+      const config: Record<string, unknown> = { ...parseObject(agent.adapterConfig), targetWorkerId: workerId };
+      if (agent.adapterType !== "agent_pool" || (config.name ?? "default") !== pool.name) {
+        throw badRequest("Select an AgentPool agent assigned to the target worker's pool.");
+      }
+      if (target.revokedAt || !target.clientTokenHash || !agentPoolBroker.hasAvailableWorker({
+        runId: randomUUID(), agent, config,
+        context: { paperclipAgentInstructions: Boolean(config.instructionsFilePath) },
+      })) {
+        throw conflict("The target worker must be paired, connected, idle and compatible; instructions were not queued.");
+      }
+      return pool;
+    },
     reserveQueuedRun(run: Pick<typeof heartbeatRuns.$inferSelect, "id">, agent: QueueAgent, issue: QueueIssue | null) {
       if (agent.adapterType !== "agent_pool") return true;
       const config = queuedExecutionConfig(agent, issue);

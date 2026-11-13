@@ -1,4 +1,5 @@
 import { parseObject } from "../adapters/utils.js";
+import { agentPoolWorkerInstructionPath, prepareAgentPoolWorkerInstruction } from "./agent-pools.js";
 import { recordPrInspectionResultSchema } from "@paperclipai/shared";
 import { prInspectionResultService } from "../services/pr-inspection-results.js";
 import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
@@ -12181,7 +12182,8 @@ export function issueRoutes(
   });
 
   router.post(
-    "/companies/:companyId/issues",
+    ["/companies/:companyId/issues", agentPoolWorkerInstructionPath],
+    prepareAgentPoolWorkerInstruction(db),
     applyCreateIssueStatusDefault,
     validateIssueMutationBody(createIssueSchema),
     async (req, res) => {
@@ -12552,6 +12554,7 @@ export function issueRoutes(
         details: {
           title: issue.title,
           identifier: issue.identifier,
+          ...(req.params.workerId ? { targetWorkerId: req.params.workerId, agentPoolId: req.params.poolId } : {}),
           ...(runDelegationParentId && issue.parentId === runDelegationParentId
             ? { parentId: issue.parentId, parentDefaultedFromRunIssue: true }
             : {}),

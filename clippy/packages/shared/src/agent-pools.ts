@@ -1,4 +1,15 @@
 import { z } from "zod";
+import { createIssueInputSchema } from "./validators/issue.js";
+
+export const createAgentPoolWorkerInstructionSchema = createIssueInputSchema.pick({
+  title: true, description: true, assigneeAgentId: true, idempotencyKey: true,
+  projectId: true, goalId: true, parentId: true, priority: true, workMode: true,
+}).extend({
+  description: z.string().trim().min(1).max(200000),
+  assigneeAgentId: z.string().uuid(),
+  idempotencyKey: z.string().uuid(),
+}).strict();
+export type CreateAgentPoolWorkerInstruction = z.input<typeof createAgentPoolWorkerInstructionSchema>;
 
 export const AGENT_POOL_PROTOCOL_VERSION = 1;
 export const AGENT_POOL_INLINE_INSTRUCTIONS = "inline_instructions_v1";
@@ -201,6 +212,13 @@ export interface AgentPoolWorker {
   paired: boolean;
   revoked: boolean;
   status: "offline" | "idle" | "busy" | "reconnecting";
+}
+
+export interface AgentPoolWorkerDetails extends AgentPoolWorker {
+  connection: {
+    instanceId: string;
+    capabilities: string[];
+  } | null;
 }
 
 export interface AgentPoolPairing {

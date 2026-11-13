@@ -40,6 +40,13 @@ dispatch. Active executions and reconnects retain their snapshot. Existing
 instruction authorization, audit, and optimistic save semantics remain in force.
 See the harness-neutral [worker protocol](agent-pool-protocol.md).
 
+Board operators can discover individual pool workers and submit normal tracked
+tasks pinned to one exact worker through the company/pool-scoped worker
+instruction API. New submissions reject unavailable or incompatible workers;
+accepted tasks retain the worker pin through queue reservation and dispatch,
+without fallback to other workers or bypassing normal execution gates. See
+[targeted worker instructions](agent-pool-protocol.md#targeted-worker-instructions).
+
 Paperclip V1 must provide a full control-plane loop for autonomous agents:
 
 1. A human board creates a company and defines goals.

@@ -119,11 +119,11 @@ export async function seedCompanyWithBoardAccess(db: Db, name: string): Promise<
 type RouterFactory = (db: Db, storage: never) => Router;
 
 /** Mounts route modules under `/api` behind a fixed actor, with the real error handler. */
-export function routeApp(db: Db, actor: BoardActor, ...routerFactories: RouterFactory[]) {
+export function routeApp(db: Db, actor: Express.Request["actor"], ...routerFactories: RouterFactory[]) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).actor = actor;
+    req.actor = actor;
     next();
   });
   for (const factory of routerFactories) {

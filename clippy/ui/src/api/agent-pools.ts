@@ -1,5 +1,6 @@
 import type { AgentPool, AgentPoolWorker, AgentPoolPairing, HostedWorkerRepository,
-  HostedWorkerStatus, HostedWorkerHarness, AgentGitHubLoginStatus, AgentPoolGitIdentity } from "@paperclipai/shared";
+  HostedWorkerStatus, HostedWorkerHarness, AgentGitHubLoginStatus, AgentPoolGitIdentity,
+  AgentPoolWorkerDetails, CreateAgentPoolWorkerInstruction, Issue } from "@paperclipai/shared";
 import { api } from "./client";
 
 const base = (companyId: string) => `/companies/${companyId}/agent-pools`;
@@ -22,6 +23,10 @@ export const agentPoolsApi = {
     api.get<HostedWorkerHarness[]>(`${base(companyId)}/${poolId}/harnesses`),
   workers: (companyId: string, poolId: string) =>
     api.get<AgentPoolWorker[]>(`${base(companyId)}/${poolId}/workers`),
+  worker: (companyId: string, poolId: string, workerId: string) =>
+    api.get<AgentPoolWorkerDetails>(`${base(companyId)}/${poolId}/workers/${workerId}`),
+  instruct: (companyId: string, poolId: string, workerId: string, instruction: CreateAgentPoolWorkerInstruction) =>
+    api.post<Issue>(`${base(companyId)}/${poolId}/workers/${workerId}/instructions`, instruction),
   pair: (companyId: string, poolId: string, name: string) =>
     api.post<AgentPoolPairing>(`${base(companyId)}/${poolId}/workers`, { name }),
   revoke: (companyId: string, poolId: string, workerId: string) =>

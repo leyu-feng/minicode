@@ -67,6 +67,81 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("reserves and dispatches the exact target even when another worker is preferred for large frames", async () => {
+    const { broker, worker } = await harness();
+    const spare = await worker();
+    const target = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1"], {}, true, false);
+    const ctx = context();
+    ctx.config.targetWorkerId = target.id;
+    expect(broker.hasAvailableWorker(ctx)).toBe(true);
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    expect(broker.reservedWorker(ctx.runId)?.id).toBe(target.id);
+    const result = broker.execute(ctx);
+    expect(await target.take("task")).toMatchObject({ runId: ctx.runId });
+    expect(spare.messages).toEqual([]);
+    target.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await target.take("ack");
+    target.send({ type: "ready" });
+    await expect(result).resolves.toMatchObject({ exitCode: 0 });
+  });
+
+  it.each(["missing", "busy", "reconnecting", "revoked", "incompatible", "wrong_pool", "wrong_company"])(
+    "never falls back to another worker when the target is %s", async state => {
+      const { broker, worker } = await harness();
+      const spare = await worker();
+      const target = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1"],
+        state === "wrong_pool" ? { poolName: "other" } : {}, state !== "incompatible");
+      const ctx = context();
+      ctx.config.targetWorkerId = state === "missing" ? randomUUID() : target.id;
+      if (state === "busy") {
+        expect(broker.reserveAvailableWorker({ ...ctx, runId: randomUUID() })).toBe(true);
+      }
+      if (state === "reconnecting") await target.disconnect();
+      if (state === "revoked") broker.revoke(target.id);
+      if (state === "wrong_company") ctx.agent.companyId = "company-b";
+      expect(broker.hasAvailableWorker(ctx)).toBe(false);
+      expect(broker.reserveAvailableWorker(ctx)).toBe(false);
+      await expect(broker.execute(ctx)).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
+      expect(ctx.onDispatch).not.toHaveBeenCalled();
+      expect(spare.messages).toEqual([]);
+      expect(target.messages).toEqual([]);
+    },
+  );
+
+  it("keeps a lost queued reservation pinned instead of dispatching to an idle replacement", async () => {
+    const { broker, worker } = await harness();
+    const spare = await worker();
+    const target = await worker();
+    const ctx = context();
+    ctx.config.targetWorkerId = target.id;
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    await target.disconnect();
+    await expect(broker.execute(ctx)).rejects.toBeInstanceOf(AgentPoolCapacityWaitError);
+    expect(spare.messages).toEqual([]);
+    expect(ctx.onDispatch).not.toHaveBeenCalled();
+  });
+
+  it("releases an old reservation when the requested worker changes and rejects malformed pins", async () => {
+    const { broker, worker } = await harness();
+    const first = await worker();
+    const second = await worker();
+    const ctx = context();
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    expect(broker.reservedWorker(ctx.runId)?.id).toBe(first.id);
+    ctx.config.targetWorkerId = second.id;
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    expect(broker.reservedWorker(ctx.runId)?.id).toBe(second.id);
+    expect(broker.status(first.id)).toBe("idle");
+    broker.releaseReservation(ctx.runId);
+    ctx.config.targetWorkerId = "";
+    expect(() => broker.hasAvailableWorker(ctx)).toThrow();
+    expect(() => broker.reserveAvailableWorker(ctx)).toThrow();
+    await expect(broker.execute(ctx)).rejects.toThrow();
+    expect(first.messages).toEqual([]);
+    expect(second.messages).toEqual([]);
+  });
+
   it.each([false, true])("acknowledges details after persistence and deduplicates replay (message: %s)", async message => {
     const { broker, worker } = await harness();
     const client = await worker();
@@ -251,17 +326,19 @@ describe("AgentPool execution channel", () => {
     const { broker, worker } = await harness();
     const executionId = randomUUID();
     const first = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1"], { executionId });
-    await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1"], { executionId, poolName: "other" });
+    const second = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1"], { executionId, poolName: "other" });
     const ctx = context();
     const other = context();
     other.config.name = "other";
     expect(broker.reserveAvailableWorker(ctx)).toBe(true);
     expect(broker.reserveAvailableWorker(ctx)).toBe(true);
     expect(broker.reservedWorker(ctx.runId)).toMatchObject({ id: first.id, executionId });
+    expect(broker.status(second.id)).toBe("busy");
     expect(broker.reserveAvailableWorker(other)).toBe(false);
     broker.prepareExecution = async () => { throw new Error("Organization busy limit reached"); };
     await expect(broker.execute(ctx)).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
     expect(first.messages).toEqual([]);
+    expect(broker.status(second.id)).toBe("idle");
     expect(broker.reserveAvailableWorker(other)).toBe(true);
   });
 
