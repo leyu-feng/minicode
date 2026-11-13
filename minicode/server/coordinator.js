@@ -253,9 +253,9 @@ async function createHarnessRunner({
           executable, model, id: randomUUID(), cwd, env: process.env, instructions, tools,
           workspaceTools: false,
         })
-        active.on("output", ({ stream, data, messageSummary }) => {
-          if (stream !== "command" && !messageSummary && data?.trim()) {
-            log(`[coordinator:${member.name}] ${data.trimEnd()}`)
+        active.on("output", ({ stream, data, toolSummary, messageSummary }) => {
+          if (!messageSummary && (toolSummary || stream === "stderr") && data?.trim()) {
+            log(`[coordinator:${member.name}] ${data.trim()}`)
           }
         })
         try { return await active.write(prompt) }

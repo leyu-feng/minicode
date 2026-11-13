@@ -64,10 +64,11 @@ test("coordinator joins, ignores history, logs harness progress and posts its re
   const prompts = []
   t.mock.method(CopilotCliSession.prototype, "write", async function (prompt) {
     prompts.push(prompt)
-    this.emit("output", { stream: "stdout", data: "# tool diagnostic - running\n", toolSummary: true })
+    this.emit("output", { stream: "stdout", data: "\n# tool diagnostic - running\n", toolSummary: true })
     this.emit("output", { stream: "stderr", data: "diagnostic warning\n" })
     this.emit("output", { stream: "command", data: "hidden raw command output" })
     this.emit("output", { stream: "stdout", data: "hidden assignment prompt", messageSummary: true })
+    this.emit("output", { stream: "stdout", data: "hidden streaming response token" })
     await new Promise(resolve => setTimeout(resolve, 25))
     return { exitCode: 0, summary: "I will fix it." }
   })
