@@ -105,7 +105,21 @@ Interactive CLI REPL and web agent sessions provide shell commands a capability 
 
 ## Web workers
 
-Create `workers.yml` at the workspace root, then run `minicode web` (or `minicode web 4310`). If the file exists, the primary console reads it once, starts its browser portal, starts each configured AgentPool worker, and stops all child workers when it exits. Without the file, `minicode web` starts only the portal. Existing local pairing credentials are reused; for a first pairing, put the name of an environment variable containing the one-time token in `pairingTokenEnv` rather than writing the token to YAML. `workers.yml` accepts only `version`, optional `port`, and a `workers` list. Each worker requires `name`, `server`, `workerId`, and `repoRoot`; optional worker CLI settings use camelCase names such as `workerShared`, `entraUser`, and `toolAzureConfigDir`. A command-line web port overrides `port` in the file. The portal restart endpoint is intentionally disabled when workers are running because restarting only the portal would orphan workers and invalidate their shared secret capability.
+Create `workers.yml` at the workspace root, then run `minicode web` (or `minicode web 4310`). If the file exists, the primary console reads it once, starts its browser portal, starts each configured AgentPool worker, and stops all child workers when it exits. Without the file, `minicode web` starts only the portal. Existing local pairing credentials are reused; for a first pairing, put the name of an environment variable containing the one-time token in `pairingTokenEnv` rather than writing the token to YAML. `workers.yml` accepts `version`, optional `port`, optional coordinator settings, and a `workers` list. Each worker requires `name`, `server`, `workerId`, and `repoRoot`; optional worker CLI settings use camelCase names such as `workerShared`, `entraUser`, and `toolAzureConfigDir`. A command-line web port overrides `port` in the file. The portal restart endpoint is intentionally disabled when workers are running because restarting only the portal would orphan workers and invalidate their shared secret capability.
+
+Set `coordinatorServer` to attach one privileged coordinator for the devbox. Concurrent launcher and direct-worker processes elect one local owner for that EngSys endpoint; the others remain standby and take over if the owner exits. The coordinator joins the EngSys room using the current Azure CLI user, receives new engineer messages, and posts its harness response back to the room. `coordinatorHarness` is `copilotcli` (default) or `minicode`; `coordinatorAzureConfigDir`, `coordinatorCopilotPath`, and `coordinatorModel` are optional. The coordinator is one role with monitoring, diagnosis, operational repair, isolated code repair, and approved PR-submission capabilities. It may do anything needed locally, including fetch, sync, reset, clean, stop, remove, and recreate repositories, worker processes, and worker worktrees. Local work is standing authority after identity, ownership, and active-work checks; it does not require repeated approval. The coordinator must not author code or commit in an existing checkout. Managed tools create temporary isolated repair worktrees only for `academy`, `sop`, `minicode`, and `build`. Direct remote mutation is prohibited; the managed PR tool is the only remote-write path, requires one explicit engineer approval per repair, and never merges, enables auto-complete, or deploys. Paperclip does not receive coordinator configuration or maintain coordinator state.
+
+```yaml
+version: 1
+coordinatorServer: https://mmd-dbg-na03-engsys-p.azurewebsites.net
+coordinatorHarness: copilotcli
+coordinatorAzureConfigDir: C:\Users\me\.azure
+workers:
+  - name: worker-1
+    server: https://paperclip.example.com
+    workerId: 00000000-0000-0000-0000-000000000000
+    repoRoot: .
+```
 
 ## Managed Hosted runtime
 
@@ -733,6 +747,10 @@ $env:MINICODE_AGENT_POOL_PAIRING_TOKEN = "<one-time token from Clippy>"
 $workerRepo = (Resolve-Path .\clippy-worker).Path
 node .\minicode\cli.js worker --server https://clippy.example.com --worker-id <worker-id> --repo-root $workerRepo
 ```
+
+To join the devbox coordinator election when starting one worker directly, add
+`--coordinator-server <engsys-url>`. Use `--coordinator-harness minicode|copilotcli`
+and `--coordinator-azure-config-dir <absolute-directory>` when the defaults are not appropriate.
 
 The same full `--repo-root` path can be passed to `bootstrap\minicode.cmd` or
 `minicode.ps1`; `-repo_root` is also supported. The source must be a Git repository

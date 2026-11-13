@@ -43,9 +43,14 @@ test("native workspace tools edit files explicitly and strip inherited credentia
   await assert.rejects(tools.write_file.execute({ path: "created.txt" }, context), /content must be a string/)
   await assert.rejects(tools.edit_file.execute({ path: "created.txt", find: "updated" }, context), /content must be a string/)
   assert.equal(await fs.readFile(path.join(cwd, "created.txt"), "utf8"), "updated")
-  const result = await tools.run_shell.execute({ command: `"${process.execPath}" -e "console.log(process.env.WORKSPACE_TEST_FLAG, Boolean(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || process.env.COPILOT_GITHUB_TOKEN || process.env.ANTHROPIC_AUTH_TOKEN || process.env.AZURE_CLIENT_SECRET || process.env.IDENTITY_HEADER))"` }, context)
+  const nativeCall = process.platform === "win32" ? "& " : ""
+  const result = await tools.run_shell.execute({ command: `${nativeCall}"${process.execPath}" -e "console.log(process.env.WORKSPACE_TEST_FLAG, Boolean(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || process.env.COPILOT_GITHUB_TOKEN || process.env.ANTHROPIC_AUTH_TOKEN || process.env.AZURE_CLIENT_SECRET || process.env.IDENTITY_HEADER))"` }, context)
   assert.ok(result.includes("retained false"), result)
   assert.ok(!result.includes("private-token"))
+  if (process.platform === "win32") {
+    const windowStyle = await tools.run_shell.execute({ command: "Get-Command Start-Process | Out-Null; Write-Output $PSDefaultParameterValues['Start-Process:WindowStyle']" }, context)
+    assert.match(windowStyle, /\bHidden\b/)
+  }
 })
 
 for (const harness of ["claudecode", "copilotcli"]) {

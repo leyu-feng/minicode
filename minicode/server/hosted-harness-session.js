@@ -68,13 +68,17 @@ export default function(pi) {
 `
 
 export class HostedHarnessSession extends EventEmitter {
-  constructor({ harness, id, cwd, env, instructions, tools, prepare, modelConfig, githubCredential, harnessModel, localCopilot = false, captureFailedPrompt = false, spawnProcess = spawn, modelRequestTimeoutMs = HOSTED_MODEL_REQUEST_TIMEOUT_MS }) {
+  constructor({ harness, id, cwd, env, instructions, tools, prepare, modelConfig, githubCredential,
+    harnessModel, localCopilot = false, captureFailedPrompt = false, spawnProcess = spawn,
+    modelRequestTimeoutMs = HOSTED_MODEL_REQUEST_TIMEOUT_MS, workspaceTools = true }) {
     super()
     if (!["opencode", "pi", "claudecode", "copilotcli"].includes(harness)) throw new Error("Unsupported external Hosted harness")
     if (localCopilot && harness !== "copilotcli") throw new Error("Local authentication is only supported for Copilot CLI")
     this.github = harness === "claudecode" || harness === "copilotcli"
     Object.assign(this, { harness, id, cwd, env, instructions, prepare, modelConfig, githubCredential, harnessModel, localCopilot, captureFailedPrompt, spawnProcess, modelRequestTimeoutMs })
-    this.tools = this.github ? [...createHostedHarnessWorkspaceTools({ cwd, env }), ...tools] : tools
+    this.tools = this.github && workspaceTools
+      ? [...createHostedHarnessWorkspaceTools({ cwd, env }), ...tools]
+      : tools
     this.controller = new AbortController()
   }
 
@@ -421,7 +425,8 @@ export class HostedHarnessSession extends EventEmitter {
       this.emit("output", { stream: "stdout", data: `using ${this.harness}.${this.localCopilot ? "devbox" : "contained"}.${safe(launch.version)} harness\n` })
       this.child = this.spawnProcess(this.localCopilot ? launch.command : "/bin/sh",
         this.localCopilot ? args : ["-c", `exec ${launch.command} "$@"`, "hosted-harness", ...args], {
-        cwd: this.cwd, env: childEnv, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
+        cwd: this.cwd, env: childEnv, stdio: ["pipe", "pipe", "pipe"],
+        detached: process.platform !== "win32", windowsHide: true,
       })
       const child = this.child
       if (this.localCopilot) {

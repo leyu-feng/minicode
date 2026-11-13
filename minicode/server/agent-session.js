@@ -229,7 +229,10 @@ function runShellCommand(command, { cwd, onData, signal, env }) {
   return new Promise((resolve) => {
     const isWindows = process.platform === "win32"
     const file = isWindows ? "pwsh.exe" : "bash"
-    const args = isWindows ? ["-NoProfile", "-NonInteractive", "-Command", command] : ["-lc", command]
+    const shellCommand = isWindows && /\bStart-Process\b/i.test(command)
+      ? `$PSDefaultParameterValues['Start-Process:WindowStyle']='Hidden'; ${command}`
+      : command
+    const args = isWindows ? ["-NoProfile", "-NonInteractive", "-Command", shellCommand] : ["-lc", shellCommand]
     const proc = childProcess.spawn(file, args, {
       cwd,
       env: env ?? process.env,
@@ -413,7 +416,10 @@ export function callModelOnce(config, messages) {
  * for the lifetime of the session.
  */
 export class AgentSession extends EventEmitter {
-  constructor({ id, cwd, env, workerLabel, shellLog, powerShells, toolAzureConfigDir, signedInUpn, instructions = "", tools = [], modelConfigProvider = resolveModelConfig, modelCatalogProvider = listAvailableModels, captureFailedPrompt = false, interactiveSecretStore = false }) {
+  constructor({ id, cwd, env, workerLabel, shellLog, powerShells, toolAzureConfigDir, signedInUpn,
+    instructions = "", tools = [], modelConfigProvider = resolveModelConfig,
+    modelCatalogProvider = listAvailableModels, captureFailedPrompt = false,
+    interactiveSecretStore = false, allowShell = true, allowFileWrites = true }) {
     super()
     this.id = id
     this.kind = "agent"
@@ -424,6 +430,8 @@ export class AgentSession extends EventEmitter {
     this.toolAzureConfigDir = toolAzureConfigDir
     this.signedInUpn = signedInUpn
     this.interactiveSecretStore = interactiveSecretStore === true
+    this.allowShell = allowShell === true
+    this.allowFileWrites = allowFileWrites === true
     this.captureFailedPrompt = captureFailedPrompt
     this.modelConfigProvider = modelConfigProvider
     this.modelCatalogProvider = modelCatalogProvider
@@ -449,8 +457,10 @@ export class AgentSession extends EventEmitter {
     this.boundShells = new Set()
     this.shellStateNotices = []
     this.systemPrompt = [
-      "You are a practical coding agent.",
-      `You are running inside the local working directory ${cwd} and can read and modify project files.`,
+      this.allowFileWrites ? "You are a practical coding agent." : "You are a practical supervisory agent.",
+      this.allowFileWrites
+        ? `You are running inside the local working directory ${cwd} and can read and modify project files.`
+        : `Your local working directory is ${cwd}. Direct file writes are disabled; use only the supplied harness tools.`,
       "For coding tasks, inspect files first before answering.",
       "Use non-destructive read commands like Get-Content and git --no-pager status/log/diff.",
       "File discovery must be nonrecursive: list only the immediate children of ONE task-relevant folder per request. Never scan the whole workspace or Git tree, or automatically walk every subfolder through repeated shallow listings. Commands have a 120-second limit; narrow the scope instead of retrying a broad scan.",
@@ -461,21 +471,25 @@ export class AgentSession extends EventEmitter {
       "If Git is unavailable, HEAD does not exist, or the directory is not in a Git worktree, report that limitation and list only the immediate children of one task-relevant folder (Get-ChildItem -LiteralPath <folder> without -Recurse on Windows); do not silently fall back to recursive filesystem scans.",
       "Do not claim you cannot access files when the tools below can read them.",
       "Respond ONLY with one JSON object, one of:",
-      '{"type":"tool","command":"<shell command>","reason":"<short reason>"}',
-      ...(process.platform === "win32" ? [
+      ...(this.allowShell ? ['{"type":"tool","command":"<shell command>","reason":"<short reason>"}'] : []),
+      ...(this.allowShell && process.platform === "win32" ? [
         '{"type":"tool","command":"<Windows PowerShell 5.1-only command>","shell":"powershell-5.1","reason":"<why Windows PowerShell 5.1 is required>"}',
       ] : []),
       ...(tools.length ? [
         '{"type":"tool","name":"<harness tool name>","arguments":{},"reason":"<short reason>"}',
         `Available harness tools (use their exact argument schemas): ${JSON.stringify(tools.map(({ name, description, parameters }) => ({ name, description, parameters })))}`,
       ] : []),
-      '{"type":"write","path":"<file path>","content":"<full new file contents>","reason":"<short reason>"}',
-      '{"type":"edit","path":"<file path>","find":"<exact text to replace>","replace":"<new text>","reason":"<short reason>"}',
+      ...(this.allowFileWrites ? [
+        '{"type":"write","path":"<file path>","content":"<full new file contents>","reason":"<short reason>"}',
+        '{"type":"edit","path":"<file path>","find":"<exact text to replace>","replace":"<new text>","reason":"<short reason>"}',
+      ] : []),
       '{"type":"final","message":"<final user-facing response>"}',
       'For a task you cannot complete, return {"type":"final","message":"<blocker and required next step>","error":"<short failure reason>"} instead of claiming success.',
-      "To change files, ALWAYS prefer the write/edit actions over shell commands — they take plain strings and need no shell escaping.",
-      "Paths are relative to the working directory. For edit, 'find' must appear exactly once (set \"all\":true to replace every occurrence).",
-      ...(process.platform === "win32" ? [
+      ...(this.allowFileWrites ? [
+        "To change files, ALWAYS prefer the write/edit actions over shell commands — they take plain strings and need no shell escaping.",
+        "Paths are relative to the working directory. For edit, 'find' must appear exactly once (set \"all\":true to replace every occurrence).",
+      ] : []),
+      ...(this.allowShell && process.platform === "win32" ? [
         "PowerShell language mode is detected from $ExecutionContext.SessionState.LanguageMode in each actual shell process, separately for PowerShell 7 and 5.1, and reported in TOOL_RESULT. This is informational: ConstrainedLanguage does not prevent running PowerShell commands, and the harness supports commands in that mode. Until detected, its mode is unknown; never assume FullLanguage. In ConstrainedLanguage, prefer ordinary cmdlets and policy-permitted operations; avoid Add-Type, arbitrary .NET/COM method calls, reflection, or other restricted features. Let PowerShell enforce its policy and report specific command failures, not a blanket inability to use PowerShell. Never change LanguageMode, disable application-control/security policy, or switch shells, hosts, identities or interpreters to evade restrictions.",
         "Shell commands already execute directly in PowerShell 7 (pwsh.exe -NoProfile -NonInteractive -Command) by default. For a command or module that requires Windows PowerShell 5.1, set shell to \"powershell-5.1\" on that tool action; it runs directly in powershell.exe with the same flags for that command only. Omit shell or use \"powershell-7\" for PowerShell 7. Do not wrap commands in another pwsh/powershell invocation. No automatic shell fallback occurs.",
         "Escape quotes inside PowerShell strings with a backtick (`\"), never a backslash.",
@@ -483,11 +497,14 @@ export class AgentSession extends EventEmitter {
           ? "Each PowerShell version has one worker-owned persistent process shared across ALL assignments and agents on this worker. Variables, functions, modules, non-task environment changes and authenticated connections can survive assignment completion. The harness refreshes run credentials/task environment and resets the current directory to the assigned workspace at each assignment's first use of that shell. Always use current environment credentials, not cached run tokens/headers from prior assignments. Retained state is not authorization for the current task; verify needed state without exposing credentials. Conversation history and harness tools remain assignment-specific. State is not shared across PowerShell versions or workers."
           : "Each PowerShell version has its own persistent process for this conversation. Variables, functions, imported modules, environment changes and current directory persist between commands of that version, not across versions or conversations.",
         "Commands run sequentially. If a timeout, cancellation or process exit loses shell state, the harness reports it; re-establish required context rather than assuming it survived.",
-      ] : ["Shell commands already execute in bash -lc; use Bash syntax."]),
+      ] : this.allowShell ? ["Shell commands already execute in bash -lc; use Bash syntax."]
+        : ["Native shell actions are disabled. Use only enabled named harness tools."]),
       // Scheduled tasks outlive the session, so keep every one Minicode creates in one folder the
       // user can review and clean up, and make sure the user hears about it.
-      "If you create a Windows scheduled task, register it in the \\Minicode\\ task folder (for example Register-ScheduledTask -TaskPath '\\Minicode\\' -TaskName '<descriptive name>' ...), never in the root folder or another one,",
-      "and say in your final message that you created it, its full path, its schedule, and how to remove it (Unregister-ScheduledTask -TaskPath '\\Minicode\\' -TaskName '<name>').",
+      ...(this.allowShell ? [
+        "If you create a Windows scheduled task, register it in the \\Minicode\\ task folder (for example Register-ScheduledTask -TaskPath '\\Minicode\\' -TaskName '<descriptive name>' ...), never in the root folder or another one,",
+        "and say in your final message that you created it, its full path, its schedule, and how to remove it (Unregister-ScheduledTask -TaskPath '\\Minicode\\' -TaskName '<name>').",
+      ] : []),
       "No markdown. No code fences.",
     ].join(" ")
     if (instructions) this.systemPrompt += `\n\n${instructions}`
@@ -661,6 +678,7 @@ export class AgentSession extends EventEmitter {
           let summary
           let ok = true
           try {
+            if (!this.allowFileWrites) throw new Error("Direct file writes are disabled for this session")
             summary =
               action.type === "write"
                 ? await writeFileAction(this.cwd, action)
@@ -700,6 +718,7 @@ export class AgentSession extends EventEmitter {
               || typeof action.arguments !== "object" || Array.isArray(action.arguments)) {
               throw new Error("Harness tools require an arguments object and cannot include a shell command")
             }
+
             summary = JSON.stringify(await tool.execute(action.arguments, { signal }))
             this.#throwIfInactive(run)
             this.#emitOutput(`${summary}\r\n`, "command")
@@ -718,6 +737,17 @@ export class AgentSession extends EventEmitter {
             result.exitCode = 1
             result.error = "Stopped after max tool turns"
           }
+          continue
+        }
+
+        if (action.type === "tool" && !this.allowShell) {
+          this.#throwIfInactive(run)
+          const summary = "Shell commands are disabled for this session; use an enabled harness tool"
+          this.#emitOutput(`\u001b[31m${summary}\u001b[0m\r\n`, "stderr")
+          this.messages.push(
+            { role: "assistant", content: raw },
+            { role: "user", content: ["TOOL_RESULT", "ok: false", `result: ${summary}`].join("\n") },
+          )
           continue
         }
 

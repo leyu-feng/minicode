@@ -3,6 +3,7 @@ import path from "node:path"
 import childProcess from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { startSecretStore } from "./secret-store.js"
+import { startCoordinator } from "./coordinator.js"
 
 const FIELDS = new Set([
   "name", "server", "workerId", "repoRoot", "workspaceMode", "entraUser", "toolAzureConfigDir",
@@ -28,11 +29,15 @@ function scalar(text) {
 // features such as aliases, tags and multiline values instead of accepting a
 // broader configuration language in this operator-owned startup file.
 export function parseWorkersYaml(text) {
-  const result = { version: undefined, port: undefined, workers: [] }
+  const result = {
+    version: undefined, port: undefined, coordinatorServer: undefined,
+    coordinatorHarness: undefined, coordinatorAzureConfigDir: undefined,
+    coordinatorCopilotPath: undefined, coordinatorModel: undefined, workers: [],
+  }
   let current = null
   for (const [index, raw] of text.replace(/^\uFEFF/, "").split(/\r?\n/).entries()) {
     if (!raw.trim() || raw.trimStart().startsWith("#")) continue
-    let match = /^(version|port):\s*(.*?)\s*$/.exec(raw)
+    let match = /^(version|port|coordinatorServer|coordinatorHarness|coordinatorAzureConfigDir|coordinatorCopilotPath|coordinatorModel):\s*(.*?)\s*$/.exec(raw)
     if (match) {
       if (current || result[match[1]] !== undefined) throw new Error(`Invalid workers.yml line ${index + 1}`)
       result[match[1]] = scalar(match[2])
@@ -52,6 +57,16 @@ export function parseWorkersYaml(text) {
   }
   if (result.version !== 1 || !result.workers.length) throw new Error("workers.yml requires version: 1 and at least one worker")
   if (result.port !== undefined && (!Number.isInteger(result.port) || result.port < 0 || result.port > 65535)) throw new Error("workers.yml port must be between 0 and 65535")
+  if (result.coordinatorServer !== undefined && (typeof result.coordinatorServer !== "string" || !result.coordinatorServer)) {
+    throw new Error("workers.yml coordinatorServer must be a URL")
+  }
+  if (result.coordinatorServer === undefined && [result.coordinatorHarness, result.coordinatorAzureConfigDir,
+    result.coordinatorCopilotPath, result.coordinatorModel].some(value => value !== undefined)) {
+    throw new Error("workers.yml coordinator settings require coordinatorServer")
+  }
+  if (result.coordinatorHarness !== undefined && !["minicode", "copilotcli"].includes(result.coordinatorHarness)) {
+    throw new Error("workers.yml coordinatorHarness must be minicode or copilotcli")
+  }
   const names = new Set(), ids = new Set()
   for (const worker of result.workers) {
     if (typeof worker.name !== "string" || !/^[A-Za-z0-9._-]{1,100}$/.test(worker.name)) throw new Error("Each worker requires a valid name")
@@ -110,39 +125,70 @@ export async function runWorkersMode({ workspace, port }) {
   process.env.MINICODE_WORKERS_MODE = "1"
 
   const children = []
-  let stopping = false
-  const stop = () => {
-    if (stopping) return
-    stopping = true
-    for (const child of children) if (child.exitCode === null) child.kill("SIGTERM")
+  const coordinator = config.coordinatorServer ? await startCoordinator({
+    server: config.coordinatorServer,
+    cwd: workspace,
+    instanceKey: `web:${workspace}`,
+    harness: config.coordinatorHarness ?? "copilotcli",
+    azureConfigDir: config.coordinatorAzureConfigDir
+      ? path.resolve(workspace, config.coordinatorAzureConfigDir) : undefined,
+    copilotPath: config.coordinatorCopilotPath
+      ? path.resolve(workspace, config.coordinatorCopilotPath) : undefined,
+    model: config.coordinatorModel,
+  }) : null
+  let stopping = false, stoppingPromise, storeClosed = false
+  const closeStore = () => {
+    if (storeClosed) return
+    storeClosed = true
     store.close()
   }
-  process.once("exit", stop)
-  process.once("SIGINT", () => { stop(); process.exit(130) })
-  process.once("SIGTERM", () => { stop(); process.exit(143) })
-
-  for (const worker of config.workers) {
-    const env = {
-      ...process.env,
-      MINICODE_ORCHESTRATOR_SECRET_STORE_URL: store.env.MINICODE_SECRET_STORE_URL,
-      MINICODE_ORCHESTRATOR_SECRET_STORE_CAPABILITY: store.env.MINICODE_SECRET_STORE_CAPABILITY,
-    }
-    delete env.MINICODE_AGENT_POOL_PAIRING_TOKEN
-    if (worker.pairingTokenEnv) {
-      const token = process.env[worker.pairingTokenEnv]
-      if (!token) throw new Error(`${worker.name} pairing token environment variable is not set: ${worker.pairingTokenEnv}`)
-      env.MINICODE_AGENT_POOL_PAIRING_TOKEN = token
-    }
-    const child = childProcess.spawn(process.execPath, workerArgs(worker, workspace), {
-      cwd: workspace, env, stdio: "inherit", windowsHide: true,
-    })
-    children.push(child)
-    child.on("error", error => console.error(`[worker:${worker.name}] ${error.message}`))
-    child.on("exit", (code, signal) => {
-      if (!stopping) console.error(`[worker:${worker.name}] exited (${signal || code})`)
-    })
-    console.log(`[worker:${worker.name}] started (pid ${child.pid})`)
+  const stopChildren = () => {
+    for (const child of children) if (child.exitCode === null) child.kill("SIGTERM")
   }
-  console.log(`shared worker secret store: ${store.env.MINICODE_SECRET_STORE_URL}`)
-  await import("./index.js")
+  const stop = () => stoppingPromise ??= (async () => {
+    stopping = true
+    stopChildren()
+    await coordinator?.stop()
+    closeStore()
+  })()
+  const onExit = () => { stopping = true; stopChildren(); closeStore() }
+  const onSignal = code => { void stop().finally(() => process.exit(code)) }
+  const onSigint = () => onSignal(130)
+  const onSigterm = () => onSignal(143)
+  process.once("exit", onExit)
+  process.once("SIGINT", onSigint)
+  process.once("SIGTERM", onSigterm)
+
+  try {
+    for (const worker of config.workers) {
+      const env = {
+        ...process.env,
+        MINICODE_ORCHESTRATOR_SECRET_STORE_URL: store.env.MINICODE_SECRET_STORE_URL,
+        MINICODE_ORCHESTRATOR_SECRET_STORE_CAPABILITY: store.env.MINICODE_SECRET_STORE_CAPABILITY,
+      }
+      delete env.MINICODE_AGENT_POOL_PAIRING_TOKEN
+      if (worker.pairingTokenEnv) {
+        const token = process.env[worker.pairingTokenEnv]
+        if (!token) throw new Error(`${worker.name} pairing token environment variable is not set: ${worker.pairingTokenEnv}`)
+        env.MINICODE_AGENT_POOL_PAIRING_TOKEN = token
+      }
+      const child = childProcess.spawn(process.execPath, workerArgs(worker, workspace), {
+        cwd: workspace, env, stdio: "inherit", windowsHide: true,
+      })
+      children.push(child)
+      child.on("error", error => console.error(`[worker:${worker.name}] ${error.message}`))
+      child.on("exit", (code, signal) => {
+        if (!stopping) console.error(`[worker:${worker.name}] exited (${signal || code})`)
+      })
+      console.log(`[worker:${worker.name}] started (pid ${child.pid})`)
+    }
+    console.log(`shared worker secret store: ${store.env.MINICODE_SECRET_STORE_URL}`)
+    await import("./index.js")
+  } catch (error) {
+    process.off("exit", onExit)
+    process.off("SIGINT", onSigint)
+    process.off("SIGTERM", onSigterm)
+    await stop()
+    throw error
+  }
 }

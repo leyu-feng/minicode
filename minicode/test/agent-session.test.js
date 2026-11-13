@@ -1,6 +1,9 @@
 import assert from "node:assert/strict"
 import childProcess from "node:child_process"
 import { EventEmitter, once } from "node:events"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import { fileURLToPath } from "node:url"
 import test, { afterEach } from "node:test"
 import { AgentSession, callModelOnce } from "../server/agent-session.js"
@@ -1278,6 +1281,38 @@ test("disabled or ambiguous harness tools return explicit errors without running
     assert.equal((await session.write("Publish")).exitCode, 1)
     assert.match(requests[1].messages.at(-1).content, /not enabled/)
     assert.match(requests[2].messages.at(-1).content, /cannot include a shell command/)
+  } finally { session.dispose() }
+})
+
+test("restricted sessions reject native shell and file writes while retaining named supervisory tools", async t => {
+  const requests = [], calls = []
+  const actions = [
+    { type: "tool", command: "must not run" },
+    { type: "write", path: "must-not-exist.txt", content: "blocked" },
+    { type: "tool", name: "supervise", arguments: { action: "inspect" } },
+    { type: "final", message: "done" },
+  ]
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(actions.shift()) } }] }),
+      { status: 200, headers: { "Content-Type": "application/json" } })
+  }
+  t.mock.method(childProcess, "spawn", assert.fail)
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-restricted-session-"))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  const session = new AgentSession({
+    id: "restricted", cwd: directory, allowShell: false, allowFileWrites: false,
+    tools: [{ name: "supervise", description: "Inspect local state", parameters: { type: "object" },
+      async execute(args) { calls.push(args); return { ok: true } } }],
+  })
+  session.config = { api: "chat-completions", endpoint: "https://example.test/v1/chat/completions", apiKey: "fixture", model: "fixture" }
+  try {
+    assert.equal((await session.write("Repair local state")).exitCode, 0)
+    assert.deepEqual(calls, [{ action: "inspect" }])
+    assert.equal(await fs.stat(path.join(directory, "must-not-exist.txt")).then(() => true, () => false), false)
+    assert.doesNotMatch(requests[0].messages[0].content, /"command":"<shell command>"/)
+    assert.match(requests[1].messages.at(-1).content, /Shell commands are disabled/)
+    assert.match(requests[2].messages.at(-1).content, /Direct file writes are disabled/)
   } finally { session.dispose() }
 })
 

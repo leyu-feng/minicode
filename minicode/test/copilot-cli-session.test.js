@@ -72,6 +72,7 @@ test("local Copilot uses the native executable and assignment tools, with redact
   assert.equal(result.summary, "Build complete [redacted]")
   assert.equal(f.invocation.file, f.executable)
   assert.equal(f.invocation.settings.cwd, f.cwd)
+  assert.equal(f.invocation.settings.windowsHide, true)
   assert.equal(f.invocation.settings.env.USERPROFILE, process.env.USERPROFILE)
   assert.equal(f.invocation.settings.env.HOME, process.env.HOME)
   const args = f.invocation.args
