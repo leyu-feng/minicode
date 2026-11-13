@@ -6,7 +6,6 @@ import { randomUUID } from "node:crypto"
 import { stripVTControlCharacters } from "node:util"
 import { killTree } from "./kill-tree.js"
 
-const APPROVED_REPAIRS = new Set(["academy", "sop", "minicode", "build"])
 const MAX_OUTPUT = 24_000
 
 function inside(root, target) {
@@ -26,11 +25,12 @@ function slug(value) {
     .replace(/^-|-$/g, "").slice(0, 48).replace(/-$/, "")
 }
 
-function rejectRemoteMutation(text) {
-  if (/\bgit(?:\.exe)?\b[^\r\n;&|]*\bpush\b/i.test(text)
-    || /\bgh(?:\.exe)?\b[^\r\n;&|]*\bpr\s+(?:create|merge|close|edit|ready|review)\b/i.test(text)
-    || /\baz(?:\.cmd|\.exe)?\b[^\r\n;&|]*\brepos\s+pr\s+(?:create|update|set-vote)\b/i.test(text)) {
-    throw new Error("Direct remote mutation is disabled; publish code only through publish_repair_pull_request")
+function rejectUnsafeRemoteMutation(text) {
+  const gitPush = /\bgit(?:\.exe)?\b[^\r\n;&|]*\bpush\b([^\r\n;&|]*)/i.exec(text)
+  if ((gitPush && /(?:--delete|--mirror|--prune|--force(?!-with-lease)|(?:^|\s)-f(?:\s|$)|(?:^|\s)\+|(?:^|\s):(?:refs\/heads\/)?\S+)/i.test(gitPush[1]))
+    || /\bgh(?:\.exe)?\b[^\r\n;&|]*\bpr\s+(?:merge|close|ready|review)\b/i.test(text)
+    || /\baz(?:\.cmd|\.exe)?\b[^\r\n;&|]*\brepos\s+pr\s+(?:update|set-vote)\b/i.test(text)) {
+    throw new Error("Destructive remote mutation is disabled")
   }
 }
 
@@ -180,14 +180,14 @@ export async function createCoordinatorTools({ root, member, log = () => {} }) {
   const tools = [
     {
       name: "run_coordinator_command",
-      description: "Run a supervisory command from the common workspace root. Local diagnosis and repair are standing authority after verifying identity, ownership, and active work. Use for repository fetch/sync/reset/clean, process and worker lifecycle repair, worker-worktree removal/recreation, diagnostics, and validation. Do not author code in an existing checkout; use an isolated repair workspace for code changes. Remote mutation is not allowed.",
+      description: "Run a supervisory command from the common workspace root. Local diagnosis and repair are standing authority after verifying identity, ownership, and active work. Use for repository fetch/sync/reset/clean, process and worker lifecycle repair, isolated worktree creation, code repair, diagnostics, validation, and an explicitly requested branch or PR update. Preserve existing workspace checkouts. Force pushes, remote deletion, merge, close, approval, auto-complete, and deployment are not allowed.",
       parameters: { type: "object", additionalProperties: false, required: ["command"],
         properties: { command: { type: "string" } } },
       async execute({ command: text }, { signal }) {
         if (typeof text !== "string" || !text.trim() || text.length > 8000 || text.includes("\0")) {
           throw new Error("Invalid coordinator command")
         }
-        rejectRemoteMutation(text)
+        rejectUnsafeRemoteMutation(text)
         const executable = process.platform === "win32" ? "pwsh.exe" : "bash"
         const args = process.platform === "win32"
           ? ["-NoProfile", "-NonInteractive", "-Command", text]
@@ -218,7 +218,7 @@ export async function createCoordinatorTools({ root, member, log = () => {} }) {
     },
     {
       name: "list_repository_directory",
-      description: "List only the immediate children of one directory in an existing read-only workspace repository.",
+      description: "List only the immediate children of one directory in an existing workspace repository.",
       parameters: { type: "object", additionalProperties: false, required: ["repository", "path"],
         properties: { repository: { type: "string" }, path: { type: "string" } } },
       async execute({ repository: id, path: relative }) {
@@ -228,7 +228,7 @@ export async function createCoordinatorTools({ root, member, log = () => {} }) {
     },
     {
       name: "read_repository_file",
-      description: "Read a bounded line range from one regular file in an existing read-only workspace repository.",
+      description: "Read a bounded line range from one regular file in an existing workspace repository.",
       parameters: { type: "object", additionalProperties: false, required: ["repository", "path"],
         properties: { repository: { type: "string" }, path: { type: "string" },
           startLine: { type: "integer" }, endLine: { type: "integer" } } },
@@ -255,12 +255,11 @@ export async function createCoordinatorTools({ root, member, log = () => {} }) {
     },
     {
       name: "create_repair_workspace",
-      description: "Create an isolated writable Git worktree for an approved repository. Never changes files in the existing workspace checkout. Approved IDs: academy, sop, minicode, build.",
+      description: "Create an isolated writable Git worktree for any available workspace repository. Never changes files in the existing workspace checkout.",
       parameters: { type: "object", additionalProperties: false, required: ["repository", "title"],
         properties: { repository: { type: "string" }, title: { type: "string" } } },
       async execute({ repository: id, title }, { signal }) {
         id = String(id).toLowerCase()
-        if (!APPROVED_REPAIRS.has(id)) throw new Error(`Repairs are not approved for repository '${id}'`)
         const repo = await repository(id)
         const feature = slug(title)
         if (!feature) throw new Error("Repair title must contain letters or numbers")
@@ -338,7 +337,7 @@ export async function createCoordinatorTools({ root, member, log = () => {} }) {
         if (typeof text !== "string" || !text.trim() || text.length > 8000 || text.includes("\0")) {
           throw new Error("Invalid repair command")
         }
-        rejectRemoteMutation(text)
+        rejectUnsafeRemoteMutation(text)
         const value = repair(repairId)
         const executable = process.platform === "win32" ? "pwsh.exe" : "bash"
         const args = process.platform === "win32"

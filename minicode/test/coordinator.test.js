@@ -215,16 +215,18 @@ test("direct worker accepts launcher coordinator options", () => {
   assert.equal(parsed.options["coordinator-harness"], "minicode")
 })
 
-test("coordinator repairs use an isolated approved worktree and leave the source checkout unchanged", async t => {
+test("coordinator repairs any workspace repository and can push an explicitly requested branch", async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-coordinator-test-"))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
-  const source = path.join(root, "academy")
+  const source = path.join(root, "monolith")
+  const remote = path.join(root, "remote.git")
   await fs.mkdir(source)
+  childProcess.execFileSync("git", ["init", "--bare", remote], { encoding: "utf8", windowsHide: true })
   const git = args => childProcess.execFileSync("git", args, { cwd: source, encoding: "utf8", windowsHide: true }).trim()
   git(["init", "-b", "dev"])
   git(["config", "user.name", "Coordinator Test"])
   git(["config", "user.email", "coordinator@example.test"])
-  git(["remote", "add", "origin", "https://github.com/example/academy.git"])
+  git(["remote", "add", "origin", remote])
   await fs.writeFile(path.join(source, "value.txt"), "source\n")
   git(["add", "value.txt"])
   git(["commit", "-m", "initial"])
@@ -237,25 +239,34 @@ test("coordinator repairs use an isolated approved worktree and leave the source
     { command: process.platform === "win32" ? "Write-Output local-ok" : "printf local-ok" },
     { signal: AbortSignal.timeout(5000) })
   assert.equal(command, "local-ok")
+  await tools.run_coordinator_command.execute(
+    { command: `git -C "${source}" push origin HEAD:refs/heads/dev` },
+    { signal: AbortSignal.timeout(5000) })
   await assert.rejects(() => tools.run_coordinator_command.execute(
-    { command: "git push origin HEAD" }, { signal: AbortSignal.timeout(5000) }),
-  /Direct remote mutation is disabled/)
-  const state = await tools.repository_state.execute({ repository: "academy" }, { signal: AbortSignal.timeout(5000) })
+    { command: `git -C "${source}" push --force origin HEAD:refs/heads/dev` },
+    { signal: AbortSignal.timeout(5000) }),
+  /Destructive remote mutation is disabled/)
+  await assert.rejects(() => tools.run_coordinator_command.execute(
+    { command: `git -C "${source}" push origin :refs/heads/dev` },
+    { signal: AbortSignal.timeout(5000) }),
+  /Destructive remote mutation is disabled/)
+  const state = await tools.repository_state.execute({ repository: "monolith" }, { signal: AbortSignal.timeout(5000) })
   assert.match(state.log, /initial/)
   const created = await tools.create_repair_workspace.execute(
-    { repository: "academy", title: "fix value" }, { signal: AbortSignal.timeout(5000) })
-  await assert.rejects(() => tools.run_repair_command.execute(
-    { repairId: created.repairId, command: "git push origin HEAD" }, { signal: AbortSignal.timeout(5000) }),
-  /Direct remote mutation is disabled/)
+    { repository: "monolith", title: "fix value" }, { signal: AbortSignal.timeout(5000) })
   await tools.edit_repair_file.execute({
     repairId: created.repairId, path: "value.txt", find: "source\n", replace: "fixed\n",
   }, { signal: AbortSignal.timeout(5000) })
   const committed = await tools.commit_repair.execute(
     { repairId: created.repairId, message: "Fix value" }, { signal: AbortSignal.timeout(5000) })
+  await tools.run_repair_command.execute(
+    { repairId: created.repairId, command: "git push origin HEAD:refs/heads/conflict-fix" },
+    { signal: AbortSignal.timeout(5000) })
   assert.match(committed.commit, /^[a-f0-9]{40}$/)
+  const remoteCommit = childProcess.execFileSync(
+    "git", ["--git-dir", remote, "rev-parse", "refs/heads/conflict-fix"],
+    { encoding: "utf8", windowsHide: true }).trim()
+  assert.equal(remoteCommit, committed.commit)
   assert.equal(await fs.readFile(path.join(source, "value.txt"), "utf8"), "source\n")
   assert.equal(git(["status", "--porcelain"]), "")
-  await assert.rejects(() => tools.create_repair_workspace.execute(
-    { repository: "monolith", title: "not allowed" }, { signal: AbortSignal.timeout(5000) }),
-  /not approved/)
 })
