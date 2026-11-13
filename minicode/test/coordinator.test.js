@@ -60,21 +60,29 @@ test("coordinator joins, ignores history, runs the harness for a new engineer me
     harness: "minicode", machineName: "devbox", pollMs: 5, heartbeatMs: 1000,
     fetchImpl, tokenProvider: Object.assign(async () => token(), { invalidate() {} }),
     harnessFactory: async () => ({
-      async run(prompt) { prompts.push(prompt); return { exitCode: 0, summary: "I will fix it." } },
+      async run(prompt) {
+        prompts.push(prompt)
+        await new Promise(resolve => setTimeout(resolve, 25))
+        return { exitCode: 0, summary: "I will fix it." }
+      },
       async stop() { stopped = true },
     }),
-    log: () => {},
+    busyKeepaliveMs: 5, log: () => {},
   })
   await waitUntil(() => posted.length === 2)
   await coordinator.stop()
   assert.equal(prompts.length, 1)
   assert.match(prompts[0], /fix the worker/)
   assert.equal(posted[0].text, "Acknowledged — @devbox received the targeted message.")
+  assert.equal(posted[0].hidden, true)
   assert.equal(posted[1].text, "I will fix it.")
   assert.match(posted[1].coordinatorId, /^[a-f0-9]{64}$/)
-  assert.deepEqual(presence, [
+  assert.deepEqual(presence.slice(0, 2), [
     { state: 1, isTyping: false },
     { state: 1, isTyping: true },
+  ])
+  assert.ok(presence.slice(2, -2).some(update => update.state === 1 && update.isTyping === true))
+  assert.deepEqual(presence.slice(-2), [
     { state: 1, isTyping: false },
     { state: 0, isTyping: false },
   ])

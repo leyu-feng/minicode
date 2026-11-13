@@ -10,6 +10,7 @@ import { createCoordinatorTools } from "./coordinator-tools.js"
 const COORDINATOR_RESOURCE = "api://72f988bf-86f1-41af-91ab-2d7cd011db47/mmd.dbg.tenantmanagement"
 const DEFAULT_POLL_MS = 5000
 const DEFAULT_HEARTBEAT_MS = 60_000
+const DEFAULT_BUSY_KEEPALIVE_MS = 90_000
 const DEFAULT_LEASE_POLL_MS = 1000
 const DEFAULT_LEASE_SETTLE_MS = 250
 const MAX_RESPONSE_CHARS = 8000
@@ -227,6 +228,7 @@ async function createHarnessRunner({
 async function startCoordinatorLeader({
   server, cwd, instanceKey, alias, harness = "copilotcli", azureConfigDir, copilotPath, model,
   machineName = os.hostname(), pollMs = DEFAULT_POLL_MS, heartbeatMs = DEFAULT_HEARTBEAT_MS,
+  busyKeepaliveMs = DEFAULT_BUSY_KEEPALIVE_MS,
   fetchImpl = fetch, tokenProvider = createCoordinatorTokenProvider({ azureConfigDir }),
   harnessFactory = createHarnessRunner,
   log = (message) => process.stderr.write(`${message}\n`),
@@ -278,6 +280,27 @@ async function startCoordinatorLeader({
     )
     if (!updated?.coordinatorId) throw new Error("Coordinator presence returned an invalid member")
     Object.assign(member, updated)
+  }
+
+  async function runWithBusyKeepalive(prompt) {
+    const keepaliveController = new AbortController()
+    const keepalive = (async () => {
+      while (!keepaliveController.signal.aborted) {
+        await sleep(busyKeepaliveMs, keepaliveController.signal)
+        if (keepaliveController.signal.aborted) break
+        try {
+          await setPresence(COORDINATOR_BUSY, true)
+        } catch (error) {
+          if (!stopped) log(`[coordinator:${member.name}] busy keepalive failed: ${error.message}`)
+        }
+      }
+    })()
+    try {
+      return await runner.run(prompt)
+    } finally {
+      keepaliveController.abort()
+      await keepalive
+    }
   }
 
   const joined = await join()
@@ -344,6 +367,7 @@ async function startCoordinatorLeader({
               body: JSON.stringify({
                 coordinatorId,
                 text: `Acknowledged — @${member.alias || member.name} received the targeted message.`,
+                hidden: true,
               }),
             })
             await setPresence(COORDINATOR_BUSY, true)
@@ -356,7 +380,7 @@ async function startCoordinatorLeader({
               "Recent room conversation:",
               recentConversation(snapshot),
             ].join("\n")
-            const result = await runner.run(prompt)
+            const result = await runWithBusyKeepalive(prompt)
             await setPresence(COORDINATOR_BUSY, false)
             if (result?.exitCode !== 0 || !result?.summary?.trim()) {
               log(`[coordinator:${member.name}] harness failed: ${result?.error ?? "no response"}`)
