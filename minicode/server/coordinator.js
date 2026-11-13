@@ -13,6 +13,8 @@ const DEFAULT_HEARTBEAT_MS = 60_000
 const DEFAULT_LEASE_POLL_MS = 1000
 const DEFAULT_LEASE_SETTLE_MS = 250
 const MAX_RESPONSE_CHARS = 8000
+const COORDINATOR_IDLE = 0
+const COORDINATOR_BUSY = 1
 
 function coordinatorServer(value) {
   const url = new URL(value)
@@ -266,6 +268,18 @@ async function startCoordinatorLeader({
     })
   }
 
+  async function setPresence(state, isTyping) {
+    const updated = await request(
+      `/v1/coordinationrooms/default/members/${encodeURIComponent(coordinatorId)}/presence`,
+      {
+        method: "POST",
+        body: JSON.stringify({ state, isTyping }),
+      },
+    )
+    if (!updated?.coordinatorId) throw new Error("Coordinator presence returned an invalid member")
+    Object.assign(member, updated)
+  }
+
   const joined = await join()
   let member = joined.member
   if (!member?.coordinatorId || !member?.name) throw new Error("Coordinator join returned an invalid member")
@@ -323,27 +337,41 @@ async function startCoordinatorLeader({
           if (seen.has(message.id)) continue
           seen.add(message.id)
           if (!shouldWake(message, member)) continue
-          const prompt = [
-            `New coordinator-room message from ${message.senderName}:`,
-            String(message.text),
-            "",
-            `You are addressed as @${member.alias || member.name}.`,
-            "",
-            "Recent room conversation:",
-            recentConversation(snapshot),
-          ].join("\n")
-          const result = await runner.run(prompt)
-          if (result?.exitCode !== 0 || !result?.summary?.trim()) {
-            log(`[coordinator:${member.name}] harness failed: ${result?.error ?? "no response"}`)
-            continue
+          await setPresence(COORDINATOR_BUSY, false)
+          try {
+            await request("/v1/coordinationrooms/default/messages", {
+              method: "POST",
+              body: JSON.stringify({
+                coordinatorId,
+                text: `Acknowledged — @${member.alias || member.name} received the targeted message.`,
+              }),
+            })
+            await setPresence(COORDINATOR_BUSY, true)
+            const prompt = [
+              `New coordinator-room message from ${message.senderName}:`,
+              String(message.text),
+              "",
+              `You are addressed as @${member.alias || member.name}.`,
+              "",
+              "Recent room conversation:",
+              recentConversation(snapshot),
+            ].join("\n")
+            const result = await runner.run(prompt)
+            await setPresence(COORDINATOR_BUSY, false)
+            if (result?.exitCode !== 0 || !result?.summary?.trim()) {
+              log(`[coordinator:${member.name}] harness failed: ${result?.error ?? "no response"}`)
+              continue
+            }
+            await request("/v1/coordinationrooms/default/messages", {
+              method: "POST",
+              body: JSON.stringify({
+                coordinatorId,
+                text: result.summary.trim().slice(0, MAX_RESPONSE_CHARS),
+              }),
+            })
+          } finally {
+            await setPresence(COORDINATOR_IDLE, false)
           }
-          await request("/v1/coordinationrooms/default/messages", {
-            method: "POST",
-            body: JSON.stringify({
-              coordinatorId,
-              text: result.summary.trim().slice(0, MAX_RESPONSE_CHARS),
-            }),
-          })
         }
       } catch (error) {
         if (!stopped) log(`[coordinator:${member.name}] ${error.message}`)

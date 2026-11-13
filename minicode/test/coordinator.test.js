@@ -24,6 +24,7 @@ async function waitUntil(predicate) {
 
 test("coordinator joins, ignores history, runs the harness for a new engineer message and posts its response", async () => {
   const posted = []
+  const presence = []
   let snapshots = 0
   let stopped = false
   const historical = { id: "old", senderId: "engineer", senderName: "Engineer", senderKind: 0, text: "old", at: "2026-01-01" }
@@ -42,6 +43,14 @@ test("coordinator joins, ignores history, runs the harness for a new engineer me
       posted.push(JSON.parse(options.body))
       return Response.json({ id: "response" })
     }
+    if (route.endsWith("/presence")) {
+      const update = JSON.parse(options.body)
+      presence.push(update)
+      return Response.json({
+        coordinatorId: "coordinator-id", alias: "devbox", name: "devbox",
+        machineName: "devbox", ...update,
+      })
+    }
     if (route.includes("/heartbeat")) return Response.json({ coordinatorId: "coordinator-id" })
     return new Response("not found", { status: 404 })
   }
@@ -56,12 +65,19 @@ test("coordinator joins, ignores history, runs the harness for a new engineer me
     }),
     log: () => {},
   })
-  await waitUntil(() => posted.length === 1)
+  await waitUntil(() => posted.length === 2)
   await coordinator.stop()
   assert.equal(prompts.length, 1)
   assert.match(prompts[0], /fix the worker/)
-  assert.equal(posted[0].text, "I will fix it.")
-  assert.match(posted[0].coordinatorId, /^[a-f0-9]{64}$/)
+  assert.equal(posted[0].text, "Acknowledged — @devbox received the targeted message.")
+  assert.equal(posted[1].text, "I will fix it.")
+  assert.match(posted[1].coordinatorId, /^[a-f0-9]{64}$/)
+  assert.deepEqual(presence, [
+    { state: 1, isTyping: false },
+    { state: 1, isTyping: true },
+    { state: 1, isTyping: false },
+    { state: 0, isTyping: false },
+  ])
   assert.equal(stopped, true)
 })
 
