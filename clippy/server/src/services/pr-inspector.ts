@@ -38,7 +38,7 @@ export function prInspectorService(db: Db) {
         const inspector = await requestAgentHireInTransaction(tx, companyId, {
           name: "Pull Request (PR) Inspector", role: "qa", title: "PR Inspector",
           adapterType: "agent_pool", adapterConfig: { name: pool.name, harness: "default" },
-          capabilities: "Review submitted branches on Devbox, perform a local build and all unit tests, and run task-required onebox tests when available. Propose fixes only on a private inspector-owned branch; require the original developer to review, confirm, rework and resubmit before approval and PR creation. Never modify the producer's branch, merge or enable auto-complete.",
+          capabilities: "Review submitted branches on Devbox, perform a local buddy build and repository-required checks using documented change-aware build/test scripts, and run task-required onebox tests when available. Honor dependency/reset selection; do not default to full-repository validation. Propose fixes only on a private inspector-owned branch; require the original developer to review, confirm, rework and resubmit before approval and PR creation. Never modify the producer's branch, merge or enable auto-complete.",
         }, { createdByUserId: userId, runnerResolved: true }, publications);
         await tx.insert(companyPrInspectors).values({ companyId, agentId: inspector.id })
           .onConflictDoUpdate({ target: companyPrInspectors.companyId, set: { agentId: inspector.id, updatedAt: new Date() } });

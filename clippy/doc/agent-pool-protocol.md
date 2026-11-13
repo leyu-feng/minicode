@@ -143,8 +143,15 @@ then automatically creates an idempotent review child assigned to the inspector.
 Retries first recover the saved submission without depending on local files or
 pushing again. The handoff includes repository URL, branch and exact remote
 commit. The Devbox inspector reviews the complete change list and affected
-contents with local user credentials, performs a local build and runs all unit
-tests for that repository before approval. It also runs onebox tests when they
+contents with local user credentials, performs a local buddy build and runs the
+repository-required checks before approval. Inspected, documented change-aware
+build/test scripts select affected projects using dependency/reset rules, rather
+than an unconditional full-repository test sweep or a producer-picked subset.
+Original and committed proposal validations use the same pinned target and
+separately record exact tested SHAs, selection, commands, exit codes and logs.
+No impacted unit tests is reported as an empty selection, not all tests passing.
+Full sweeps remain required when explicitly requested or selected by repository
+fallback rules. It also runs onebox tests when they
 exist and the original task requires them, in an authorized environment only.
 Missing required checks, failures and timeouts block approval; the findings
 identify the exact tested SHA, commands, results and durable logs. Inspect

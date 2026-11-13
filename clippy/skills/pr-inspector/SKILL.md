@@ -62,12 +62,24 @@ original validation. Do not validate an unrelated assignment-start checkout
 or approve tests run against locally corrected files.
 
 Before recording `approved` or creating a PR, perform a local buddy build and
-run **all unit tests** for the submitted repository at the exact submitted
-remote commit. Read the repository's validation guidance and use its supported
-build, type-check and full unit-test commands, not only tests selected by the
-producer or the changed-file subset. Do not silently skip failed or unavailable
-checks. Record the commit, commands, results and durable log references in the
-inspection findings.
+run the repository-required checks at the exact submitted remote commit. Inspect
+and use the repository's documented change-aware build/test scripts to select
+affected projects and tests, rather than hand-written project loops or an
+unconditional full-repository sweep. Selection must cover the complete submitted
+change against the intended target, not only tests suggested by the producer.
+Honor dependency/reset rules and every selected check; never narrow selection
+to hide a failure. Use a full sweep when explicitly required or selected by the
+repository's own fallback rules, not as the default.
+
+For Services, use `Build-LeafProjects.ps1 -Action Build` and `-Action UnitTest`
+sequentially with `-DeltaMode "<reviewed-sha>:<target-sha>"`, pinning the intended
+target commit. Use `-DeltaMode Local` only when intentionally including local
+edits. Do not force `-DeltaMode Full` for Bicep-only changes. A successful script
+run selecting no unit-test projects means no impacted unit tests, not that all
+tests passed; investigate unexpected empty selections. `-GenerateOnly` is not
+validation. Do not silently skip failed or unavailable required checks. Record
+tested and target SHAs, changed-file/project selection, commands, exit codes and
+durable log references in the findings.
 
 If the repository has onebox tests and the original task's acceptance criteria
 require them, run those too in the authorized onebox environment. Otherwise
@@ -92,8 +104,10 @@ Private means an inspector-owned review-only branch in the already authorized
 repository, not a new repository or a promise of branch-level confidentiality.
 It inherits the repository's access controls. Never put secrets in commits or logs.
 
-Run the build and all unit tests on the proposal, plus task-required onebox
-tests when available and authorized. Separate results for the original SHA
+Commit the proposal before exact-ref validation. Rerun the repository's
+change-aware build/test scripts on the proposal against the same pinned target,
+covering the original change and all cumulative corrections, plus task-required
+onebox tests when available and authorized. Separate results for the original SHA
 from results for the proposal SHA. Include the repository, proposal branch,
 base SHA, proposal SHA, failures, proposed corrections, validation evidence and
 remaining blockers in the `changes_requested` findings sent to the existing
