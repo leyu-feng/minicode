@@ -13,6 +13,7 @@ import {
 import { createCoordinatorTools } from "../server/coordinator-tools.js"
 import { parseWorkerCliOptions } from "../server/agent-pool-worker.js"
 import { parseWorkersYaml } from "../server/workers-mode.js"
+import { CopilotCliSession } from "../server/copilot-cli-session.js"
 
 function token() {
   const claims = Buffer.from(JSON.stringify({ tid: "tenant", oid: "caller" })).toString("base64url")
@@ -27,9 +28,10 @@ async function waitUntil(predicate) {
   }
 }
 
-test("coordinator joins, ignores history, runs the harness for a new engineer message and posts its response", async () => {
+test("coordinator joins, ignores history, logs harness progress and posts its response", async t => {
   const posted = []
   const presence = []
+  const logs = []
   let snapshots = 0
   let stopped = false
   const historical = { id: "old", senderId: "engineer", senderName: "Engineer", senderKind: 0, text: "old", at: "2026-01-01" }
@@ -60,19 +62,22 @@ test("coordinator joins, ignores history, runs the harness for a new engineer me
     return new Response("not found", { status: 404 })
   }
   const prompts = []
+  t.mock.method(CopilotCliSession.prototype, "write", async function (prompt) {
+    prompts.push(prompt)
+    this.emit("output", { stream: "stdout", data: "# tool diagnostic - running\n", toolSummary: true })
+    this.emit("output", { stream: "stderr", data: "diagnostic warning\n" })
+    this.emit("output", { stream: "command", data: "hidden raw command output" })
+    this.emit("output", { stream: "stdout", data: "hidden assignment prompt", messageSummary: true })
+    await new Promise(resolve => setTimeout(resolve, 25))
+    return { exitCode: 0, summary: "I will fix it." }
+  })
+  t.mock.method(CopilotCliSession.prototype, "dispose", async () => { stopped = true })
   const coordinator = await startCoordinator({
     server: "https://engsys.example.test", cwd: process.cwd(), instanceKey: "test",
-    harness: "minicode", machineName: "devbox", pollMs: 5, heartbeatMs: 1000,
+    harness: "copilotcli", copilotPath: process.execPath,
+    machineName: "devbox", pollMs: 5, heartbeatMs: 1000,
     fetchImpl, tokenProvider: Object.assign(async () => token(), { invalidate() {} }),
-    harnessFactory: async () => ({
-      async run(prompt) {
-        prompts.push(prompt)
-        await new Promise(resolve => setTimeout(resolve, 25))
-        return { exitCode: 0, summary: "I will fix it." }
-      },
-      async stop() { stopped = true },
-    }),
-    busyKeepaliveMs: 5, log: () => {},
+    busyKeepaliveMs: 5, log: message => logs.push(message),
   })
   await waitUntil(() => posted.length === 2)
   await coordinator.stop()
@@ -94,6 +99,12 @@ test("coordinator joins, ignores history, runs the harness for a new engineer me
     { state: 0, isTyping: false },
   ])
   assert.equal(stopped, true)
+  assert.ok(logs.includes("[coordinator:devbox] busy - received message new"))
+  assert.ok(logs.includes("[coordinator:devbox] # tool diagnostic - running"))
+  assert.ok(logs.includes("[coordinator:devbox] diagnostic warning"))
+  assert.ok(logs.includes("[coordinator:devbox] response posted"))
+  assert.equal(logs.at(-1), "[coordinator:devbox] idle - waiting for messages")
+  assert.equal(logs.some(message => message.includes("hidden")), false)
 })
 
 test("coordinator wakes only for its alias or all", () => {

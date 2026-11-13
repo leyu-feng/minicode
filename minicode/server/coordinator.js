@@ -253,6 +253,11 @@ async function createHarnessRunner({
           executable, model, id: randomUUID(), cwd, env: process.env, instructions, tools,
           workspaceTools: false,
         })
+        active.on("output", ({ stream, data, messageSummary }) => {
+          if (stream !== "command" && !messageSummary && data?.trim()) {
+            log(`[coordinator:${member.name}] ${data.trimEnd()}`)
+          }
+        })
         try { return await active.write(prompt) }
         finally { await active.dispose(); active = null }
       },
@@ -366,6 +371,7 @@ async function startCoordinatorLeader({
   const seen = new Set(snapshot.messages.map(message => message.id))
   let lastHeartbeat = Date.now()
   log(`[coordinator:${member.name}] attached to ${origin} with ${harness}`)
+  log(`[coordinator:${member.name}] idle - waiting for messages`)
 
   const finished = (async () => {
     while (!stopped) {
@@ -410,6 +416,7 @@ async function startCoordinatorLeader({
                   : [member.coordinatorId],
               }
           await setPresence(COORDINATOR_BUSY, false)
+          log(`[coordinator:${member.name}] busy - received message ${message.id}`)
           try {
             await request("/v1/coordinationrooms/default/messages", {
               method: "POST",
@@ -436,8 +443,10 @@ async function startCoordinatorLeader({
                 ...responseAudience,
               }),
             })
+            log(`[coordinator:${member.name}] response posted`)
           } finally {
             await setPresence(COORDINATOR_IDLE, false)
+            log(`[coordinator:${member.name}] idle - waiting for messages`)
           }
         }
       } catch (error) {
