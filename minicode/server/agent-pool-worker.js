@@ -22,6 +22,7 @@ import { readWorkerGuidance, assertWorkerSkillsUnchanged } from "./worker-guidan
 import { prepareWorkerGitSync } from "./worker-git-sync.js"
 import { prepareWorkerWorkspace } from "./worker-workspace.js"
 import { createRunLogWriter } from "./run-log.js"
+import { createHerdrWorkerReporter } from "./herdr-worker-reporter.js"
 
 const MAX_FRAME = 512 * 1024
 const PROTOCOL_VERSION = 1
@@ -1213,6 +1214,7 @@ export async function runAgentPoolWorkerCli(argv, repoRoot, { model } = {}) {
     copilotPath: options["copilot-path"],
     model,
   }) : null
+  const herdr = createHerdrWorkerReporter({ workerName: options["worker-name"] })
   let worker
   try {
     worker = await startAgentPoolWorker({
@@ -1227,6 +1229,8 @@ export async function runAgentPoolWorkerCli(argv, repoRoot, { model } = {}) {
       azureDevOpsRepo: options["azure-devops-repo"], azureDevOpsUser: options["azure-devops-user"],
       azureDevOpsAlias: options["azure-devops-alias"],
       clippyAuth: options["clippy-auth"] ? path.resolve(options["clippy-auth"]) : undefined,
+      onStateChange: state => herdr.state(state),
+      onActivity: activity => herdr.activity(activity),
     })
     const onSignal = () => { void worker.stop() }
     process.once("SIGINT", onSignal)
@@ -1238,5 +1242,6 @@ export async function runAgentPoolWorkerCli(argv, repoRoot, { model } = {}) {
   } finally {
     await coordinator?.stop()
     await worker?.stop()
+    await herdr.stop()
   }
 }
