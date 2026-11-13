@@ -25,6 +25,21 @@ function slug(value) {
     .replace(/^-|-$/g, "").slice(0, 48).replace(/-$/, "")
 }
 
+async function allocateSiblingWorktree(repoRoot) {
+  const parent = path.dirname(repoRoot)
+  const name = path.basename(repoRoot)
+  for (let index = 1; index <= 9999; index++) {
+    const workspace = path.join(parent, `${name}-${String(index).padStart(2, "0")}`)
+    try {
+      await fs.mkdir(workspace)
+      return workspace
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error
+    }
+  }
+  throw new Error(`No sibling repair workspace is available for '${name}'`)
+}
+
 function rejectUnsafeRemoteMutation(text) {
   const gitPush = /\bgit(?:\.exe)?\b[^\r\n;&|]*\bpush\b([^\r\n;&|]*)/i.exec(text)
   if ((gitPush && /(?:--delete|--mirror|--prune|--force(?!-with-lease)|(?:^|\s)-f(?:\s|$)|(?:^|\s)\+|(?:^|\s):(?:refs\/heads\/)?\S+)/i.test(gitPush[1]))
@@ -264,20 +279,26 @@ export async function createCoordinatorTools({ root, member, log = () => {} }) {
         const feature = slug(title)
         if (!feature) throw new Error("Repair title must contain letters or numbers")
         const repairId = randomUUID()
-        const directory = path.join(storage, repairId)
         const branch = `users/${slug(member.name) || "coordinator"}/coordinator/${feature}-${repairId.slice(0, 8)}`
-        await fs.mkdir(directory)
-        const workspace = path.join(directory, "worktree")
-        await git(repo.root, ["worktree", "add", "--detach", workspace, "HEAD"], { signal })
+        const workspace = await allocateSiblingWorktree(repo.root)
         try {
+          await git(repo.root, ["worktree", "add", "--detach", workspace, "HEAD"], { signal })
           await git(workspace, ["switch", "-c", branch], { signal })
         } catch (error) {
-          await git(repo.root, ["worktree", "remove", "--force", workspace])
+          try {
+            await git(repo.root, ["worktree", "remove", "--force", workspace])
+          } catch (removeError) {
+            try { await fs.rmdir(workspace) }
+            catch (cleanupError) {
+              throw new AggregateError([error, removeError, cleanupError], "Repair workspace cleanup failed")
+            }
+          }
           throw error
         }
         repairs.set(repairId, { repairId, repo, workspace, branch, title })
-        log(`[coordinator:${member.name}] created isolated ${id} repair ${repairId}`)
-        return { repairId, repository: id, branch, base: await git(workspace, ["rev-parse", "HEAD"]) }
+        log(`[coordinator:${member.name}] created isolated ${id} repair ${repairId} at ${workspace}`)
+        return { repairId, repository: id, workspace, branch,
+          base: await git(workspace, ["rev-parse", "HEAD"]) }
       },
     },
     {

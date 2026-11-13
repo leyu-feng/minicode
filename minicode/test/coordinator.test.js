@@ -284,6 +284,9 @@ test("coordinator repairs any workspace repository and can push an explicitly re
   const source = path.join(root, "monolith")
   const remote = path.join(root, "remote.git")
   await fs.mkdir(source)
+  const occupiedSibling = path.join(root, "monolith-01")
+  await fs.mkdir(occupiedSibling)
+  await fs.writeFile(path.join(occupiedSibling, "owner.txt"), "other worker\n")
   childProcess.execFileSync("git", ["init", "--bare", remote], { encoding: "utf8", windowsHide: true })
   const git = args => childProcess.execFileSync("git", args, { cwd: source, encoding: "utf8", windowsHide: true }).trim()
   git(["init", "-b", "dev"])
@@ -317,6 +320,8 @@ test("coordinator repairs any workspace repository and can push an explicitly re
   assert.match(state.log, /initial/)
   const created = await tools.create_repair_workspace.execute(
     { repository: "monolith", title: "fix value" }, { signal: AbortSignal.timeout(5000) })
+  assert.equal(created.workspace, path.join(root, "monolith-02"))
+  assert.equal(await fs.readFile(path.join(occupiedSibling, "owner.txt"), "utf8"), "other worker\n")
   await tools.edit_repair_file.execute({
     repairId: created.repairId, path: "value.txt", find: "source\n", replace: "fixed\n",
   }, { signal: AbortSignal.timeout(5000) })
