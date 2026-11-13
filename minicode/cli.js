@@ -80,6 +80,7 @@ Options:
   --azure-devops-alias <alias>  Branch namespace users/<alias>/ (default: UPN local part)
   --output-mode <mode>   Worker logs: normal (default) or verbose (includes raw tool output)
   --coordinator-server <url>  Attach one privileged workspace coordinator to EngSys
+  --coordinator-alias <name>  Easy-to-mention devbox alias (shown as alias(machine))
   --coordinator-harness <name>  Coordinator engine: copilotcli (default) or minicode
   --coordinator-azure-config-dir <dir>  Existing Azure CLI context used for EngSys
 

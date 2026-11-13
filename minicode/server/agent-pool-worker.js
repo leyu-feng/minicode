@@ -1099,7 +1099,7 @@ export async function startAgentPoolWorker({
   return { stop, finished }
 }
 
-const WORKER_USAGE = "Usage: minicode worker --server <origin> --worker-id <id> [--repo-root [<branch>@]<directory>] [--harness default|copilotcli] [--copilot-path <absolute-executable>] [--model <id>] [--workspace-mode worktree|clone|workspace] [--worker-name <short-name>] [--worker-shared <directory>] [--reference-repo [<branch>@]<name>=<directory>]... [--min-free-gib <GiB>] [--target-free-gib <GiB>] [--github-repo <owner/repo> --github-user <account> | --azure-devops-org <url> --azure-devops-project <name-or-id> --azure-devops-repo <name-or-id> --azure-devops-user <upn> [--azure-devops-alias <alias>]] [--output-mode normal|verbose] [--no-secret-store] [--tool-azure-config-dir <absolute-directory>] [--entra-user <upn> [--clippy-auth <cli.js>]] [--coordinator-server <url> [--coordinator-harness minicode|copilotcli] [--coordinator-azure-config-dir <absolute-directory>]]"
+const WORKER_USAGE = "Usage: minicode worker --server <origin> --worker-id <id> [--repo-root [<branch>@]<directory>] [--harness default|copilotcli] [--copilot-path <absolute-executable>] [--model <id>] [--workspace-mode worktree|clone|workspace] [--worker-name <short-name>] [--worker-shared <directory>] [--reference-repo [<branch>@]<name>=<directory>]... [--min-free-gib <GiB>] [--target-free-gib <GiB>] [--github-repo <owner/repo> --github-user <account> | --azure-devops-org <url> --azure-devops-project <name-or-id> --azure-devops-repo <name-or-id> --azure-devops-user <upn> [--azure-devops-alias <alias>]] [--output-mode normal|verbose] [--no-secret-store] [--tool-azure-config-dir <absolute-directory>] [--entra-user <upn> [--clippy-auth <cli.js>]] [--coordinator-server <url> [--coordinator-alias <name>] [--coordinator-harness minicode|copilotcli] [--coordinator-azure-config-dir <absolute-directory>]]"
 
 // A server behind Entra sign-in answers an unauthenticated probe with Easy Auth's challenge.
 async function requiresEntra(server) {
@@ -1119,7 +1119,7 @@ export function parseWorkerCliOptions(argv) {
       options["no-secret-store"] = true
       continue
     }
-    if (!["--server", "--worker-id", "--entra-user", "--clippy-auth", "--harness", "--copilot-path", "--output-mode", "--tool-azure-config-dir", "--worker-shared", "--reference-repo", "--workspace-mode", "--worker-name", "--min-free-gib", "--target-free-gib", "--github-repo", "--github-user", "--azure-devops-org", "--azure-devops-project", "--azure-devops-repo", "--azure-devops-user", "--azure-devops-alias", "--coordinator-server", "--coordinator-harness", "--coordinator-azure-config-dir"].includes(argv[i])
+    if (!["--server", "--worker-id", "--entra-user", "--clippy-auth", "--harness", "--copilot-path", "--output-mode", "--tool-azure-config-dir", "--worker-shared", "--reference-repo", "--workspace-mode", "--worker-name", "--min-free-gib", "--target-free-gib", "--github-repo", "--github-user", "--azure-devops-org", "--azure-devops-project", "--azure-devops-repo", "--azure-devops-user", "--azure-devops-alias", "--coordinator-server", "--coordinator-alias", "--coordinator-harness", "--coordinator-azure-config-dir"].includes(argv[i])
       || !argv[i + 1] || argv[i + 1].startsWith("--")) throw new Error(WORKER_USAGE)
     if (argv[i] === "--reference-repo") {
       referenceRepos.push(argv[++i])
@@ -1171,6 +1171,10 @@ export async function runAgentPoolWorkerCli(argv, repoRoot, { model } = {}) {
   if (coordinatorAzureConfigDir !== undefined && !path.isAbsolute(coordinatorAzureConfigDir)) {
     throw new Error("--coordinator-azure-config-dir must be an absolute directory path")
   }
+  const coordinatorAlias = options["coordinator-alias"]
+  if (coordinatorAlias !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(coordinatorAlias)) {
+    throw new Error("--coordinator-alias must be 1-32 letters, numbers, dots, underscores, or hyphens")
+  }
 
   // --entra-user turns Entra sign-in on and names the account. Without it, a server that needs it
   // would let the worker connect and then refuse every result the agent tries to post back.
@@ -1201,6 +1205,7 @@ export async function runAgentPoolWorkerCli(argv, repoRoot, { model } = {}) {
   }
   const coordinator = options["coordinator-server"] ? await startCoordinator({
     server: options["coordinator-server"],
+    alias: coordinatorAlias,
     cwd,
     instanceKey: `worker:${workerId}`,
     harness: coordinatorHarness,

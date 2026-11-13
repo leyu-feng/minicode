@@ -31,13 +31,13 @@ function scalar(text) {
 export function parseWorkersYaml(text) {
   const result = {
     version: undefined, port: undefined, coordinatorServer: undefined,
-    coordinatorHarness: undefined, coordinatorAzureConfigDir: undefined,
+    coordinatorAlias: undefined, coordinatorHarness: undefined, coordinatorAzureConfigDir: undefined,
     coordinatorCopilotPath: undefined, coordinatorModel: undefined, workers: [],
   }
   let current = null
   for (const [index, raw] of text.replace(/^\uFEFF/, "").split(/\r?\n/).entries()) {
     if (!raw.trim() || raw.trimStart().startsWith("#")) continue
-    let match = /^(version|port|coordinatorServer|coordinatorHarness|coordinatorAzureConfigDir|coordinatorCopilotPath|coordinatorModel):\s*(.*?)\s*$/.exec(raw)
+    let match = /^(version|port|coordinatorServer|coordinatorAlias|coordinatorHarness|coordinatorAzureConfigDir|coordinatorCopilotPath|coordinatorModel):\s*(.*?)\s*$/.exec(raw)
     if (match) {
       if (current || result[match[1]] !== undefined) throw new Error(`Invalid workers.yml line ${index + 1}`)
       result[match[1]] = scalar(match[2])
@@ -60,12 +60,17 @@ export function parseWorkersYaml(text) {
   if (result.coordinatorServer !== undefined && (typeof result.coordinatorServer !== "string" || !result.coordinatorServer)) {
     throw new Error("workers.yml coordinatorServer must be a URL")
   }
-  if (result.coordinatorServer === undefined && [result.coordinatorHarness, result.coordinatorAzureConfigDir,
+  if (result.coordinatorServer === undefined && [result.coordinatorAlias, result.coordinatorHarness, result.coordinatorAzureConfigDir,
     result.coordinatorCopilotPath, result.coordinatorModel].some(value => value !== undefined)) {
     throw new Error("workers.yml coordinator settings require coordinatorServer")
   }
   if (result.coordinatorHarness !== undefined && !["minicode", "copilotcli"].includes(result.coordinatorHarness)) {
     throw new Error("workers.yml coordinatorHarness must be minicode or copilotcli")
+  }
+  if (result.coordinatorAlias !== undefined
+    && (typeof result.coordinatorAlias !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(result.coordinatorAlias))) {
+    throw new Error("workers.yml coordinatorAlias must be a valid alias")
   }
   const names = new Set(), ids = new Set()
   for (const worker of result.workers) {
@@ -127,6 +132,7 @@ export async function runWorkersMode({ workspace, port }) {
   const children = []
   const coordinator = config.coordinatorServer ? await startCoordinator({
     server: config.coordinatorServer,
+    alias: config.coordinatorAlias,
     cwd: workspace,
     instanceKey: `web:${workspace}`,
     harness: config.coordinatorHarness ?? "copilotcli",

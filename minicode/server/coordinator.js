@@ -163,12 +163,12 @@ async function electLeaseCandidate(candidate, leaseDir) {
   return contenders[0]?.token === candidate.token
 }
 
-function shouldWake(message, member) {
+export function shouldWake(message, member) {
   if (message.senderId === member.coordinatorId) return false
-  if (message.senderKind === 0) return true
-  if (message.senderKind !== 1) return false
+  if (![0, 1].includes(message.senderKind)) return false
   const text = String(message.text ?? "")
-  return new RegExp(`(^|\\s)@(?:all|${member.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})(?=\\s|[,:;.!?]|$)`, "i").test(text)
+  const alias = String(member.alias || member.name)
+  return new RegExp(`(^|\\s)@(?:all|${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})(?=\\s|[,:;.!?]|$)`, "i").test(text)
 }
 
 function recentConversation(snapshot) {
@@ -223,7 +223,7 @@ async function createHarnessRunner({
 }
 
 async function startCoordinatorLeader({
-  server, cwd, instanceKey, harness = "copilotcli", azureConfigDir, copilotPath, model,
+  server, cwd, instanceKey, alias, harness = "copilotcli", azureConfigDir, copilotPath, model,
   machineName = os.hostname(), pollMs = DEFAULT_POLL_MS, heartbeatMs = DEFAULT_HEARTBEAT_MS,
   fetchImpl = fetch, tokenProvider = createCoordinatorTokenProvider({ azureConfigDir }),
   harnessFactory = createHarnessRunner,
@@ -262,7 +262,7 @@ async function startCoordinatorLeader({
   async function join() {
     return request("/v1/coordinationrooms/default/join", {
       method: "POST",
-      body: JSON.stringify({ coordinatorId, machineName, agentSessionId: instanceKey }),
+      body: JSON.stringify({ coordinatorId, alias, machineName, agentSessionId: instanceKey }),
     })
   }
 
@@ -304,18 +304,21 @@ async function startCoordinatorLeader({
               method: "POST",
             })
             if (!heartbeat?.coordinatorId) throw new Error("Coordinator heartbeat returned an invalid member")
+            Object.assign(member, heartbeat)
           } catch (error) {
             if (error.status !== 404) throw error
             const rejoined = await join()
             if (rejoined.member?.coordinatorId !== coordinatorId || !rejoined.member?.name) {
               throw new Error("Coordinator rejoin returned an invalid member")
             }
-            member = rejoined.member
+            Object.assign(member, rejoined.member)
             log(`[coordinator:${member.name}] rejoined ${origin}`)
           }
           lastHeartbeat = Date.now()
         }
         snapshot = await request("/v1/coordinationrooms/default")
+        const currentMember = snapshot.members.find(value => value.coordinatorId === coordinatorId)
+        if (currentMember) Object.assign(member, currentMember)
         for (const message of snapshot.messages) {
           if (seen.has(message.id)) continue
           seen.add(message.id)
@@ -323,6 +326,8 @@ async function startCoordinatorLeader({
           const prompt = [
             `New coordinator-room message from ${message.senderName}:`,
             String(message.text),
+            "",
+            `You are addressed as @${member.alias || member.name}.`,
             "",
             "Recent room conversation:",
             recentConversation(snapshot),

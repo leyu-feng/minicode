@@ -4,7 +4,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
-import { startCoordinator } from "../server/coordinator.js"
+import { shouldWake, startCoordinator } from "../server/coordinator.js"
 import { createCoordinatorTools } from "../server/coordinator-tools.js"
 import { parseWorkerCliOptions } from "../server/agent-pool-worker.js"
 import { parseWorkersYaml } from "../server/workers-mode.js"
@@ -27,11 +27,11 @@ test("coordinator joins, ignores history, runs the harness for a new engineer me
   let snapshots = 0
   let stopped = false
   const historical = { id: "old", senderId: "engineer", senderName: "Engineer", senderKind: 0, text: "old", at: "2026-01-01" }
-  const incoming = { id: "new", senderId: "engineer", senderName: "Engineer", senderKind: 0, text: "fix the worker", at: "2026-01-02" }
+  const incoming = { id: "new", senderId: "engineer", senderName: "Engineer", senderKind: 0, text: "@devbox fix the worker", at: "2026-01-02" }
   const fetchImpl = async (url, options = {}) => {
     const route = new URL(url).pathname
     if (route.endsWith("/join")) return Response.json({
-      member: { coordinatorId: "coordinator-id", name: "devbox", machineName: "devbox" },
+      member: { coordinatorId: "coordinator-id", alias: "devbox", name: "devbox", machineName: "devbox" },
       repositories: [{ name: "repo", source: "https://example.test/repo", branch: "main", readOnly: true }],
     })
     if (route.endsWith("/default") && !options.method) {
@@ -63,6 +63,20 @@ test("coordinator joins, ignores history, runs the harness for a new engineer me
   assert.equal(posted[0].text, "I will fix it.")
   assert.match(posted[0].coordinatorId, /^[a-f0-9]{64}$/)
   assert.equal(stopped, true)
+})
+
+test("coordinator wakes only for its alias or all", () => {
+  const member = {
+    coordinatorId: "coordinator",
+    alias: "build",
+    name: "build(devbox)",
+  }
+  assert.equal(shouldWake({ senderId: "engineer", senderKind: 0, text: "please investigate" }, member), false)
+  assert.equal(shouldWake({ senderId: "engineer", senderKind: 0, text: "@other investigate" }, member), false)
+  assert.equal(shouldWake({ senderId: "engineer", senderKind: 0, text: "@build investigate" }, member), true)
+  assert.equal(shouldWake({ senderId: "other", senderKind: 1, text: "@all status" }, member), true)
+  assert.equal(shouldWake({ senderId: "coordinator", senderKind: 1, text: "@build echo" }, member), false)
+  assert.equal(shouldWake({ senderId: "system", senderKind: 2, text: "@all notice" }, member), false)
 })
 
 test("coordinator releases its harness when the initial room snapshot fails", async () => {
@@ -141,6 +155,7 @@ test("workers.yml accepts one launcher coordinator and validates its harness", (
   const config = parseWorkersYaml(`
 version: 1
 coordinatorServer: https://engsys.example.test
+coordinatorAlias: build
 coordinatorHarness: minicode
 coordinatorAzureConfigDir: C:\\Users\\me\\.azure
 workers:
@@ -150,6 +165,7 @@ workers:
     repoRoot: .
 `)
   assert.equal(config.coordinatorServer, "https://engsys.example.test")
+  assert.equal(config.coordinatorAlias, "build")
   assert.equal(config.coordinatorHarness, "minicode")
   assert.throws(() => parseWorkersYaml(`
 version: 1
@@ -166,10 +182,12 @@ test("direct worker accepts launcher coordinator options", () => {
   const parsed = parseWorkerCliOptions([
     "--server", "https://paperclip.example.test",
     "--coordinator-server", "https://engsys.example.test",
+    "--coordinator-alias", "build",
     "--coordinator-harness", "minicode",
     "--coordinator-azure-config-dir", "C:\\Users\\me\\.azure",
   ])
   assert.equal(parsed.options["coordinator-server"], "https://engsys.example.test")
+  assert.equal(parsed.options["coordinator-alias"], "build")
   assert.equal(parsed.options["coordinator-harness"], "minicode")
 })
 
