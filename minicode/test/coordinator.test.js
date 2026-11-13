@@ -4,7 +4,12 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
-import { shouldWake, startCoordinator } from "../server/coordinator.js"
+import {
+  coordinatorMessagePrompt,
+  shouldWake,
+  startCoordinator,
+  updateCommandTarget,
+} from "../server/coordinator.js"
 import { createCoordinatorTools } from "../server/coordinator-tools.js"
 import { parseWorkerCliOptions } from "../server/agent-pool-worker.js"
 import { parseWorkersYaml } from "../server/workers-mode.js"
@@ -75,7 +80,9 @@ test("coordinator joins, ignores history, runs the harness for a new engineer me
   assert.match(prompts[0], /fix the worker/)
   assert.equal(posted[0].text, "Acknowledged — @devbox received the targeted message.")
   assert.equal(posted[0].hidden, true)
+  assert.deepEqual(posted[0].audienceCoordinatorIds, ["coordinator-id"])
   assert.equal(posted[1].text, "I will fix it.")
+  assert.deepEqual(posted[1].audienceCoordinatorIds, ["coordinator-id"])
   assert.match(posted[1].coordinatorId, /^[a-f0-9]{64}$/)
   assert.deepEqual(presence.slice(0, 2), [
     { state: 1, isTyping: false },
@@ -99,6 +106,62 @@ test("coordinator wakes only for its alias or all", () => {
   assert.equal(shouldWake({ senderId: "engineer", senderKind: 0, text: "@other investigate" }, member), false)
   assert.equal(shouldWake({ senderId: "engineer", senderKind: 0, text: "@build investigate" }, member), true)
   assert.equal(shouldWake({ senderId: "other", senderKind: 1, text: "@all status" }, member), true)
+  assert.equal(shouldWake({
+    senderId: "engineer",
+    senderKind: 0,
+    text: "investigate",
+    audienceCoordinatorIds: ["coordinator"],
+  }, member), true)
+  assert.equal(shouldWake({
+    senderId: "engineer",
+    senderKind: 0,
+    text: "@build investigate",
+    audienceCoordinatorIds: ["other"],
+  }, member), false)
+  assert.equal(shouldWake({
+    senderId: "engineer",
+    senderKind: 0,
+    text: "status",
+    audienceAll: true,
+  }, member), true)
+  assert.equal(shouldWake({
+    senderId: "other",
+    senderKind: 1,
+    text: "response",
+    audienceAll: true,
+  }, member), false)
+  assert.equal(shouldWake({
+    senderId: "engineer",
+    senderKind: 0,
+    text: "/alias @build @fixer",
+    audienceAll: true,
+  }, member), false)
+  assert.equal(shouldWake({
+    senderId: "engineer",
+    senderKind: 0,
+    text: "/update @build",
+    audienceAll: true,
+  }, member), true)
+  assert.equal(shouldWake({
+    senderId: "engineer",
+    senderKind: 0,
+    text: "/update @other",
+    audienceAll: true,
+  }, member), false)
+  assert.equal(updateCommandTarget({
+    senderKind: 0,
+    text: "/update @ALL",
+  }), "all")
+  assert.match(coordinatorMessagePrompt(
+    {
+      senderKind: 0,
+      senderName: "Engineer",
+      text: "/update @build",
+      at: "2026-01-02",
+    },
+    member,
+    { messages: [] },
+  ), /fast-forward only if clean and non-diverged/)
   assert.equal(shouldWake({ senderId: "coordinator", senderKind: 1, text: "@build echo" }, member), false)
   assert.equal(shouldWake({ senderId: "system", senderKind: 2, text: "@all notice" }, member), false)
 })
