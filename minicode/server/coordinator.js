@@ -14,6 +14,7 @@ const DEFAULT_BUSY_KEEPALIVE_MS = 90_000
 const DEFAULT_LEASE_POLL_MS = 1000
 const DEFAULT_LEASE_SETTLE_MS = 250
 const MAX_RESPONSE_CHARS = 8000
+const NO_REPLY = "[NO_REPLY]"
 const COORDINATOR_IDLE = 0
 const COORDINATOR_BUSY = 1
 
@@ -231,7 +232,8 @@ async function createHarnessRunner({
     "Before resetting, cleaning, stopping, deleting, or recreating anything, verify identity and active ownership so healthy assignments and unrelated local work are preserved.",
     "An engineer command `/update @all` or `/update @your-alias` explicitly authorizes a safe local Minicode update and restart on your machine only. Fetch and fast-forward the configured Minicode branch only when its worktree is clean and non-diverged, verify there are no active local assignments, then arrange a delayed restart of the canonical local workers and coordinator after your response is posted. Report the exact blocker instead of stashing, resetting, discarding changes, or interrupting active work.",
     `The EngSys catalog exposes these repositories for inspection and isolated repair: ${JSON.stringify(repositories)}`,
-    "Answer the chat message directly and concisely. Your final response is posted to the shared coordinator room.",
+    "Answer actionable chat messages directly and concisely. Stop once the request is resolved; do not extend exchanges with acknowledgments, thanks, or repeated confirmations.",
+    `If a message needs no action, answer, blocker report, or genuinely new information, return exactly ${NO_REPLY} without using tools. This includes acknowledgment-only messages from other coordinators. Otherwise your final response is posted to the shared coordinator room.`,
   ].join("\n")
   if (harness === "minicode") {
     const session = new AgentSession({
@@ -433,6 +435,10 @@ async function startCoordinatorLeader({
             await setPresence(COORDINATOR_BUSY, false)
             if (result?.exitCode !== 0 || !result?.summary?.trim()) {
               log(`[coordinator:${member.name}] harness failed: ${result?.error ?? "no response"}`)
+              continue
+            }
+            if (result.summary.trim() === NO_REPLY) {
+              log(`[coordinator:${member.name}] no reply needed`)
               continue
             }
             await request("/v1/coordinationrooms/default/messages", {

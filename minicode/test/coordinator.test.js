@@ -108,6 +108,58 @@ test("coordinator joins, ignores history, logs harness progress and posts its re
   assert.equal(logs.some(message => message.includes("hidden")), false)
 })
 
+test("coordinator can end an acknowledgment exchange without posting another reply", async t => {
+  const posted = []
+  const presence = []
+  const logs = []
+  let snapshots = 0
+  let prompts = 0
+  const incoming = {
+    id: "ack", senderId: "other", senderName: "shanghai", senderKind: 1,
+    text: "@devbox acknowledged, thanks.",
+  }
+  const fetchImpl = async (url, options = {}) => {
+    const route = new URL(url).pathname
+    if (route.endsWith("/join")) return Response.json({
+      member: { coordinatorId: "coordinator-id", alias: "devbox", name: "devbox" },
+      repositories: [],
+    })
+    if (route.endsWith("/default") && !options.method) {
+      return Response.json({ members: [], messages: ++snapshots === 1 ? [] : [incoming] })
+    }
+    if (route.endsWith("/messages")) {
+      posted.push(JSON.parse(options.body))
+      return Response.json({ id: "response" })
+    }
+    if (route.endsWith("/presence")) {
+      const update = JSON.parse(options.body)
+      presence.push(update)
+      return Response.json({ coordinatorId: "coordinator-id", alias: "devbox", name: "devbox", ...update })
+    }
+    if (route.endsWith("/heartbeat")) return Response.json({ coordinatorId: "coordinator-id" })
+    return new Response("not found", { status: 404 })
+  }
+  const coordinator = await startCoordinator({
+    server: "https://engsys.example.test", cwd: process.cwd(), instanceKey: "no-reply-test",
+    machineName: "devbox", pollMs: 5, heartbeatMs: 1000, fetchImpl,
+    tokenProvider: Object.assign(async () => token(), { invalidate() {} }),
+    harnessFactory: async () => ({
+      async run() { prompts++; return { exitCode: 0, summary: "\n[NO_REPLY]\n" } },
+      async stop() {},
+    }),
+    log: message => logs.push(message),
+  })
+  t.after(() => coordinator.stop())
+  await waitUntil(() => presence.some(update => update.state === 0))
+  await coordinator.stop()
+  assert.equal(prompts, 1)
+  assert.equal(posted.length, 1)
+  assert.equal(posted[0].hidden, true)
+  assert.ok(logs.includes("[coordinator:devbox] no reply needed"))
+  assert.equal(logs.some(message => message.includes("harness failed")), false)
+  assert.equal(logs.at(-1), "[coordinator:devbox] idle - waiting for messages")
+})
+
 test("coordinator wakes only for its alias or all", () => {
   const member = {
     coordinatorId: "coordinator",
