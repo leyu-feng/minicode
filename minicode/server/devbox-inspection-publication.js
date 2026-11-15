@@ -17,15 +17,18 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
     || task.prPolicy.inspectorAgentId === task.agent.id || !path.isAbsolute(storage ?? ""))
     throw new Error("Local branch inspection requires a producer assignment and worker-owned publication storage")
   const writable = repositories.filter(repo => !repo.readOnly).map(repo => {
-    const parsed = parseAzureDevOpsRepositoryUrl(repo.source)
     const source = new URL(repo.source)
     if (source.username || source.password || source.search || source.hash)
       throw new Error("Local inspection repositories must not contain credentials or query parameters")
-    const web = `https://dev.azure.com/${parsed.organization}/${encodeURIComponent(parsed.project)}/_git/${encodeURIComponent(parsed.repository)}`
-    return { ...repo, id: repo.name, source: source.href, parsed,
-      publication: { provider: "azure_devops",
-        repository: `${parsed.organization}/${parsed.project}/${parsed.repository}`,
-        pullRequestUrlTemplate: `${web}/pullrequest/{number}`, branchTemplate: "u/{workerName}/{feature}" } }
+    return { ...repo, id: repo.name, source: source.href,
+      get parsed() { return parseAzureDevOpsRepositoryUrl(source.href) },
+      get publication() {
+        const parsed = this.parsed
+        const web = `https://dev.azure.com/${parsed.organization}/${encodeURIComponent(parsed.project)}/_git/${encodeURIComponent(parsed.repository)}`
+        return { provider: "azure_devops",
+          repository: `${parsed.organization}/${parsed.project}/${parsed.repository}`,
+          pullRequestUrlTemplate: `${web}/pullrequest/{number}`, branchTemplate: "u/{workerName}/{feature}" }
+      } }
   })
   const env = publicationEnvironment()
   const providers = new Map()

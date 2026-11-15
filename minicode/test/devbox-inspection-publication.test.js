@@ -156,6 +156,33 @@ async function fixture(t) {
   }
 }
 
+test("GitHub workspace repositories do not block Azure inspection or gain publication rights", async t => {
+  const f = await fixture(t)
+  const azureRepositories = f.options.repositories
+  const github = { name: "minicode", source: "https://github.com/fixture/minicode",
+    path: path.join(f.root, "minicode"), branch: "main", readOnly: false }
+  f.options.repositories = [github]
+  f.restart()
+  await f.complete()
+  f.options.repositories = [...azureRepositories, github]
+  f.restart()
+  const commands = f.commands.length
+  await assert.rejects(f.call("submit_branch_for_inspection", { ...f.input, repository: github.name }),
+    /Azure DevOps publication supports dev.azure.com and visualstudio.com only/)
+  await assert.rejects(f.call("retire_submission_branch", {
+    repository: github.name, submissionId: `submission-publication-${"a".repeat(64)}`,
+    url: "https://github.com/fixture/minicode/pull/12",
+  }), /Azure DevOps publication supports dev.azure.com and visualstudio.com only/)
+  assert.equal(f.commands.length, commands)
+  assert.equal(f.children.length, 0)
+  assert.equal(f.pushes, 0)
+  const submitted = await f.submit()
+  await assert.rejects(f.complete(), /inspection is not complete/)
+  await f.approve(submitted)
+  await f.retire(submitted)
+  await f.complete()
+})
+
 test("local producer submits an exact commit, reconciles handoff across restart, and retires only its verified original branch", async t => {
   const f = await fixture(t)
   const sourceHead = await f.git(f.source, "rev-parse", "HEAD")
