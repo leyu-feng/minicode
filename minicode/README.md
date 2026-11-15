@@ -668,8 +668,12 @@ checkouts stay intact. Unsupported publication must be reported, not improvised.
 Named Devbox publishers create new PR branches as
 `u/<worker-name>/<readable-feature-title>`, with the existing `-1` through `-10`
 collision retries and durable allocation/reconciliation. Existing saved branches
-are reused unchanged. An inspector copies the submitted remote commit onto its
-own new PR branch; it does not rename, edit or delete another worker's branch.
+are reused unchanged by default. An inspector copies the submitted remote commit
+onto its own new PR branch; with explicit human authorization, it may also update
+its own existing draft-PR branch. Resolving a merge conflict may require a
+non-fast-forward rewrite, but only with an exact `--force-with-lease` after
+verifying the current tip and incorporating the PR target. It never rewrites the
+producer's branch or another worker's branch.
 Branch handoff also saves the producer task in its blocked/waiting state before
 releasing the assignment. The inspector's parent-task comment returns the PR
 link through the existing continuation/wakeup path, without cross-agent
