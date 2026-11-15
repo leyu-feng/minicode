@@ -97,7 +97,7 @@ const execFileAsync = promisify(execFile);
       await vi.waitFor(() => expect(messages.some(message => message.type === "welcome")).toBe(true));
       socket.send(JSON.stringify({ type: "ready" }));
       await vi.waitFor(() => expect(agentPoolBroker.status(pairing.workerId)).toBe("idle"));
-      workers.push({ id: pairing.workerId, instanceId, socket, messages });
+      workers.push({ id: pairing.workerId, instanceId, socket, messages, token });
     }
     const [spare, target] = workers;
     const base = `/api/companies/${seeded.companyId}/agent-pools/${pool.id}/workers`;
@@ -621,6 +621,89 @@ const execFileAsync = promisify(execFile);
     result.use(errorHandler);
     return result;
   }
+
+  it("deletes an unused Devbox pool, disconnects workers, invalidates credentials and audits without losing history", async () => {
+    const f = await instructionFixture();
+    const pending = await f.svc.issuePairing(f.companyId, f.pool.id, "pending-worker");
+    const url = `/api/companies/${f.companyId}/agent-pools/${f.pool.id}`;
+    await db.update(agents).set({ adapterConfig: { name: "default" } }).where(eq(agents.id, f.agent.id));
+    const [historical] = await db.insert(heartbeatRuns).values({
+      companyId: f.companyId, agentId: f.agent.id, status: "succeeded",
+    }).returning();
+    await request(f.application).delete(url).expect(204);
+    await vi.waitFor(() => expect(f.target.socket.readyState).toBe(WebSocket.CLOSED));
+    expect(agentPoolBroker.status(f.target.id)).toBe("offline");
+    expect(await db.select().from(agentPools).where(eq(agentPools.id, f.pool.id))).toEqual([]);
+    expect(await db.select().from(agentPoolWorkers).where(eq(agentPoolWorkers.poolId, f.pool.id))).toEqual([]);
+    expect(await f.svc.authenticate(f.target.id, f.target.token)).toBeNull();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, historical.id))).toHaveLength(1);
+    await expect(f.svc.pair(pending.workerId, pending.serverToken, "a".repeat(64))).rejects.toThrow("Invalid");
+    const [audit] = await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, f.companyId), eq(activityLog.entityId, f.pool.id), eq(activityLog.action, "agent_pool.deleted"),
+    ));
+    expect(audit).toMatchObject({ actorType: "user", actorId: f.actor.userId, details: { name: f.pool.name } });
+    await request(f.application).delete(url).expect(404);
+  });
+
+  it("rejects default pools, foreign identities and non-board pool deletion without changing registrations", async () => {
+    const svc = agentPoolService(db);
+    const pool = await svc.create(companyId, "delete-access");
+    const pairing = await svc.issuePairing(companyId, pool.id, "keep-worker");
+    const defaultPool = await svc.ensureDefault(companyId, false);
+    const url = `/api/companies/${companyId}/agent-pools/${pool.id}`;
+    await request(app()).delete(`/api/companies/${companyId}/agent-pools/${defaultPool.id}`).expect(409);
+    await request(app()).delete(`/api/companies/${companyId}/agent-pools/${randomUUID()}`).expect(404);
+    await request(app()).delete(`/api/companies/${otherCompanyId}/agent-pools/${pool.id}`).expect(403);
+    await request(app({ type: "board", userId: "board-user", source: "session", companyIds: [otherCompanyId] }))
+      .delete(`/api/companies/${otherCompanyId}/agent-pools/${pool.id}`).expect(404);
+    await request(app({ type: "agent", agentId: randomUUID(), companyId, source: "api_key" })).delete(url).expect(403);
+    expect(await svc.worker(companyId, pool.id, pairing.workerId)).toMatchObject({ revokedAt: null });
+    expect(await svc.get(companyId, defaultPool.id)).toMatchObject({ name: "default" });
+    expect(await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, companyId), eq(activityLog.action, "agent_pool.deleted"),
+    ))).toEqual([]);
+  });
+
+  it("requires agents and open task overrides to leave a pool before deletion, but preserves completed tasks", async () => {
+    const svc = agentPoolService(db);
+    const pool = await svc.create(companyId, "still-used");
+    const pairing = await svc.issuePairing(companyId, pool.id, "keep-pairing");
+    const [agent] = await db.insert(agents).values({
+      companyId, name: "Paused pool user", status: "paused", adapterType: "agent_pool", adapterConfig: { name: pool.name },
+    }).returning();
+    const url = `/api/companies/${companyId}/agent-pools/${pool.id}`;
+    const assigned = await request(app()).delete(url).expect(409);
+    expect(assigned.body.error).toContain("Agents still use");
+    await db.update(agents).set({ adapterConfig: { name: "default" } }).where(eq(agents.id, agent.id));
+    const [task] = await db.insert(issues).values({
+      companyId, title: "Pinned to old pool", status: "blocked", assigneeAgentId: agent.id,
+      assigneeAdapterOverrides: { adapterConfig: { name: pool.name } },
+    }).returning();
+    const pinned = await request(app()).delete(url).expect(409);
+    expect(pinned.body.error).toContain("Open tasks still select");
+    expect(await svc.worker(companyId, pool.id, pairing.workerId)).toMatchObject({ revokedAt: null });
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, task.id));
+    await request(app()).delete(url).expect(204);
+    expect(await db.select().from(issues).where(eq(issues.id, task.id))).toHaveLength(1);
+  });
+
+  it("refuses deletion during a reserved assignment and leaves connected workers usable", async () => {
+    const f = await instructionFixture();
+    const run = { id: randomUUID() };
+    expect(f.svc.reserveQueuedRun(run, f.agent, null)).toBe(true);
+    await db.update(agents).set({ adapterConfig: { name: "default" } }).where(eq(agents.id, f.agent.id));
+    const url = `/api/companies/${f.companyId}/agent-pools/${f.pool.id}`;
+    try {
+      const result = await request(f.application).delete(url).expect(409);
+      expect(result.body.error).toContain("active worker assignments");
+      expect(await f.svc.workers(f.companyId, f.pool.id)).toHaveLength(2);
+      expect(agentPoolBroker.reservedWorker(run.id)).toBeDefined();
+    } finally {
+      agentPoolBroker.releaseReservation(run.id);
+    }
+    expect(agentPoolBroker.status(f.target.id)).toBe("idle");
+    await request(f.application).delete(url).expect(204);
+  });
 
   it("allows direct PRs without an inspector and limits inspector creation to the company board", async () => {
     const url = `/api/companies/${companyId}/pr-inspector`;

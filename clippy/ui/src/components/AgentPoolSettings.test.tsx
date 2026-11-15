@@ -225,6 +225,69 @@ describe("AgentPool settings", () => {
     expect([...container.querySelectorAll("button")].some(button => button.textContent === "Revoke")).toBe(false);
   });
 
+  it("confirms pool deletion, supports cancel, clears pairing data and returns to the default pool", async () => {
+    const pool = { ...devbox, id: "devbox-pool", companyId: "company", name: "coding" };
+    const list = vi.spyOn(agentPoolsApi, "list").mockResolvedValue([hosted, pool]);
+    vi.spyOn(agentPoolsApi, "workers").mockResolvedValue([]);
+    vi.spyOn(agentPoolsApi, "pair").mockResolvedValue({
+      workerId: "worker", serverToken: "private-pairing", expiresAt: "2026-10-17T12:00:00Z",
+    });
+    const remove = vi.spyOn(agentPoolsApi, "remove").mockImplementation(async () => {
+      list.mockResolvedValue([hosted]);
+    });
+    await mount();
+    expect([...container.querySelectorAll("button")].some(button => button.textContent === "Delete pool")).toBe(false);
+    const selected = container.querySelector<HTMLSelectElement>('[aria-label="Agent pool"]')!;
+    await act(async () => {
+      selected.value = pool.id;
+      selected.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await input("Worker name", "worker");
+    await click("Pair worker");
+    await click("Delete pool");
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain('Delete pool "coding"?');
+    expect(remove).not.toHaveBeenCalled();
+    const dialogButton = (text: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
+      .find(button => button.textContent === text)!;
+    await act(async () => dialogButton("Cancel").click());
+    expect(remove).not.toHaveBeenCalled();
+    await click("Delete pool");
+    await act(async () => dialogButton("Delete pool permanently").click());
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)); });
+    expect(remove).toHaveBeenCalledExactlyOnceWith("company", pool.id);
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(container.querySelector<HTMLSelectElement>('[aria-label="Agent pool"]')?.value).toBe(hosted.id);
+    expect(container.querySelector('[aria-label="Pairing token"]')).toBeNull();
+    expect(container.textContent).not.toContain("coding (Devbox)");
+  });
+
+  it("keeps the deletion dialog and pool visible on failure, disabling duplicate requests while pending", async () => {
+    const pool = { ...devbox, id: "devbox-pool", companyId: "company", name: "coding" };
+    vi.spyOn(agentPoolsApi, "list").mockResolvedValue([pool]);
+    vi.spyOn(agentPoolsApi, "workers").mockResolvedValue([]);
+    let reject: (error: Error) => void = () => { throw new Error("Deletion was not started"); };
+    const remove = vi.spyOn(agentPoolsApi, "remove").mockImplementation(() => new Promise((_resolve, fail) => { reject = fail; }));
+    await mount();
+    const selected = container.querySelector<HTMLSelectElement>('[aria-label="Agent pool"]')!;
+    await act(async () => {
+      selected.value = pool.id;
+      selected.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await click("Delete pool");
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
+      .find(button => button.textContent === "Delete pool permanently")!;
+    await act(async () => confirm.click());
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(confirm.disabled).toBe(true);
+    await act(async () => confirm.click());
+    expect(remove).toHaveBeenCalledTimes(1);
+    await act(async () => reject(new Error("Agents still use this pool. Move them first.")));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(document.querySelector('[role="alertdialog"] [role="alert"]')?.textContent).toContain("Agents still use");
+    expect(confirm.disabled).toBe(false);
+    expect(selected.value).toBe(pool.id);
+  });
+
   it("defaults to active workers and filters disconnected, reconnecting, unpaired, and revoked workers", async () => {
     vi.spyOn(agentPoolsApi, "list").mockResolvedValue([hosted]);
     const worker = { poolId: hosted.id, paired: true, revoked: false };

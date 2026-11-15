@@ -16,7 +16,7 @@ Agent access: [companion](../agent-access-map/runs-adapters.md).
 - `validation`: test an adapter in the selected execution environment and surface authentication failures.
 - `runs`: inspect run status, events, output, costs, and the source task.
 - `session`: preserve or reset execution context through supported lifecycle actions.
-- `agent-pools`: create named worker pools, pair/revoke Minicode workers, and select a pool for an agent.
+- `agent-pools`: create/delete named worker pools, pair/revoke Minicode workers, and select a pool for an agent.
 
 ## How to get to it (user POV)
 
@@ -47,6 +47,16 @@ only for Devbox workers; the built-in host manages Hosted registrations. The wor
 list defaults to active (paired, non-revoked idle/busy) connections. Select
 Disconnected to include offline, reconnecting and awaiting-pairing workers,
 Revoked for revoked registrations, or All for the complete inventory.
+For an unused named Devbox pool, choose **Delete pool** and confirm. Move agents
+and open task pool overrides elsewhere first, and wait for active/reserved worker
+assignments to finish. Deletion disconnects idle workers and removes all worker
+credentials and pending pairing tokens; worker files and historical runs/tasks
+remain. The default Hosted pool cannot be deleted. Cancel must preserve the pool;
+a rejected deletion must display the blocker without removing registrations.
+Focused [pool route tests](../../server/src/__tests__/agent-pools.test.ts),
+[broker tests](../../server/src/services/agent-pool-broker.test.ts) and
+[settings tests](../../ui/src/components/AgentPoolSettings.test.tsx) cover these
+contracts; they do not establish live deployment.
 Hire an agent with AgentPool and select
 the pool name. Follow [worker setup](../../../minicode/README.md#connect-as-an-agentpool-worker)
 on the worker machine.

@@ -5,6 +5,10 @@ import { agentPoolsApi } from "../api/agent-pools";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { copyTextToClipboard } from "../lib/clipboard";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "./ui/alert-dialog";
 
 export function AgentPoolSettings({ companyId }: { companyId: string }) {
   const client = useQueryClient();
@@ -13,6 +17,7 @@ export function AgentPoolSettings({ companyId }: { companyId: string }) {
   const [workerName, setWorkerName] = useState("");
   const [pairing, setPairing] = useState<AgentPoolPairing | null>(null);
   const [workerFilter, setWorkerFilter] = useState("active");
+  const [poolToDelete, setPoolToDelete] = useState<AgentPool | null>(null);
   const copy = useMutation({ mutationFn: copyTextToClipboard });
   const key = ["agent-pools", companyId];
   const pools = useQuery({ queryKey: key, queryFn: () => agentPoolsApi.list(companyId) });
@@ -35,6 +40,13 @@ export function AgentPoolSettings({ companyId }: { companyId: string }) {
   const revoke = useMutation({
     mutationFn: (id: string) => agentPoolsApi.revoke(companyId, selected, id),
     onSuccess: () => { void client.invalidateQueries({ queryKey: key }); },
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => agentPoolsApi.remove(companyId, id),
+    onSuccess: () => {
+      setPoolId(""); setPairing(null); setWorkerName(""); setPoolToDelete(null);
+      void client.invalidateQueries({ queryKey: key });
+    },
   });
   const visibleWorkers = workers.data?.filter((worker) => {
     if (workerFilter === "all") return true;
@@ -59,6 +71,36 @@ export function AgentPoolSettings({ companyId }: { companyId: string }) {
         value={selected} onChange={(e) => { setPoolId(e.target.value); setPairing(null); }}>
         {pools.data?.map((pool) => <option key={pool.id} value={pool.id}>{pool.name} ({pool.type === "hosted" ? "Hosted" : "Devbox"})</option>)}
       </select>
+      {selectedPool?.type === "devbox" && selectedPool.name !== "default" && (
+        <Button variant="destructive" onClick={() => { remove.reset(); setPoolToDelete(selectedPool); }}>
+          Delete pool
+        </Button>
+      )}
+      <AlertDialog open={Boolean(poolToDelete)} onOpenChange={(open) => {
+        if (!open && !remove.isPending) { setPoolToDelete(null); remove.reset(); }
+      }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete pool "{poolToDelete?.name}"?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes the pool and all its worker pairings, and disconnects idle workers.
+              Agents and open tasks must use another pool, and active worker assignments must finish first.
+              Worker files and run history are kept.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {remove.error && <p role="alert" className="text-sm text-destructive">{remove.error.message}</p>}
+          <AlertDialogFooter className="sm:justify-between">
+            <AlertDialogCancel disabled={remove.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={remove.isPending} onClick={(event) => {
+                event.preventDefault();
+                if (poolToDelete) remove.mutate(poolToDelete.id);
+              }}>
+              {remove.isPending ? "Deleting..." : "Delete pool permanently"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       {selectedPool?.type === "hosted" && <HostedPoolStatus key={selectedPool.id} companyId={companyId} pool={selectedPool} />}
       {selectedPool?.type === "devbox" && selectedPool.name !== "default" && <>
       <div className="flex items-center gap-2">

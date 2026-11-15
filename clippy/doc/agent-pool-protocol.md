@@ -9,6 +9,22 @@ different worker setups belong in different pools, not per-agent worker pins.
 Board operators can explicitly target an individual worker for a tracked task;
 ordinary pool scheduling remains unchanged.
 
+### Pool deletion
+
+Board operators with company access can delete an unused, non-default Devbox
+pool with `DELETE /api/companies/{companyId}/agent-pools/{poolId}` (`204`).
+Default and Hosted pools are protected. Assigned agents, open tasks selecting
+the pool through adapter overrides, and active/reserved worker assignments
+return `409`; move those references and wait for work to finish before retrying.
+Unknown or foreign-company pools return `404` after company authorization.
+
+Deletion atomically removes the pool and worker registrations, invalidating
+client credentials and unused pairing tokens. Broker admission is held during
+deletion; successful deletion disconnects idle peers, including stale
+authenticated reconnects. Failed deletion restores admission without revoking
+workers. Run/task history and worker-machine files are unchanged. Successful
+deletion emits `agent_pool.deleted` activity.
+
 ### Targeted worker instructions
 
 These board-only, company-scoped endpoints use the `/api` prefix:

@@ -227,6 +227,7 @@ the failed Test setup does not qualify successful live cleanup.
 Review: `baseline`.
 
 API: `present` — GET/POST /api/companies/{companyId}/agent-pools;
+DELETE /api/companies/{companyId}/agent-pools/{poolId};
 POST /api/companies/{companyId}/agent-pools/{poolId};
 GET /api/companies/{companyId}/agent-pools/{poolId}/status;
 GET /api/companies/{companyId}/agent-pools/{poolId}/repos;
@@ -245,6 +246,16 @@ Agent access: `operator-only` for pool/worker administration; normal agent keys
 are denied. Minicode's `worker` CLI is the worker entry point. It receives only
 its assigned run context and transient run-scoped tool credentials, not board
 authority or the credentials of another pool.
+Pool deletion uses the same board/company gate and emits `agent_pool.deleted`.
+Only non-default Devbox pools may be deleted. Assigned agents, open task pool
+overrides and active/reserved broker work block deletion. A transactional pool
+lock serializes pairing/deletion; broker admission is held during deletion and
+restored on failure. Successful deletion invalidates worker registrations and
+disconnects idle peers without deleting historical runs/tasks or worker files.
+The [pool service](../../server/src/services/agent-pools.ts) and
+[route tests](../../server/src/__tests__/agent-pools.test.ts) provide scoped
+source/fixture evidence for deletion, including foreign-company and agent-key
+denials. Actual deployed actor verification remains `not-run`.
 Worker detail and targeted instruction endpoints also require board identity
 and company access. Details expose connection instance/capabilities, never
 credentials. Instructions create ordinary audited tasks for a same-company,

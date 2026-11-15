@@ -15,6 +15,7 @@ export const agentPoolsApi = {
     api.put<AgentGitHubLoginStatus>(`/companies/${companyId}/agents/${agentId}/github-login/git-identity`, identity),
   list: (companyId: string) => api.get<AgentPool[]>(base(companyId)),
   create: (companyId: string, name: string) => api.post<AgentPool>(base(companyId), { name }),
+  remove: (companyId: string, poolId: string) => api.delete<void>(`${base(companyId)}/${poolId}`),
   status: (companyId: string, poolId: string) =>
     api.get<HostedWorkerStatus>(`${base(companyId)}/${poolId}/status`),
   repositories: (companyId: string, poolId: string) =>

@@ -67,6 +67,44 @@ async function harness(reconnectMs = 1000) {
 }
 
 describe("AgentPool execution channel", () => {
+  it("blocks admission during pool deletion and restores idle workers if deletion fails", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker();
+    const ctx = context();
+    const release = broker.beginPoolDeletion(ctx.agent.companyId, "default");
+    expect(release).not.toBeNull();
+    try {
+      expect(broker.beginPoolDeletion(ctx.agent.companyId, "default")).toBeNull();
+      expect(broker.hasAvailableWorker(ctx)).toBe(false);
+      expect(broker.reserveAvailableWorker(ctx)).toBe(false);
+      await expect(broker.execute(ctx)).resolves.toMatchObject({ errorCode: "agent_pool_worker_unavailable" });
+      expect(client.messages).toEqual([]);
+      expect(ctx.onDispatch).not.toHaveBeenCalled();
+    } finally {
+      release?.();
+    }
+    expect(broker.hasAvailableWorker(ctx)).toBe(true);
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    expect(broker.beginPoolDeletion(ctx.agent.companyId, "default")).toBeNull();
+    broker.releaseReservation(ctx.runId);
+  });
+
+  it("refuses deletion while work is running or reconnecting without stopping that work", async () => {
+    const { broker, worker } = await harness();
+    const client = await worker();
+    const ctx = context();
+    const result = broker.execute(ctx);
+    await client.take("task");
+    expect(broker.beginPoolDeletion(ctx.agent.companyId, "default")).toBeNull();
+    await client.disconnect();
+    expect(broker.beginPoolDeletion(ctx.agent.companyId, "default")).toBeNull();
+    const reconnected = await worker(client.id, client.instanceId, ctx.runId);
+    reconnected.send({ type: "result", runId: ctx.runId, seq: 1, exitCode: 0 });
+    await reconnected.take("ack");
+    reconnected.send({ type: "ready" });
+    await expect(result).resolves.toMatchObject({ exitCode: 0 });
+  });
+
   it("reserves and dispatches the exact target even when another worker is preferred for large frames", async () => {
     const { broker, worker } = await harness();
     const spare = await worker();

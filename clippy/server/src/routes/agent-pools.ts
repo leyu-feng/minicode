@@ -195,6 +195,15 @@ export function agentPoolRoutes(db: Db) {
     });
     res.status(201).json(pool);
   });
+  router.delete(`${base}/:poolId`, async (req, res) => {
+    const companyId = company(req.params.companyId);
+    const pool = await svc.remove(companyId, id(req.params.poolId));
+    await logActivity(db, {
+      companyId, actorType: "user", actorId: req.actor.userId ?? "local-board",
+      action: "agent_pool.deleted", entityType: "agent_pool", entityId: pool.id, details: { name: pool.name },
+    });
+    res.status(204).end();
+  });
   router.get(`${base}/:poolId/status`, async (req, res) =>
     res.json(await svc.status(company(req.params.companyId), id(req.params.poolId))));
   router.get(`${base}/:poolId/repos`, async (req, res) =>

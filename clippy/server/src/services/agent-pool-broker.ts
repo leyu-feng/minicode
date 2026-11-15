@@ -81,6 +81,7 @@ export class AgentPoolBroker {
   private reservations = new Set<string>();
   private deliveries = new Map<string, Promise<void>>();
   private revokedWorkers = new Set<string>();
+  private deletingPools = new Set<string>();
   prepareExecution?: (ctx: AdapterExecutionContext, options?: { waitForWorker: boolean }) => Promise<void | {
     githubCredential?: AgentPoolGitHubCredential; gitIdentity?: AgentPoolGitIdentity; prPolicy?: AgentPoolPrPolicy;
   }>;
@@ -99,6 +100,19 @@ export class AgentPoolBroker {
     const peer = this.peers.get(workerId);
     return peer?.socket?.readyState === WebSocket.OPEN
       ? { instanceId: peer.instanceId, capabilities: [...peer.capabilities] } : null;
+  }
+
+  private poolKey(companyId: string, poolName: unknown) {
+    return JSON.stringify([companyId, poolName]);
+  }
+
+  beginPoolDeletion(companyId: string, poolName: string) {
+    const key = this.poolKey(companyId, poolName);
+    if (this.deletingPools.has(key) || [...this.peers.values()].some(peer =>
+      peer.identity.companyId === companyId && peer.identity.poolName === poolName
+      && (peer.run || peer.reservedRunId))) return null;
+    this.deletingPools.add(key);
+    return () => { this.deletingPools.delete(key); };
   }
 
   private targetWorkerId(ctx: AgentPoolWorkerRequest) {
@@ -124,6 +138,7 @@ export class AgentPoolBroker {
   }
 
   hasAvailableWorker(ctx: AgentPoolWorkerRequest): boolean {
+    if (this.deletingPools.has(this.poolKey(ctx.agent.companyId, ctx.config.name ?? "default"))) return false;
     const targetWorkerId = this.targetWorkerId(ctx);
     return [...this.peers.values()].some((peer) => peer.identity.companyId === ctx.agent.companyId
       && (targetWorkerId === undefined || peer.identity.id === targetWorkerId)
@@ -135,6 +150,7 @@ export class AgentPoolBroker {
   }
 
   reserveAvailableWorker(ctx: AgentPoolWorkerRequest): boolean {
+    if (this.deletingPools.has(this.poolKey(ctx.agent.companyId, ctx.config.name ?? "default"))) return false;
     const targetWorkerId = this.targetWorkerId(ctx);
     const reserved = [...this.peers.values()].find(peer => peer.reservedRunId === ctx.runId);
     if (reserved && reserved.identity.companyId === ctx.agent.companyId
@@ -407,6 +423,10 @@ export class AgentPoolBroker {
       return unavailable(error instanceof Error ? error.message : "Hosted worker preparation failed");
     }
     if (ctx.signal?.aborted) throw new Error("AgentPool run was cancelled before dispatch");
+    if (this.deletingPools.has(this.poolKey(ctx.agent.companyId, name))) {
+      if (queuedAdmission) throw new AgentPoolCapacityWaitError();
+      return unavailable(`AgentPool '${name}' is being deleted`);
+    }
     const available = [...this.peers.values()].filter((candidate) =>
       candidate.identity.companyId === ctx.agent.companyId && candidate.identity.poolName === name
       && (targetWorkerId === undefined || candidate.identity.id === targetWorkerId)

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { and, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, ne, notInArray, sql } from "drizzle-orm";
 import { agents, agentPools, agentPoolWorkers, companies, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { AGENT_POOL_CLAUDECODE_DEFAULT_MODEL, agentPoolNameSchema, agentPoolHarnessIdSchema, agentPoolHarnessModelSchema,
   agentPoolRequiresGitHubLogin, hostedAgentRepositoriesSchema, type AgentPool, type HostedWorkerRepository,
@@ -440,6 +440,42 @@ export function agentPoolService(db: Db) {
         .onConflictDoNothing().returning();
       if (!pool) throw conflict("An agent pool with that name already exists");
       return poolView(pool);
+    },
+    async remove(companyId: string, poolId: string) {
+      const deletion: { release?: () => void } = {};
+      try {
+        const deleted = await db.transaction(async (tx) => {
+          const [pool] = await tx.select().from(agentPools)
+            .where(and(eq(agentPools.id, poolId), eq(agentPools.companyId, companyId))).for("update");
+          if (!pool) throw notFound("Agent pool not found");
+          if (pool.name === "default" || pool.type === "hosted") {
+            throw conflict("The default Hosted pool cannot be deleted. Only named Devbox pools can be deleted.");
+          }
+          const release = agentPoolBroker.beginPoolDeletion(companyId, pool.name);
+          if (!release) throw conflict("This pool has active worker assignments or is being deleted. Wait for work to finish and retry.");
+          deletion.release = release;
+          const [assigned] = await tx.select({ id: agents.id }).from(agents).where(and(
+            eq(agents.companyId, companyId), eq(agents.adapterType, "agent_pool"),
+            sql`coalesce(${agents.adapterConfig}->>'name', 'default') = ${pool.name}`,
+          )).limit(1);
+          if (assigned) throw conflict("Agents still use this pool. Move them to another pool before deleting it.");
+          const [task] = await tx.select({ id: issues.id }).from(issues)
+            .innerJoin(agents, and(eq(agents.id, issues.assigneeAgentId), eq(agents.companyId, issues.companyId)))
+            .where(and(eq(issues.companyId, companyId), eq(agents.adapterType, "agent_pool"),
+              notInArray(issues.status, ["done", "cancelled"]),
+              sql`${issues.assigneeAdapterOverrides}->'adapterConfig'->>'name' = ${pool.name}`,
+            )).limit(1);
+          if (task) throw conflict("Open tasks still select this pool. Update their execution settings before deleting it.");
+          const workers = await tx.delete(agentPoolWorkers).where(eq(agentPoolWorkers.poolId, poolId))
+            .returning({ id: agentPoolWorkers.id });
+          await tx.delete(agentPools).where(and(eq(agentPools.id, poolId), eq(agentPools.companyId, companyId)));
+          return { pool, workers };
+        });
+        for (const worker of deleted.workers) agentPoolBroker.revoke(worker.id, "AgentPool was deleted");
+        return poolView(deleted.pool);
+      } finally {
+        deletion.release?.();
+      }
     },
     async workers(companyId: string, poolId: string) {
       await get(companyId, poolId);
