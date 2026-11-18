@@ -110,13 +110,16 @@ Interactive CLI REPL and web agent sessions provide shell commands a capability 
 
 Create `workers.yml` at the workspace root, then run `minicode web` (or `minicode web 4310`). If the file exists, the primary console reads it once, starts its browser portal, starts each configured AgentPool worker, and stops all child workers when it exits. Without the file, `minicode web` starts only the portal. Existing local pairing credentials are reused; for a first pairing, put the name of an environment variable containing the one-time token in `pairingTokenEnv` rather than writing the token to YAML. `workers.yml` accepts `version`, optional `port`, optional coordinator settings, and a `workers` list. Each worker requires `name`, `server`, `workerId`, and `repoRoot`; optional worker CLI settings use camelCase names such as `workerShared`, `entraUser`, and `toolAzureConfigDir`. A command-line web port overrides `port` in the file. The portal restart endpoint is intentionally disabled when workers are running because restarting only the portal would orphan workers and invalidate their shared secret capability.
 
-Set `coordinatorServer` to attach one privileged coordinator for the devbox. Concurrent launcher and direct-worker processes elect one local owner for that EngSys endpoint; the others remain standby and take over if the owner exits. The coordinator joins the EngSys room using the current Azure CLI user and posts its harness response back to the room. Set `coordinatorAlias` to a memorable 1–32 character name; the portal displays it as `alias(machine)`. Coordinators handle messages explicitly addressed to them by the portal audience selector, plus legacy messages containing `@their-alias` or `@all`; targeted messages receive an immediate acknowledgement, and the portal shows busy, typing, and idle presence around the final response. Engineers can rename one with `/alias @old-alias @new-name` (either `@` is optional). `/update @alias` safely asks one machine to fast-forward its clean Minicode checkout and restart its local workers/coordinator after replying; `/update @all` asks every coordinator machine. `coordinatorHarness` is `copilotcli` (default) or `minicode`; `coordinatorAzureConfigDir`, `coordinatorCopilotPath`, and `coordinatorModel` are optional. The coordinator is one role with monitoring, diagnosis, operational repair, isolated code repair, and explicitly requested branch or PR updates. It may do anything needed locally, including fetch, sync, reset, clean, stop, remove, and recreate repositories, worker processes, and worker worktrees. Local work is standing authority after identity, ownership, and active-work checks; it does not require repeated approval. The coordinator preserves existing checkouts and creates isolated repair worktrees for any available workspace repository. An engineer may explicitly authorize an exact branch or PR update; unrestricted force pushes, remote branch deletion, merging, approval, auto-complete, closing PRs, and deployment remain prohibited. Paperclip does not receive coordinator configuration or maintain coordinator state.
+Set `coordinatorServer` to attach a frontend relay for the devbox. Concurrent launcher and direct-worker processes still elect one local owner for that EngSys endpoint; standbys take over when it exits. The elected process authenticates to EngSys with the existing Azure CLI user, but runs no coordinator model, repair tools, or execution fallback. The interactive Herdr frontend is the actual coordinator and uses its own existing permissions and instructions.
+
+The relay automatically selects the sole non-worker frontend in its Herdr workspace. If ambiguous, set `coordinatorFrontend` (direct worker: `--coordinator-frontend`) to a discovered live agent name or pane. Outside Herdr, an explicit binding is required. Missing, blocked, or unknown frontends are reported as busy, not idle. Frontend activity is mirrored even when it comes from direct user work; room requests queue durably until the frontend is idle or done. Requests are delivered one at a time, and only the frontend's correlated reply file is posted, verbatim, to the original audience. Terminal output and idle transitions never count as replies. Queues survive leader takeover, and uncertain prompt deliveries or room posts are not automatically repeated. See [Herdr](HERDR.md) for setup and recovery.
+
+Set `coordinatorAlias` to a memorable 1-32 character name; the portal displays it as `alias(machine)`. Portal audience selection and legacy `@their-alias`/`@all` addressing remain supported, with hidden queue acknowledgements. `/alias @old-alias @new-name` renames a member. `/update @alias` or `/update @all` is relayed to the frontend for a clean fast-forward and safe local restart after its response is posted, without interrupting assignments or discarding work. `coordinatorAzureConfigDir` selects an existing signed-in Azure CLI context. Legacy `coordinatorHarness`, `coordinatorCopilotPath`, and `coordinatorModel` settings remain accepted but no longer select or launch an engine. Paperclip does not receive coordinator configuration or maintain coordinator state.
 
 ```yaml
 version: 1
 coordinatorServer: https://mmd-dbg-na03-engsys-p.azurewebsites.net
 coordinatorAlias: build
-coordinatorHarness: copilotcli
 coordinatorAzureConfigDir: C:\Users\me\.azure
 workers:
   - name: worker-1
@@ -757,8 +760,9 @@ node .\minicode\cli.js worker --server https://clippy.example.com --worker-id <w
 ```
 
 To join the devbox coordinator election when starting one worker directly, add
-`--coordinator-server <engsys-url>`. Use `--coordinator-harness minicode|copilotcli`
-and `--coordinator-alias <name>` to configure its chat identity. Use
+`--coordinator-server <engsys-url>`. Use `--coordinator-alias <name>` for its chat
+identity and `--coordinator-frontend <Herdr-agent-or-pane>` if automatic frontend
+selection is ambiguous. The elected process always relays to the frontend. Use
 `--coordinator-azure-config-dir <absolute-directory>` when the defaults are not appropriate.
 
 The same full `--repo-root` path can be passed to `bootstrap\minicode.cmd` or

@@ -19,6 +19,7 @@ test("Herdr worker reporter publishes lifecycle and current tool activity", asyn
   assert.equal(reporter.enabled, true)
   assert.deepEqual(calls.map(args => args.slice(0, 3)), [
     ["pane", "report-metadata", "--source"],
+    ["pane", "report-metadata", "--source"],
     ["pane", "report-agent", "--source"],
     ["pane", "report-metadata", "--source"],
     ["pane", "report-agent", "--source"],
@@ -27,12 +28,15 @@ test("Herdr worker reporter publishes lifecycle and current tool activity", asyn
     ["pane", "report-metadata", "--source"],
     ["pane", "report-agent", "--source"],
     ["pane", "release-agent", "--source"],
+    ["pane", "report-metadata", "--source"],
   ])
-  assert.ok(calls[0].includes("sql-worker"))
-  assert.ok(calls[1].includes("idle"))
-  assert.ok(calls[3].includes("working"))
-  assert.ok(calls[4].includes("Busy - Run npm test"))
-  assert.ok(calls[6].includes("Busy - shell completed; processing result"))
+  assert.ok(calls[0].includes("minicode-role=worker"))
+  assert.ok(calls[1].includes("sql-worker"))
+  assert.ok(calls[2].includes("idle"))
+  assert.ok(calls[4].includes("working"))
+  assert.ok(calls[5].includes("Busy - Run npm test"))
+  assert.ok(calls[7].includes("Busy - shell completed; processing result"))
+  assert.ok(calls.at(-1).includes("--clear-token"))
 })
 
 test("Herdr worker reporter stays disabled outside a dedicated Herdr pane", async () => {
@@ -47,4 +51,23 @@ test("Herdr worker reporter stays disabled outside a dedicated Herdr pane", asyn
     await reporter.stop()
   }
   assert.equal(called, false)
+})
+
+test("worker role reporting retries after a transient failure before publishing lifecycle", async () => {
+  const calls = []
+  const logs = []
+  const reporter = createHerdrWorkerReporter({
+    env: { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p2" },
+    log: message => logs.push(message),
+    run: async args => {
+      calls.push(args)
+      if (calls.length === 1) throw new Error("server unavailable")
+    },
+  })
+  await reporter.state({ state: "idle" })
+  await reporter.stop()
+  assert.equal(logs.length, 1)
+  assert.match(logs[0], /server unavailable/)
+  assert.equal(calls.filter(args => args.includes("minicode-role=worker")).length, 2)
+  assert.ok(calls.some(args => args[1] === "report-agent" && args.includes("idle")))
 })

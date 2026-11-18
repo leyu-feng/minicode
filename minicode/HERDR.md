@@ -1,8 +1,8 @@
 # Run Minicode in Herdr on Windows
 
 Herdr is a persistent terminal workspace manager. Use it to keep a Minicode
-frontend, coordinator, and AgentPool workers visible in one workspace while
-letting the coordinator submit prompts to the frontend.
+frontend and AgentPool workers visible in one workspace. Workers elect one
+transport relay; the frontend, not a second model, is the actual coordinator.
 
 Canonical Herdr documentation is at <https://herdr.dev/tui/docs/>. The commands
 below target Windows PowerShell and Herdr's stable channel.
@@ -124,16 +124,15 @@ to at least one direct worker command:
 ```text
 --coordinator-server <engsys-url>
 --coordinator-alias devbox
---coordinator-harness copilotcli
+-
 --coordinator-azure-config-dir C:\Users\me\.azure
 ```
 
 All Minicode processes configured for the same EngSys endpoint elect one local
-coordinator owner; the others remain standby. Use one stable, unique alias for
-the machine. The selected Azure CLI directory must already be signed in. A
-coordinator is local operational authority, not permission to push, deploy, or
-perform other remote mutations unless an engineer explicitly requests that
-exact action.
+relay owner; the others remain standby. Use one stable, unique alias for the
+machine. The selected Azure CLI directory must already be signed in. The relay
+has no local execution tools or independent coordinator model. Requests do not
+grant the frontend additional permissions or override its existing instructions.
 
 ### Bundled alternative
 
@@ -154,7 +153,53 @@ per-child Herdr reporting in this mode. Use direct worker commands in separate
 panes when independent worker status is the goal. Do not run both layouts for
 the same worker IDs.
 
-## Prompt the frontend from the coordinator
+## Frontend selection, busy state, and replies
+
+The elected relay automatically selects the sole non-worker agent in the same
+Herdr workspace. Worker panes carry a `minicode-role=worker` metadata token,
+including while their Copilot children run, so they cannot become the frontend.
+When multiple frontends exist, no prompt is sent until the operator explicitly
+binds one with `--coordinator-frontend <target>` or the top-level
+`coordinatorFrontend` setting in `workers.yml`. A live agent name is preferable
+to a pane ID when available. Recheck the binding if that agent exits or is
+replaced. An explicit binding is also required for relays launched outside Herdr.
+The frontend and relay must share the local Herdr server and filesystem access.
+
+Room presence follows the frontend even when it is working on a direct user
+request. `working` means busy/typing; `blocked`, `unknown`, a disconnected
+frontend, or a pending reply means busy, not available. Only `idle` and `done`
+permit new delivery. Room instructions wait in a persistent FIFO queue without
+interrupting existing frontend work. Heartbeats and presence polling continue
+while the frontend works.
+
+Each delivered request references a private local request file with a unique
+request ID and reply-file path. The frontend writes
+`{"requestId":"<request-id>","text":"<complete room reply>"}` as UTF-8 JSON.
+The relay validates the correlation and posts the text unchanged to the original
+audience. Replies must contain 1-8000 characters; overlong replies are rejected,
+not truncated. `[NO_REPLY]` suppresses a room reply. Terminal snapshots and Herdr
+completion signals are never treated as the response. Before restarting the
+relay, the frontend must observe the request's completed entry in the relay
+journal, as instructed in the request file; writing the reply is not enough.
+
+Queues and delivery state live under the current user's
+`.minicode\coordinator-relay` directory, outside repository checkouts, and survive
+leader changes. Request/reply files are removed after acknowledgement. Do not
+include credentials in room messages or reply files. A delivery timeout does not
+prove that a prompt was not received. Uncertain deliveries are retained without
+resubmission; a room post with an uncertain result blocks automatic reposting.
+The relay logs the request's room-message ID for operator reconciliation. Inspect
+the frontend and room before deliberately retrying; do not clear a journal or
+resend a mutating instruction blindly. Missing or malformed replies remain
+pending with an explicit diagnostic rather than an invented answer.
+
+A worker role token is cleared on orderly shutdown. If repurposing a former
+worker pane after a crash, first verify no worker still owns it, then clear the
+stale role with `herdr pane report-metadata --source minicode-worker-role
+--clear-token minicode-role <pane-id>`. Do not clear the role on a running worker
+to force frontend selection.
+
+### Manual inspection
 
 List agents and identify the frontend pane:
 
@@ -168,15 +213,18 @@ Submit a prompt by pane ID:
 herdr agent prompt w1:p1 'Inspect the current task and report findings.'
 ```
 
-To wait for completion:
+To wait for a settled lifecycle state:
 
 ```powershell
 herdr agent prompt w1:p1 'Run the requested check.' --wait --timeout 300000
 ```
 
-Pane IDs are runtime values; discover them instead of hard-coding IDs in startup
+Pane IDs are runtime values; discover them instead of guessing them in startup
 files. Herdr rejects a prompt when the target is blocked. A prompt timeout does
-not imply that the underlying agent process was terminated.
+not imply that the underlying agent process was terminated or that delivery did
+not occur. `--wait` does not correlate individual turns: when already working,
+the existing turn can satisfy the wait. Do not use manual prompting to bypass
+the relay's busy queue or infer a room reply from a terminal snapshot.
 
 ## Verify the runtime
 

@@ -27,9 +27,15 @@ export function createHerdrWorkerReporter({ workerName, env = process.env, run =
   let queue = Promise.resolve()
   let reportedError = false
   let released = false
+  let roleReported = false
 
   const enqueue = commands => {
     queue = queue.then(async () => {
+      if (!roleReported && !released) {
+        await run(["pane", "report-metadata", "--source", "minicode-worker-role",
+          "--token", "minicode-role=worker", pane], env)
+        roleReported = true
+      }
       for (const args of commands) await run(args, env)
     }).catch(error => {
       if (!reportedError) {
@@ -39,6 +45,7 @@ export function createHerdrWorkerReporter({ workerName, env = process.env, run =
     })
     return queue
   }
+  void enqueue([])
 
   const report = (state, detail) => {
     lifecycle = state
@@ -77,7 +84,8 @@ export function createHerdrWorkerReporter({ workerName, env = process.env, run =
       if (released) return
       released = true
       await enqueue([["pane", "release-agent", "--source", SOURCE, "--agent", AGENT,
-        "--seq", String(++sequence), pane]])
+        "--seq", String(++sequence), pane],
+      ["pane", "report-metadata", "--source", "minicode-worker-role", "--clear-token", "minicode-role", pane]])
     },
   }
 }

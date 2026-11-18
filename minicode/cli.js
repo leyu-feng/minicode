@@ -79,9 +79,10 @@ Options:
   --azure-devops-user <upn>  MSAL account for REST PRs; Git push keeps its own auth
   --azure-devops-alias <alias>  Branch namespace users/<alias>/ (default: UPN local part)
   --output-mode <mode>   Worker logs: normal (default) or verbose (includes raw tool output)
-  --coordinator-server <url>  Attach one privileged workspace coordinator to EngSys
+  --coordinator-server <url>  Elect one frontend relay for the EngSys coordinator room
   --coordinator-alias <name>  Easy-to-mention devbox alias (shown as alias(machine))
-  --coordinator-harness <name>  Coordinator engine: copilotcli (default) or minicode
+  --coordinator-frontend <target>  Bind a Herdr frontend when automatic selection is ambiguous
+  --coordinator-harness <name>  Obsolete; accepted for compatibility, never starts a coordinator engine
   --coordinator-azure-config-dir <dir>  Existing Azure CLI context used for EngSys
 
 REPL commands:

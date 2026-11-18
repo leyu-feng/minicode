@@ -32,12 +32,12 @@ export function parseWorkersYaml(text) {
   const result = {
     version: undefined, port: undefined, coordinatorServer: undefined,
     coordinatorAlias: undefined, coordinatorHarness: undefined, coordinatorAzureConfigDir: undefined,
-    coordinatorCopilotPath: undefined, coordinatorModel: undefined, workers: [],
+    coordinatorCopilotPath: undefined, coordinatorModel: undefined, coordinatorFrontend: undefined, workers: [],
   }
   let current = null
   for (const [index, raw] of text.replace(/^\uFEFF/, "").split(/\r?\n/).entries()) {
     if (!raw.trim() || raw.trimStart().startsWith("#")) continue
-    let match = /^(version|port|coordinatorServer|coordinatorAlias|coordinatorHarness|coordinatorAzureConfigDir|coordinatorCopilotPath|coordinatorModel):\s*(.*?)\s*$/.exec(raw)
+    let match = /^(version|port|coordinatorServer|coordinatorAlias|coordinatorHarness|coordinatorAzureConfigDir|coordinatorCopilotPath|coordinatorModel|coordinatorFrontend):\s*(.*?)\s*$/.exec(raw)
     if (match) {
       if (current || result[match[1]] !== undefined) throw new Error(`Invalid workers.yml line ${index + 1}`)
       result[match[1]] = scalar(match[2])
@@ -61,11 +61,15 @@ export function parseWorkersYaml(text) {
     throw new Error("workers.yml coordinatorServer must be a URL")
   }
   if (result.coordinatorServer === undefined && [result.coordinatorAlias, result.coordinatorHarness, result.coordinatorAzureConfigDir,
-    result.coordinatorCopilotPath, result.coordinatorModel].some(value => value !== undefined)) {
+    result.coordinatorCopilotPath, result.coordinatorModel, result.coordinatorFrontend].some(value => value !== undefined)) {
     throw new Error("workers.yml coordinator settings require coordinatorServer")
   }
   if (result.coordinatorHarness !== undefined && !["minicode", "copilotcli"].includes(result.coordinatorHarness)) {
     throw new Error("workers.yml coordinatorHarness must be minicode or copilotcli")
+  }
+  if (result.coordinatorFrontend !== undefined
+    && (typeof result.coordinatorFrontend !== "string" || !result.coordinatorFrontend.trim())) {
+    throw new Error("workers.yml coordinatorFrontend must name a frontend agent or pane")
   }
   if (result.coordinatorAlias !== undefined
     && (typeof result.coordinatorAlias !== "string"
@@ -135,7 +139,8 @@ export async function runWorkersMode({ workspace, port }) {
     alias: config.coordinatorAlias,
     cwd: workspace,
     instanceKey: `web:${workspace}`,
-    harness: config.coordinatorHarness ?? "copilotcli",
+    harness: config.coordinatorHarness,
+    frontendTarget: config.coordinatorFrontend,
     azureConfigDir: config.coordinatorAzureConfigDir
       ? path.resolve(workspace, config.coordinatorAzureConfigDir) : undefined,
     copilotPath: config.coordinatorCopilotPath
