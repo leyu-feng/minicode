@@ -16,6 +16,7 @@ import { AgentSession } from "../server/agent-session.js"
 import { CopilotCliSession } from "../server/copilot-cli-session.js"
 import { createHostedProviderTool, createHostedProviderPostTool } from "../server/hosted-provider.js"
 import { startHostedKustoSkill } from "../server/hosted-kusto.js"
+import { skillDigest } from "../server/skill-integrity.js"
 
 const execFileAsync = promisify(execFile)
 const agent = { id: "agent-a", name: "Agent A" }
@@ -374,6 +375,14 @@ test("worker automatically loads worktree and verified bundle skills", async t =
   const peer = await fixture.welcome(0)
   await executeTask(peer, { runId: "all-skills", agent, skills: bundle.skills, authToken: "run-credential" })
   assert.match(sessions[0].instructions, /review \[worktree\]:/)
+  const skillFile = path.join(sessions[0].cwd, ".github", "skills", "review", "SKILL.md")
+  const directoryDigest = await skillDigest(path.dirname(skillFile))
+  const fileHash = createHash("sha256").update(await fs.readFile(skillFile)).digest("hex")
+  assert.notEqual(directoryDigest, fileHash)
+  assert.ok(sessions[0].instructions.includes(`${skillFile} (harness-verified skill-directory digest: ${directoryDigest})`))
+  assert.match(sessions[0].instructions, /not raw SKILL\.md file hashes/)
+  assert.match(sessions[0].instructions, /Do not compare them with Get-FileHash/)
+  assert.ok(!sessions[0].instructions.includes("content SHA-256:"))
   assert.ok(sessions[0].instructions.includes("Post progress with the issue comments API"))
   assert.match(sessions[0].instructions, /worktree\/paperclip \[worktree\]:/)
   assert.ok(!sessions[0].instructions.includes("UNTRUSTED OPERATIONAL OVERRIDE MUST NOT BE INJECTED"))
@@ -1216,7 +1225,7 @@ for (const workspaceMode of ["clone", "worktree"]) {
           assert.equal(await fs.readFile(path.join(entry.path, "code.txt"), "utf8"), "reference code")
           assert.ok(this.options.instructions.includes(entry.path.replaceAll("\\", "\\\\")))
           assert.ok(this.options.instructions.includes(
-            `${entry.name}/reference-only [reference:${entry.name}]: ${path.join(entry.path, ".agents", "skills", "reference-only", "SKILL.md")} (content SHA-256: `,
+            `${entry.name}/reference-only [reference:${entry.name}]: ${path.join(entry.path, ".agents", "skills", "reference-only", "SKILL.md")} (harness-verified skill-directory digest: `,
           ))
         }
         assert.match(this.options.instructions, /Never write, fetch, checkout, reset, commit, publish/)
