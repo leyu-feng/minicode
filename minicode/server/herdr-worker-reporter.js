@@ -32,8 +32,8 @@ export function createHerdrWorkerReporter({ workerName, env = process.env, run =
   const enqueue = commands => {
     queue = queue.then(async () => {
       if (!roleReported && !released) {
-        await run(["pane", "report-metadata", "--source", "minicode-worker-role",
-          "--token", "minicode-role=worker", pane], env)
+        await run(["pane", "report-metadata", pane, "--source", "minicode-worker-role",
+          "--token", "minicode-role=worker"], env)
         roleReported = true
       }
       for (const args of commands) await run(args, env)
@@ -52,11 +52,11 @@ export function createHerdrWorkerReporter({ workerName, env = process.env, run =
     const seq = String(++sequence)
     const title = `${state === "idle" ? "Idle" : "Busy"} - ${clean(detail, state === "idle" ? "waiting for assignment" : "working")}`
     return enqueue([
-      ["pane", "report-metadata", "--source", SOURCE, "--applies-to-source", SOURCE,
+      ["pane", "report-metadata", pane, "--source", SOURCE, "--applies-to-source", SOURCE,
         "--display-agent", displayName, "--state-label", "idle=idle", "--state-label", "working=busy",
-        "--title", title, "--seq", seq, pane],
-      ["pane", "report-agent", "--source", SOURCE, "--agent", AGENT, "--state", state,
-        "--message", title, "--seq", seq, pane],
+        "--title", title, "--seq", seq],
+      ["pane", "report-agent", pane, "--source", SOURCE, "--agent", AGENT, "--state", state,
+        "--message", title, "--seq", seq],
     ])
   }
 
@@ -83,9 +83,9 @@ export function createHerdrWorkerReporter({ workerName, env = process.env, run =
     async stop() {
       if (released) return
       released = true
-      await enqueue([["pane", "release-agent", "--source", SOURCE, "--agent", AGENT,
-        "--seq", String(++sequence), pane],
-      ["pane", "report-metadata", "--source", "minicode-worker-role", "--clear-token", "minicode-role", pane]])
+      await enqueue([["pane", "release-agent", pane, "--source", SOURCE, "--agent", AGENT,
+        "--seq", String(++sequence)],
+      ["pane", "report-metadata", pane, "--source", "minicode-worker-role", "--clear-token", "minicode-role"]])
     },
   }
 }

@@ -195,8 +195,8 @@ pending with an explicit diagnostic rather than an invented answer.
 
 A worker role token is cleared on orderly shutdown. If repurposing a former
 worker pane after a crash, first verify no worker still owns it, then clear the
-stale role with `herdr pane report-metadata --source minicode-worker-role
---clear-token minicode-role <pane-id>`. Do not clear the role on a running worker
+stale role with `herdr pane report-metadata <pane-id> --source minicode-worker-role
+--clear-token minicode-role`. Do not clear the role on a running worker
 to force frontend selection.
 
 ### Manual inspection

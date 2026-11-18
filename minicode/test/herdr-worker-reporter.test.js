@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { createHerdrWorkerReporter } from "../server/herdr-worker-reporter.js"
 
-test("Herdr worker reporter publishes lifecycle and current tool activity", async () => {
+test("Herdr worker reporting and cleanup use pane-first arguments compatible with Herdr 0.9.5", async () => {
   const calls = []
   const reporter = createHerdrWorkerReporter({
     workerName: "sql-worker",
@@ -18,17 +18,17 @@ test("Herdr worker reporter publishes lifecycle and current tool activity", asyn
 
   assert.equal(reporter.enabled, true)
   assert.deepEqual(calls.map(args => args.slice(0, 3)), [
-    ["pane", "report-metadata", "--source"],
-    ["pane", "report-metadata", "--source"],
-    ["pane", "report-agent", "--source"],
-    ["pane", "report-metadata", "--source"],
-    ["pane", "report-agent", "--source"],
-    ["pane", "report-metadata", "--source"],
-    ["pane", "report-agent", "--source"],
-    ["pane", "report-metadata", "--source"],
-    ["pane", "report-agent", "--source"],
-    ["pane", "release-agent", "--source"],
-    ["pane", "report-metadata", "--source"],
+    ["pane", "report-metadata", "w5:p3"],
+    ["pane", "report-metadata", "w5:p3"],
+    ["pane", "report-agent", "w5:p3"],
+    ["pane", "report-metadata", "w5:p3"],
+    ["pane", "report-agent", "w5:p3"],
+    ["pane", "report-metadata", "w5:p3"],
+    ["pane", "report-agent", "w5:p3"],
+    ["pane", "report-metadata", "w5:p3"],
+    ["pane", "report-agent", "w5:p3"],
+    ["pane", "release-agent", "w5:p3"],
+    ["pane", "report-metadata", "w5:p3"],
   ])
   assert.ok(calls[0].includes("minicode-role=worker"))
   assert.ok(calls[1].includes("sql-worker"))
