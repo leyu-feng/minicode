@@ -41,7 +41,7 @@ async function fixture(t) {
     status: "in_progress", executionRunId: task.runId }
   const children = [], comments = [], receipts = new Map(), products = new Map(), commands = []
   const reviewComments = new Map()
-  let liveInspector = task.prPolicy.inspectorAgentId, failHandoff = false, losePush = false, pushes = 0, conflict = false
+  let liveInspector = task.prPolicy.inspectorAgentId, failHandoff = false, losePush = false, pushes = 0, conflict = false, denyDeletion = false
   let pr = { pullRequestId: 12, status: "active",
     repository: { id: repositoryId, project: { id: projectId } },
     sourceRefName: "refs/heads/u/inspector-one/feature", targetRefName: "refs/heads/main",
@@ -54,6 +54,7 @@ async function fixture(t) {
     commands.push([...args])
     if (args.includes("push")) {
       pushes++
+      if (denyDeletion && args.at(-1).startsWith(":")) throw new Error("Branch deletion permission denied")
       if (conflict) {
         await git(workspace, "push", remote, `${revision}:${args.at(-1).split(":").at(-1)}`)
         const error = new Error("Confirmed create-only lease conflict")
@@ -134,7 +135,7 @@ async function fixture(t) {
       reviewedCommit: submission.remoteCommit, repositoryUrl: sourceUrl, branch: submission.branch,
     },
   })
-  return { root, source, workspace, remote, storage, revision, git, task, issue, children, receipts, products, commands,
+  return { root, source, workspace, remote, storage, revision, git, task, issue, children, receipts, products, commands, reviewComments,
     input, options, call, recordInspection, submit: () => call("submit_branch_for_inspection", input),
     retire: receipt => call("retire_submission_branch", { repository: "application", submissionId: receipt.submissionId, url: prUrl }),
     complete: () => publication.assertCanComplete(),
@@ -144,6 +145,7 @@ async function fixture(t) {
     },
     setInspector(value) { liveInspector = value }, failHandoff(value) { failHandoff = value },
     losePush() { losePush = true }, conflict(value) { conflict = value },
+    denyDeletion(value) { denyDeletion = value },
     get pushes() { return pushes }, get pr() { return pr }, setPr(value) { pr = value },
     async approve(submission) {
       const review = children.find(child => child.id === submission.reviewIssueId)
@@ -202,6 +204,8 @@ test("local producer submits an exact commit, reconciles handoff across restart,
   assert.equal(f.children.length, 1)
   assert.match(f.children[0].description, /pinned repository \.agf.yaml policy/)
   assert.doesNotMatch(f.children[0].description, /documented change-aware build\/test scripts|Build-LeafProjects/)
+  assert.match(f.children[0].description, /Any authorized developer\/inspector worker may perform this cleanup/)
+  assert.match(f.children[0].description, /Never delete the PR source before merge/)
   assert.equal(f.issue.unblockDescriptor.owner.agentId, f.task.agent.id)
   await assert.rejects(f.complete(), /inspection is not complete/)
   await assert.rejects(f.retire(submitted), /matching server-validated inspection receipt/)
@@ -262,7 +266,7 @@ test("local publication rejects read-only repositories, changed run/policy, redi
   assert.equal(f.pushes, 0)
 })
 
-test("retirement refuses a changed original, distinct PR tip, wrong target or missing approved receipt", async t => {
+test("retirement blocks unverified PRs but defers cleanup of a changed original", async t => {
   const f = await fixture(t)
   const submitted = await f.submit()
   await f.approve(submitted)
@@ -279,25 +283,67 @@ test("retirement refuses a changed original, distinct PR tip, wrong target or mi
   await assert.rejects(f.retire(submitted), /exact reviewed commit and target/)
   await f.git(f.workspace, "push", f.remote, `${f.revision}:${pr.sourceRefName}`)
   await f.git(f.workspace, "push", "--force", f.remote, `${initial}:refs/heads/${submitted.branch}`)
-  await assert.rejects(f.retire(submitted), /Original submission tip changed/)
+  const pending = await f.retire(submitted)
+  assert.equal(pending.state, "CLEANUP_PENDING")
+  assert.match(pending.cleanupError, /Original submission tip changed/)
   assert.equal(f.pushes, 1)
   assert.match(await f.git(f.workspace, "ls-remote", "--heads", f.remote, `refs/heads/${submitted.branch}`), new RegExp(initial))
+  await f.complete()
+  await f.git(f.workspace, "push", f.remote, `${f.revision}:refs/heads/${submitted.branch}`)
+  assert.equal((await f.retire(submitted)).state, "CLEANUP_PENDING")
+  assert.equal(f.pushes, 1)
 })
 
-test("an uncertain deletion is reconciled after restart without deleting again or losing the completion gate", async t => {
+test("an uncertain deletion is deferred without failing verified work and reconciles without a second deletion", async t => {
   const f = await fixture(t)
   const submitted = await f.submit()
   await f.approve(submitted)
   f.losePush()
-  await assert.rejects(f.retire(submitted), /outcome unknown/)
+  const pending = await f.retire(submitted)
+  assert.equal(pending.state, "CLEANUP_PENDING")
+  assert.match(pending.cleanupError, /outcome unknown/)
+  assert.equal(pending.pullRequest.verification, "provider_verified")
+  await f.complete()
   f.restart()
-  await assert.rejects(f.complete(), /inspection is not complete/)
+  await f.complete()
   assert.equal((await f.retire(submitted)).state, "DELETED")
   assert.equal(f.pushes, 2)
   await f.complete()
 })
 
-test("a verified replacement retires its unchanged rejected predecessor without touching the inspector branch", async t => {
+test("a denied deletion preserves a durable cleanup warning and can be retried later", async t => {
+  const f = await fixture(t)
+  const submitted = await f.submit()
+  await f.approve(submitted)
+  f.denyDeletion(true)
+  const pending = await f.retire(submitted)
+  assert.equal(pending.state, "CLEANUP_PENDING")
+  assert.match(pending.cleanupError, /permission denied/)
+  assert.match(await f.git(f.workspace, "ls-remote", "--heads", f.remote, `refs/heads/${submitted.branch}`), new RegExp(f.revision))
+  await f.complete()
+  f.restart()
+  await f.complete()
+  const saved = JSON.parse(await fs.readFile(path.join(f.storage, `${submitted.submissionId}.json`), "utf8"))
+  assert.equal(saved.state, "CLEANUP_PENDING")
+  assert.match(saved.cleanupError, /permission denied/)
+  f.denyDeletion(false)
+  assert.equal((await f.retire(submitted)).state, "DELETED")
+})
+
+test("retirement accepts branches already cleaned by another worker or merged-PR auto-deletion", async t => {
+  const f = await fixture(t)
+  const submitted = await f.submit()
+  await f.approve(submitted)
+  f.setPr({ ...f.pr, status: "completed" })
+  await f.git(f.workspace, "push", f.remote, `:refs/heads/${submitted.branch}`, `:${f.pr.sourceRefName}`)
+  const retired = await f.retire(submitted)
+  assert.equal(retired.state, "DELETED")
+  assert.equal(retired.pullRequest.state, "completed")
+  assert.equal(f.pushes, 1)
+  await f.complete()
+})
+
+for (const denied of [false, true]) test(`a verified replacement ${denied ? "defers" : "completes"} related branch cleanup without touching the inspector branch`, async t => {
   const f = await fixture(t)
   const original = await f.submit()
   const review = f.children.find(child => child.id === original.reviewIssueId)
@@ -309,12 +355,19 @@ test("a verified replacement retires its unchanged rejected predecessor without 
   const corrected = await f.git(f.workspace, "rev-parse", "HEAD")
   const replacement = await f.call("submit_branch_for_inspection", { ...f.input, commit: corrected })
   await f.approve(replacement)
+  f.denyDeletion(denied)
   const retired = await f.retire(replacement)
+  assert.equal(retired.state, denied ? "CLEANUP_PENDING" : "DELETED")
   assert.equal(retired.superseded.length, 1)
+  assert.equal(retired.superseded[0].state, denied ? "CLEANUP_PENDING" : "DELETED")
   assert.equal(retired.superseded[0].submissionId, original.submissionId)
   assert.equal(retired.superseded[0].supersededBySubmissionId, replacement.submissionId)
-  for (const submission of [original, replacement])
-    assert.equal(await f.git(f.workspace, "ls-remote", "--heads", f.remote, `refs/heads/${submission.branch}`), "")
+  for (const submission of [original, replacement]) {
+    const ref = await f.git(f.workspace, "ls-remote", "--heads", f.remote, `refs/heads/${submission.branch}`)
+    if (denied) assert.match(ref, new RegExp(submission.remoteCommit))
+    else assert.equal(ref, "")
+  }
+  assert.equal(Boolean(f.reviewComments.get(original.reviewIssueId)?.length), !denied)
   assert.match(await f.git(f.workspace, "ls-remote", "--heads", f.remote, f.pr.sourceRefName), new RegExp(corrected))
   await f.complete()
 })

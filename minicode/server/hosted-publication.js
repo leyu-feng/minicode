@@ -15,6 +15,8 @@ export const INSPECTOR_VALIDATION_GUIDANCE = "Perform a local buddy build and re
 
 export const INSPECTOR_BLOCKED_GUIDANCE = "The inspector owns the complete in-scope correction loop, including newly discovered issues. Before further edits, compare the exact submitted tree with any prior submitted and inspector proposal trees supplied by the trusted handoff; preserve cumulative fixes and record the full comparison. Do not reconstruct from main. If any issue cannot be fixed or required validation/capability is unavailable, save durable patches, exact base/proposal SHA/tree, comparison and logs, then call record_inspection_blocked with the original submissionId/reviewedCommit, precise blocker and next unblockAction. This is a successful waiting state: blocked, inspector retains ownership. It is not an immutable verdict, does not notify or resume the original developer, and does not authorize PR creation. Finish without an error only after the checkpoint is confirmed and all uncertain mutations are reconciled. The operator monitor may resolve the dependency and resume this same inspector through normal task admission; never retry unchanged blockers, clear execution holds or interrupt an active assignment. Only after all in-scope corrections and inspector-owned required validation are complete may you record changes_requested with one consolidated proposal for developer review; do not hand back partial fixes."
 
+export const DEVBOX_BRANCH_CLEANUP_GUIDANCE = "Devbox branch-cleanup exception, only when both developer and inspector use self-hosted Devbox workers: after the inspector's PR is recorded and independently provider-verified at its approved exact SHA, the developer should retire the original submission and superseded submissions. The inspector may also attempt that cleanup. After the provider confirms the PR is completed/merged, the inspector should remove its PR source branch if still present and all recorded related submission/proposal branches no longer needed by active work. Any authorized developer/inspector worker may perform this cleanup, regardless of the creating worker's namespace. Establish ownership from trusted task/submission/proposal records and provider reads, never a branch-name prefix alone. Prefer retire_submission_branch when its worker-local receipt is available; otherwise this narrow exception permits provider reads and exact leased remote deletions through existing signed-in tooling in the matching listed writable worktree. Freshly verify repository, PR, target, approved commit, exact ref and current tip; preserve changed/reused refs, active work and other open PRs, protected/default/target branches and harness-owned local branches. Never delete the PR source before merge. Delete only a proven recorded tip with an exact expected-old-SHA lease. Already absent is success. On refusal, locks, permissions, changed tips or uncertain outcomes, retain the branch and record cleanup_pending with PR/ref/SHA/error in durable task evidence for later cleanup; do not blindly retry, fail or block otherwise verified work solely for cleanup. Approval, PR registration and independent provider verification remain required. Never merge or enable auto-complete."
+
 function assertInspectionReceipt(receipt, expected) {
   const result = receipt?.result
   if (!receipt?.id || result?.schema !== INSPECTION_SCHEMA
@@ -58,7 +60,8 @@ export async function assertDirectPublicationAllowed(task, apiUrl, signal) {
   }
 }
 
-export function createPrInspectorPostback({ task, apiUrl, separateBranch = false, workerName, validationGuidance }) {
+export function createPrInspectorPostback({ task, apiUrl, separateBranch = false, workerName, validationGuidance,
+  devboxBranchCleanup = false }) {
   if (task.prPolicy?.isInspector !== true || task.prPolicy.inspectorAgentId !== task.agent.id)
     throw new Error("Only the company's PR Inspector may record an externally created PR")
   const issueId = task.context.taskId ?? task.context.issueId
@@ -194,7 +197,8 @@ export function createPrInspectorPostback({ task, apiUrl, separateBranch = false
   const tool = {
     name: "record_pull_request",
     description: "Record the link of a PR you already created outside Paperclip using local Devbox user credentials, after inspecting another agent's branch. This tool is an API postback only: it never creates or verifies a provider PR and never receives provider credentials. Retry the same link to reconcile an uncertain postback."
-      + (separateBranch ? " The PR must use your separate worker-namespaced branch at the exact submitted remote commit. Its link is also returned to the producer's parent task for provider-verified cleanup." : ""),
+      + (separateBranch ? " The PR must use your separate worker-namespaced branch at the exact submitted remote commit. Its link is also returned to the producer's parent task for provider-verified cleanup." : "")
+      + (devboxBranchCleanup ? ` ${DEVBOX_BRANCH_CLEANUP_GUIDANCE}` : ""),
     parameters: {
       type: "object", additionalProperties: false, required: ["url", "title", "provider",
         ...(separateBranch ? ["submissionId", "branch", "reviewedCommit"] : [])],
@@ -260,7 +264,7 @@ export function createPrInspectorPostback({ task, apiUrl, separateBranch = false
       if (!Array.isArray(comments)) throw new Error("Paperclip returned an invalid comment list")
       const comment = comments.find(entry => entry.authorAgentId === task.agent.id && entry.body?.includes(marker))
         ?? await api("/comments", "POST", {
-          body: `PR created outside Paperclip using Devbox user credentials: [${input.title}](${url.href}).\n\nThe link is recorded, not independently verified by Paperclip. ${separateBranch ? "Only the producer may retire its original submission after provider verification. Completion and auto-complete remain human actions." : "Completion, auto-complete and branch deletion remain human actions."}\n\n${marker}`,
+          body: `PR created outside Paperclip using Devbox user credentials: [${input.title}](${url.href}).\n\nThe link is recorded, not independently verified by Paperclip. ${devboxBranchCleanup ? DEVBOX_BRANCH_CLEANUP_GUIDANCE : separateBranch ? "Only the producer may retire its original submission after provider verification. Completion and auto-complete remain human actions." : "Completion, auto-complete and branch deletion remain human actions."}\n\n${marker}`,
         })
       if (!comment?.id || comment.issueId !== issueId || comment.authorAgentId !== task.agent.id || !comment.body?.includes(marker))
         throw new Error("Paperclip did not confirm the external PR task-chat link")
@@ -273,7 +277,7 @@ export function createPrInspectorPostback({ task, apiUrl, separateBranch = false
         if (!Array.isArray(parentComments)) throw new Error("Paperclip returned an invalid producer comment list")
         const notified = parentComments.find(entry => entry.authorAgentId === task.agent.id && entry.body?.includes(parentMarker))
           ?? await parentApi("/comments", "POST", {
-            body: `Inspection complete: [${input.title}](${url.href}) uses separate branch ${input.branch} at reviewed commit ${input.reviewedCommit}.\n\nSubmission ID: ${input.submissionId}\nYour original branch ${metadata.sourceBranch} remains unchanged. Use retire_submission_branch to verify this PR with the provider and delete only your original submission. Never delete the PR branch or treat this postback alone as provider verification.\n\n${parentMarker}`,
+            body: `Inspection complete: [${input.title}](${url.href}) uses separate branch ${input.branch} at reviewed commit ${input.reviewedCommit}.\n\nSubmission ID: ${input.submissionId}\nYour original branch ${metadata.sourceBranch} remains unchanged. ${devboxBranchCleanup ? DEVBOX_BRANCH_CLEANUP_GUIDANCE : "Use retire_submission_branch to verify this PR with the provider and delete only your original submission. Never delete the PR branch or treat this postback alone as provider verification."}\n\n${parentMarker}`,
           })
         if (!notified?.id || notified.issueId !== parent.id || notified.authorAgentId !== task.agent.id || !notified.body?.includes(parentMarker))
           throw new Error("Paperclip did not confirm the PR link returned to the producer")
@@ -287,7 +291,8 @@ export function createPrInspectorPostback({ task, apiUrl, separateBranch = false
   return { tools: [inspectionTool, blockedTool, tool], get registrationError() { return failures.values().next().value ?? null } }
 }
 
-export function createHostedPublicationTool({ repositories, task, apiUrl, request, inspectorValidationGuidance }) {
+export function createHostedPublicationTool({ repositories, task, apiUrl, request, inspectorValidationGuidance,
+  devboxBranchCleanup = false }) {
   const writable = repositories.filter(repo => !repo.readOnly)
   const aliases = writable.map(repo => repo.alias ?? repo.name)
   const issueId = task.context.taskId ?? task.context.issueId
@@ -301,6 +306,10 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
   const handoffFailures = new Map()
   const pendingSubmissions = new Set()
   const retirementUrls = new Map()
+  const deferredCleanup = (receipt, url) => devboxBranchCleanup && receipt?.state === "CLEANUP_PENDING"
+    && receipt.pullRequest?.verification === "provider_verified" && receipt.pullRequest.url === url
+    && /^[a-f0-9]{40}$/.test(receipt.pullRequest.remoteCommit ?? "")
+    && typeof receipt.cleanupError === "string" && receipt.cleanupError.trim().length > 0
   const repository = input => {
     const repo = writable.find(repo => (repo.alias ?? repo.name) === input?.repository)
     if (!repo) throw new Error("Inspection requires a writable repository alias from the Hosted catalog")
@@ -367,10 +376,14 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
       const receipt = await call(repo, "delete_submitted_branch", {
         submissionId: previous, supersededBySubmissionId: input.submissionId, pullRequestNumber: number,
       }, options)
-      if (receipt?.submissionId !== previous || receipt.state !== "DELETED" || receipt.branch !== branch
+      if (receipt?.submissionId !== previous || (receipt.state !== "DELETED" && !deferredCleanup(receipt, input.url)) || receipt.branch !== branch
         || receipt.supersededBySubmissionId !== input.submissionId)
         throw new Error("The provider did not confirm superseded submission retirement")
       pendingSubmissions.delete(previous)
+      if (receipt.state === "CLEANUP_PENDING") {
+        retired.push({ ...receipt, reviewIssueId: review.id })
+        continue
+      }
       const marker = `<!-- superseded-submission:${previous}:${input.submissionId}:${number} -->`
       const route = `/issues/${encodeURIComponent(review.id)}/comments`
       const comments = await paperclipApi(task, apiUrl, route, "GET", undefined, options?.signal)
@@ -385,7 +398,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
     }
     return retired
   }
-  if (task.prPolicy?.isInspector) return createPrInspectorPostback({ task, apiUrl })
+  if (task.prPolicy?.isInspector) return createPrInspectorPostback({ task, apiUrl, devboxBranchCleanup })
   const tools = task.prPolicy?.inspectorAgentId === null && task.prPolicy?.isInspector === false ? [
     {
       name: "publish_pull_request",
@@ -470,7 +483,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
               INSPECTOR_BLOCKED_GUIDANCE,
               "Prepare cumulative in-scope corrections from the submitted SHA and publish only a new private inspector-owned proposal branch named u/<your-worker-name>/inspection-fix-<readable-feature-title>, using a create-only empty expected-old-ref lease. Private means review-only under existing repository access controls, not branch-level confidentiality. Never overwrite an existing ref; use suffixes -1 through -10 on collision and reconcile uncertain pushes with provider reads. Once all corrections and required proposal validation are complete, record changes_requested against the original submitted SHA, including the proposal branch/base/SHA and separate original/proposal validation results. The original developer must review and explicitly confirm accepted corrections, apply or rework them on their own branch, and resubmit with submit_branch_for_inspection in a new review. Do not create a fix child assigned back to the producer. For environment-only blockers, use record_inspection_blocked without inventing code changes or empty proposal branches. Never publish a PR from the proposal or approve the original because the proposal passes.",
               "The producer continuation must first compare both exact private trees, original submitted base and consolidated inspector proposal, and account for every cumulative change before editing or integrating. Attach complete reviewable patches and provenance; if authorized source recovery/comparison is unavailable, stop with saved work rather than reconstructing from main or treating a partial delta as the full upgrade.",
-              "Reinspect and rerun required validation on the corrected producer submission. Only after recording approved for that exact SHA, create a separate new branch named u/<your-worker-name>/<readable-feature-title> at that SHA and create the PR outside Paperclip. Never push to or edit the producer's branch. Record the PR through record_pull_request, including submissionId, your new branch and reviewedCommit; it returns the link to the producer's parent task. Only the producer may retire its original submission, after provider verification. Do not merge, enable auto-complete or delete branches.",
+              "Reinspect and rerun required validation on the corrected producer submission. Only after recording approved for that exact SHA, create a separate new branch named u/<your-worker-name>/<readable-feature-title> at that SHA and create the PR outside Paperclip. Never push to or edit the producer's branch. Record the PR through record_pull_request, including submissionId, your new branch and reviewedCommit; it returns the link to the producer's parent task. " + (devboxBranchCleanup ? DEVBOX_BRANCH_CLEANUP_GUIDANCE : "Only the producer may retire its original submission, after provider verification. Do not merge, enable auto-complete or delete branches."),
               `Requested change:\n${input.body}`,
             ].join("\n\n"),
             assigneeAgentId: inspector, priority: "medium", idempotencyKey: receipt.submissionId,
@@ -500,7 +513,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
     },
     {
       name: "retire_submission_branch",
-      description: "After the inspector returns a separate PR link, verify it with the provider and delete this agent's original submitted branch. The pullRequest receipt includes the provider-read exact remote commit and full commitMessage when supported by the API; use that evidence for trailer checks rather than creating another verification task. The PR work product belongs on the inspector's review task, not this source task: do not register it again. Successful verification/cleanup satisfies this managed handoff; complete the source task when its remaining acceptance criteria are met and report the existing PR to its parent. Also retire rejected submissions from stopped inspector reviews of this same task/repository using the verified replacement, and notify the inspector to close superseded reviews. The provider checks company/agent ownership, repository, target, exact replacement commit, distinct PR source and unchanged original tips. Retry identical inputs after an uncertain result; never delete through shell commands.",
+      description: "After the inspector returns a separate PR link, verify it with the provider and delete this agent's original submitted branch. The pullRequest receipt includes the provider-read exact remote commit and full commitMessage when supported by the API; use that evidence for trailer checks rather than creating another verification task. The PR work product belongs on the inspector's review task, not this source task: do not register it again. Successful verification/cleanup satisfies this managed handoff; complete the source task when its remaining acceptance criteria are met and report the existing PR to its parent. Also retire rejected submissions from stopped inspector reviews of this same task/repository using the verified replacement, and notify the inspector to close superseded reviews. The provider checks company/agent ownership, repository, target, exact replacement commit, distinct PR source and unchanged original tips. " + (devboxBranchCleanup ? DEVBOX_BRANCH_CLEANUP_GUIDANCE + " A CLEANUP_PENDING result is provider-verified but not deleted; preserve its cleanupError for later cleanup and do not fail solely for deletion." : "Retry identical inputs after an uncertain result; never delete through shell commands."),
       parameters: schema({
         submissionId: { type: "string" }, url: { type: "string" },
       }, ["submissionId", "url"]),
@@ -520,7 +533,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
         retirementUrls.set(input.submissionId, url.href)
         handoffFailures.set(key, `Submission ${input.submissionId} cleanup is unconfirmed. Retry the same PR link and verify provider state.`)
         const receipt = await call(repo, "delete_submitted_branch", { submissionId: input.submissionId, pullRequestNumber: number }, options)
-        if (receipt?.submissionId !== input.submissionId || receipt.state !== "DELETED"
+        if (receipt?.submissionId !== input.submissionId || (receipt.state !== "DELETED" && !deferredCleanup(receipt, url.href))
           || typeof receipt.branch !== "string" || !receipt.branch.startsWith("u/"))
           throw new Error("The provider did not confirm deletion of the owned submission branch")
         const superseded = await retireSuperseded(repo, input, number, options)

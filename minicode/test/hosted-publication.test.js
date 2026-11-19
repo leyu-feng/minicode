@@ -400,6 +400,19 @@ test("producer retirement is repository-bound, fails explicitly and reconciles o
   assert.equal(f.publication.registrationError, null)
 })
 
+test("Devbox deferred retirement cannot bypass independent provider verification", async t => {
+  const f = fixture(t)
+  const url = "https://code.example.test/project/_git/main/pullrequest/12"
+  const publication = createHostedPublicationTool({
+    repositories: f.repositories, task: f.task, apiUrl: "https://paperclip.example.test", devboxBranchCleanup: true,
+    request: async () => ({ submissionId, state: "CLEANUP_PENDING", branch: "u/worker/feature", cleanupError: "Denied" }),
+  })
+  await assert.rejects(publication.tools.find(tool => tool.name === "retire_submission_branch").execute({
+    repository: "main", submissionId, url,
+  }), /did not confirm deletion/)
+  assert.throws(() => publication.assertCanComplete(), /inspection is not complete/)
+})
+
 test("a producer continuation can complete with provider commit evidence and the inspector's existing PR registration", async t => {
   const f = fixture(t)
   await f.tool("submit_branch_for_inspection").execute({ repository: "main", commit, title: "Feature", body: "Review." })

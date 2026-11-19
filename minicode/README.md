@@ -681,7 +681,9 @@ and publishes only the requested committed revision. Create-only branches use
 `u/<worker-name>/<readable-feature-title>` with suffixes `-1` through `-10`.
 Credential-free allocation receipts under `.workers\<worker-id>\publications`
 survive process restarts and reconcile uncertain pushes without duplicating them.
-Completion stays blocked until saved submissions are verified and retired.
+Completion stays blocked until the saved submission has its inspection, recorded
+PR and independent provider verification. Cleanup-only failures after that
+verification are deferred, not a reason to fail otherwise completed Devbox work.
 GitHub workspace submissions are not supported; direct PR publication is unchanged.
 
 An explicit human task message or operator continuation may authorize a named,
@@ -697,21 +699,56 @@ The designated Devbox PR Inspector may inspect a trusted handoff's exact
 repository/branch/commit with existing CLI sign-in, create the reviewed PR
 externally from its separate `u/<worker-name>/<readable-feature-title>` branch.
 It creates only a previously absent ref, at the exact reviewed remote commit;
-occupied names get `-1` through `-10` collision suffixes. It never changes the
-producer's branch or the harness-owned local branch, merges or enables auto-complete.
-`record_pull_request` records the link on both the review and source tasks,
+occupied names get `-1` through `-10` collision suffixes. It never edits or advances
+the producer's branch, changes the harness-owned local branch, merges or enables
+auto-complete. Branch deletion is limited to the cleanup exception below.
+`record_pull_request` records the PR work product on the review task and returns
+its link to the source task by comment,
 with the original submission ID and reviewed commit. Partial postbacks reconcile
 without duplicate work products/comments. This records an external link, not
-independent provider verification. The producer uses `retire_submission_branch`
-to verify the separate PR and delete only its original, unchanged submission
-through the managed provider; no CLI branch deletion is authorized. Local
+independent provider verification. The producer should use `retire_submission_branch`
+to verify the separate PR and retire its original, unchanged submission. Local
 retirement requires this worker's durable receipt, the inspector's matching
 server-validated approval and PR work product, and independent Azure DevOps/Git
 verification of the repository, target, exact reviewed commit and both distinct
-branch tips. It deletes only the unchanged producer branch with an exact lease.
-Hosted ownership follows the submitting company/agent through its provider;
-local receipts are not portable to another worker. Older providers without
-`delete_submitted_branch` fail explicitly and retain the source branch.
+branch tips (a completed PR's source may already be absent). It deletes only the
+unchanged producer branch with an exact lease. A `CLEANUP_PENDING` result includes
+the provider-verified PR and an explicit `cleanupError`, not a deletion claim;
+its durable local receipt allows completion and later reconciliation. Already
+absent submission branches are treated as deleted after the same verification.
+
+#### Devbox branch cleanup
+
+This general developer/inspector exception applies only when both roles run on
+self-hosted Devbox workers; it is not repository-specific validation policy.
+
+- After the inspector's PR is recorded and provider-verified at the approved
+  exact SHA, the developer should delete the original and superseded submission
+  branches. The Devbox inspector may also attempt this cleanup.
+- After a human completes/merges the PR, the inspector should remove its PR
+  source branch if the provider did not already delete it, plus any remaining
+  recorded submission/proposal branches no longer needed by active work.
+- Any authorized developer/inspector worker can perform that cleanup, including
+  a different worker from the branch creator. Use trusted task/submission/proposal
+  provenance, not a matching worker-name prefix. Local managed receipts remain
+  worker-specific; when unavailable, the exception permits existing signed-in
+  provider tooling in the matching listed writable worktree for verification
+  and exact leased remote deletion, not other publication mutations.
+- Freshly verify the repository, PR, target, approved commit, recorded branch and
+  current tip. Preserve durable proposal evidence, changed/reused refs, active
+  assignments and other open PRs, protected/default/target branches and all
+  harness-owned local branches. Never delete the PR source before confirmed merge.
+  Delete only the proven recorded tip with an exact expected-old-SHA lease.
+- Already absent is success. Permission, lock, changed-tip or uncertain-outcome
+  failures leave `cleanup_pending` evidence with PR/ref/SHA/error for later cleanup.
+  Do not blindly retry, fail or block otherwise verified work solely for cleanup.
+  Approval, PR registration and independent provider verification still block
+  completion when missing; this does not repair cross-worker PR postback binding.
+
+Hosted ownership and mandatory managed cleanup remain unchanged; Hosted workers
+receive no CLI deletion exception. Older providers without
+`delete_submitted_branch` still fail explicitly and retain the source branch.
+
 Workspace mode has no direct-publication or `sync_repositories` tool. Initial
 writable worktrees are fetched/reset before each assignment; source and read-only
 checkouts stay intact. Unsupported publication must be reported, not improvised.

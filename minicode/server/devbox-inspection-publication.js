@@ -6,6 +6,7 @@ import { assertInspectionReceipt, createHostedPublicationTool, inspectionBinding
 import { createPaperclipTaskTools } from "./paperclip-task-tools.js"
 import { publicationBranch, publicationCommand, publicationEnvironment, validatePublicationInput } from "./pull-request-publisher.js"
 import { DEVBOX_VALIDATION_GUIDANCE } from "./repository-policy.js"
+import { redactSecrets } from "./http-error.js"
 
 const SUBMISSION = /^submission-publication-[a-f0-9]{64}$/
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex")
@@ -90,7 +91,7 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
       || !Number.isInteger(record.attempt) || record.attempt < 0 || record.attempt > 10
       || record.baseBranch !== publicationBranch("", task.agent.name ?? task.agent.id, record.title, workerName)
       || record.branch !== `${record.baseBranch}${record.attempt ? `-${record.attempt}` : ""}`
-      || !["ALLOCATED", "CONFLICT", "SUBMITTED", "DELETING", "DELETED"].includes(record.state))
+      || !["ALLOCATED", "CONFLICT", "SUBMITTED", "DELETING", "CLEANUP_PENDING", "DELETED"].includes(record.state))
       throw new Error("Saved publication does not belong to this worker, agent, task and repository")
     return record
   }
@@ -169,7 +170,7 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
         check(repo, record)
         if (record.signature !== hash(publication))
           throw new Error("Retry this submission with the same commit, title and body")
-        if (["DELETING", "DELETED"].includes(record.state))
+        if (["DELETING", "CLEANUP_PENDING", "DELETED"].includes(record.state))
           throw new Error("This submission is already retiring or retired; do not republish it")
         if (record.state !== "CONFLICT") {
           const head = await remote(repo, record.branch, signal)
@@ -220,7 +221,7 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
     const accepted = input.supersededBySubmissionId ? await read(input.supersededBySubmissionId) : record
     if (!accepted) throw new Error("The replacement submission has no owned publication receipt")
     check(repo, accepted)
-    if (!["SUBMITTED", "DELETING", "DELETED"].includes(accepted.state)
+    if (!["SUBMITTED", "DELETING", "CLEANUP_PENDING", "DELETED"].includes(accepted.state)
       || !Number.isSafeInteger(input.pullRequestNumber) || input.pullRequestNumber <= 0
       || (record.pullRequestNumber && record.pullRequestNumber !== input.pullRequestNumber))
       throw new Error("Retirement requires the original confirmed replacement PR")
@@ -229,28 +230,46 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
     const pr = await client.readPullRequest(input.pullRequestNumber, signal)
     if (pr.url !== url || pr.target !== record.target || pr.remoteCommit !== accepted.commit
       || [record.branch, accepted.branch].includes(pr.branch)
-      || await remote(repo, pr.branch, signal) !== accepted.commit)
+      || (pr.state !== "completed" && await remote(repo, pr.branch, signal) !== accepted.commit))
       throw new Error("Provider verification requires the distinct inspector PR branch at the exact reviewed commit and target")
-    const head = await remote(repo, record.branch, signal)
-    if ((head && head !== record.commit) || (record.state === "DELETED" && head)
-      || (!head && record.state === "SUBMITTED"))
-      throw new Error("Original submission tip changed or disappeared; no branch will be deleted")
-    if (head) {
-      record.state = "DELETING"
+    const retirementReceipt = () => ({ ...receipt(record), pullRequest: pr,
+      ...(record.cleanupError ? { cleanupError: record.cleanupError } : {}),
+      ...(input.supersededBySubmissionId ? { supersededBySubmissionId: input.supersededBySubmissionId } : {}) })
+    const deferCleanup = async reason => {
+      record.state = "CLEANUP_PENDING"
       record.pullRequestNumber = input.pullRequestNumber
+      record.cleanupError = redactSecrets(reason, [task.authToken]).slice(0, 2000)
       await save(record)
-      await push(repo, record, true, signal)
-      if (await remote(repo, record.branch, signal))
-        throw new Error("Original branch deletion is unconfirmed; retry the same PR to reconcile")
+      return retirementReceipt()
+    }
+    try {
+      const head = await remote(repo, record.branch, signal)
+      if (head && (head !== record.commit || record.state === "DELETED" || record.cleanupBlocked)) {
+        record.cleanupBlocked = true
+        return await deferCleanup("Original submission tip changed or was recreated; no branch was deleted")
+      }
+      if (head) {
+        record.state = "DELETING"
+        record.pullRequestNumber = input.pullRequestNumber
+        await save(record)
+        await push(repo, record, true, signal)
+        if (await remote(repo, record.branch, signal))
+          return await deferCleanup("Original branch deletion is unconfirmed; reconcile provider state before retrying cleanup")
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error
+      return deferCleanup(error instanceof Error ? error.message : String(error))
     }
     record.state = "DELETED"
+    delete record.cleanupError
+    delete record.cleanupBlocked
     record.pullRequestNumber = input.pullRequestNumber
     await save(record)
-    return { ...receipt(record), pullRequest: pr,
-      ...(input.supersededBySubmissionId ? { supersededBySubmissionId: input.supersededBySubmissionId } : {}) }
+    return retirementReceipt()
   }
   let pending = Promise.resolve()
   const managed = createHostedPublicationTool({ repositories: writable, task, apiUrl, inspectorValidationGuidance,
+    devboxBranchCleanup: true,
     request: (...args) => {
       const next = pending.then(() => execute(...args), () => execute(...args))
       pending = next
@@ -270,7 +289,7 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
         const repo = writable.find(repo => repo.name === record.repositoryAlias)
         if (!repo) throw new Error("An unfinished local submission no longer has a configured writable repository")
         check(repo, record)
-        if (!["CONFLICT", "DELETED"].includes(record.state))
+        if (!["CONFLICT", "CLEANUP_PENDING", "DELETED"].includes(record.state))
           throw new Error("Branch inspection is not complete. Reconcile and retire the saved local submission before marking this task done.")
       }
     },
