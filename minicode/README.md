@@ -533,11 +533,17 @@ opened.
 
 ### Use native Copilot CLI on a devbox
 
-New Devbox workers use the installed Copilot CLI by default. Minicode handles
+New Devbox workers prefer the installed Copilot CLI by default. If no executable
+is found on `PATH`, startup explicitly logs a fallback to the Minicode engine,
+which requires its own configured model authentication. Minicode handles
 pairing, assignment isolation, workspace preparation, task tools and reporting,
 while Copilot performs inference.
-No Minicode model profile is needed. Use `--harness default` to explicitly select
-the original Minicode engine; Hosted worker defaults are unchanged:
+No Minicode model profile is needed when Copilot is available. Use
+`--harness copilotcli` to require Copilot without automatic fallback, or
+`--harness default` to explicitly select the original Minicode engine. Existing
+explicit harness flags override automatic selection; remove a legacy
+`--harness default` from a launcher to enable Copilot-first selection. Hosted
+worker defaults are unchanged:
 
 ```powershell
 node .\minicode\cli.js worker --server https://clippy.example.test `
@@ -567,9 +573,10 @@ compact redacted tool-purpose rows and durations, and emit a heartbeat after
 arguments, output and errors travel separately; opening the row loads paginated
 details. Older servers continue receiving compact text rows. Assistant prose is
 not shortened. `--output-mode verbose` adds the existing bounded inline
-diagnostics and is not required for selectable details. Missing executables,
-authentication/model errors and incomplete CLI results fail explicitly; there is
-no fallback to Minicode inference.
+diagnostics and is not required for selectable details. Automatic fallback is
+limited to executable discovery before assignments start. An explicit missing
+`--copilot-path`, invalid options, authentication/model errors and incomplete CLI
+results fail explicitly; no assignment is replayed through Minicode inference.
 
 Each assignment launches a fresh CLI conversation and removes its temporary
 MCP credential file at completion or cancellation. Existing workers keep their

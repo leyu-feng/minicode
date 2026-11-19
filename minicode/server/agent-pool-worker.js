@@ -1138,14 +1138,21 @@ export function parseWorkerCliOptions(argv) {
 export async function runAgentPoolWorkerCli(argv, repoRoot, { model } = {}) {
   const { options, referenceRepos, secretStore } = parseWorkerCliOptions(argv)
   parseWorkerReferences(referenceRepos)
-  const harness = options.harness ?? "copilotcli"
+  let harness = options.harness ?? "copilotcli"
   if (!["default", "copilotcli"].includes(harness)) throw new Error("--harness must be default or copilotcli")
   if (options["copilot-path"] !== undefined && harness !== "copilotcli") throw new Error("--copilot-path requires --harness copilotcli")
   let sessionFactory
   if (harness === "copilotcli") {
     const { CopilotCliSession, resolveCopilotExecutable } = await import("./copilot-cli-session.js")
-    const executable = await resolveCopilotExecutable(options["copilot-path"])
-    sessionFactory = assignment => new CopilotCliSession({ ...assignment, executable, model })
+    let executable
+    try {
+      executable = await resolveCopilotExecutable(options["copilot-path"])
+    } catch (error) {
+      if (options.harness !== undefined || options["copilot-path"] !== undefined || error.code !== "COPILOT_NOT_FOUND") throw error
+      harness = "default"
+      process.stderr.write("[worker] Copilot CLI is not available on PATH; falling back to the Minicode engine. Configure Minicode model authentication before accepting assignments.\n")
+    }
+    if (executable) sessionFactory = assignment => new CopilotCliSession({ ...assignment, executable, model })
   }
   const toolAzureConfigDir = options["tool-azure-config-dir"]
   if (toolAzureConfigDir !== undefined) {

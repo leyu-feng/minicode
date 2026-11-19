@@ -23,7 +23,9 @@ export async function resolveCopilotExecutable(executable, { env = process.env, 
       if (!["ENOENT", "ENOTDIR", "EACCES"].includes(error.code)) throw error
     }
   }
-  throw new Error("Copilot CLI executable not found. Install/sign in to Copilot CLI and put it on PATH, or supply --copilot-path")
+  throw Object.assign(new Error("Copilot CLI executable not found. Install/sign in to Copilot CLI and put it on PATH, or supply --copilot-path"), {
+    code: "COPILOT_NOT_FOUND",
+  })
 }
 
 export class CopilotCliSession extends HostedHarnessSession {

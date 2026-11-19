@@ -148,3 +148,24 @@ test("paired worker CLI defaults to native Copilot before pairing", async () => 
   await assert.rejects(runAgentPoolWorkerCli(["--copilot-path", process.execPath]), /Worker requires --worker-id/)
   await assert.rejects(runAgentPoolWorkerCli(["--harness", "default"]), /Worker requires --worker-id/)
 })
+
+test("automatic worker selection falls back only when Copilot is absent, never for explicit selections", async t => {
+  const previousPath = process.env.PATH
+  const warnings = []
+  t.mock.method(process.stderr, "write", chunk => { warnings.push(String(chunk)); return true })
+  process.env.PATH = ""
+  try {
+    await assert.rejects(runAgentPoolWorkerCli([]), /Worker requires --worker-id/)
+    assert.match(warnings.join(""), /Copilot CLI is not available on PATH; falling back to the Minicode engine/)
+    warnings.length = 0
+    await assert.rejects(runAgentPoolWorkerCli(["--harness", "copilotcli"]), { code: "COPILOT_NOT_FOUND" })
+    await assert.rejects(runAgentPoolWorkerCli(["--copilot-path", path.join(os.tmpdir(), "missing-copilot-worker.exe")]), { code: "COPILOT_NOT_FOUND" })
+    await assert.rejects(runAgentPoolWorkerCli(["--copilot-path", "relative.exe"]), /absolute executable path/)
+    assert.equal(warnings.length, 0)
+    await assert.rejects(runAgentPoolWorkerCli(["--copilot-path", process.execPath]), /Worker requires --worker-id/)
+    assert.equal(warnings.length, 0)
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
+  }
+})
