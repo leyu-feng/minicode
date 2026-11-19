@@ -137,6 +137,7 @@ test("Devbox workspace-root sessions use supervisory guidance, isolated bundles 
   await fs.mkdir(path.join(artifacts, "reviews"), { recursive: true })
   await fs.writeFile(path.join(shared, "AGENTS.md"), "Synthetic supervisory instructions.")
   const bundle = skillBundle()
+  let writableCommit
   let sessionOptions
   class Session extends EventEmitter {
     constructor(options) { super(); sessionOptions = options }
@@ -154,11 +155,16 @@ test("Devbox workspace-root sessions use supervisory guidance, isolated bundles 
           repositories: [
             { name: "supervisor", path: shared, readOnly: true, supervisory: true, branch: "dev", commit: "a".repeat(40) },
             { name: "application", source: "https://dev.azure.com/fixture/Project/_git/Application",
-              path: writable, readOnly: false, supervisory: false, branch: "main", commit: "b".repeat(40) },
+              path: writable, readOnly: false, supervisory: false, branch: "main", commit: writableCommit },
           ] }
       },
     }),
   })
+  await fixture.git("-C", writable, "init", "--initial-branch=main")
+  await fs.copyFile(new URL("./fixtures/repository-policy.agf.yaml", import.meta.url), path.join(writable, ".agf.yaml"))
+  await fixture.git("-C", writable, "add", ".agf.yaml")
+  await fixture.git("-C", writable, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "commit", "-m", "Policy fixture")
+  writableCommit = await fixture.git("-C", writable, "rev-parse", "HEAD")
   const peer = await fixture.welcome(0)
   await executeTask(peer, { runId: "run-root", agent: { ...agent, companyId: randomUUID() },
     context: { issueId: randomUUID() }, authToken: "private-run-token", skills: bundle.skills,
@@ -175,12 +181,14 @@ test("Devbox workspace-root sessions use supervisory guidance, isolated bundles 
   assert.ok(sessionOptions.tools.some(tool => tool.name === "paperclip_report_to_parent"))
   assert.match(sessionOptions.instructions, /Never create a fix child assigned back to the producer/)
   assert.match(sessionOptions.instructions, /unblockDescriptor/)
-  assert.match(sessionOptions.instructions, /documented change-aware build\/test scripts/)
-  assert.match(sessionOptions.instructions, /Build-LeafProjects.ps1 -Action Build and -Action UnitTest sequentially/)
-  assert.match(sessionOptions.instructions, /same pinned target, not just the correction delta/)
-  assert.match(sessionOptions.instructions, /no impacted unit tests, not all tests passed/)
+  assert.match(sessionOptions.instructions, /Pinned repository policy: application/)
+  assert.match(sessionOptions.instructions, /Additional local acceptance checks: forbid/)
+  assert.doesNotMatch(sessionOptions.instructions, /documented change-aware build\/test scripts|Build-LeafProjects/)
+  const verdictTool = sessionOptions.tools.find(tool => tool.name === "record_inspection_result")
+  assert.match(verdictTool.description, /Additional local acceptance checks: forbid/)
+  assert.doesNotMatch(verdictTool.description, /documented change-aware buddy/)
   assert.doesNotMatch(sessionOptions.instructions, /run all unit tests|build, all unit tests/)
-  assert.match(sessionOptions.instructions, /Run onebox tests when the repository has them and the original task requires them/)
+  assert.match(sessionOptions.instructions, /Run only the resolved repository-policy checks/)
   assert.match(sessionOptions.instructions, /u\/pi1\/inspection-fix-<readable-feature-title>/)
   assert.match(sessionOptions.instructions, /original developer must review and explicitly confirm/)
   assert.match(sessionOptions.instructions, /Never publish a PR from your proposal/)
@@ -189,11 +197,9 @@ test("Devbox workspace-root sessions use supervisory guidance, isolated bundles 
   assert.match(sessionOptions.instructions, /git reset --keep <submitted-sha>, only after verifying that this listed writable worktree is clean/)
   assert.match(sessionOptions.instructions, /Devbox inspector diagnostic publication exception/)
   assert.match(sessionOptions.instructions, /Devbox inspector local-validation exception/)
-  assert.match(sessionOptions.instructions, /restore existing declared dependencies/)
-  assert.match(sessionOptions.instructions, /For self-hosted Devbox validation, preserve the inherited user environment/)
-  assert.match(sessionOptions.instructions, /Keep only TEMP, TMP, logs and build outputs.*inside the listed writable worktree or this run's review scratch/)
-  assert.match(sessionOptions.instructions, /do not redirect, clear or override DOTNET_CLI_HOME, AZURE_CONFIG_DIR, NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH, NUGET_PLUGIN_PATHS, NUGET_NETCORE_PLUGIN_PATHS or NUGET_NETFX_PLUGIN_PATHS/)
-  assert.match(sessionOptions.instructions, /normal profile, credential-provider discovery and package\/HTTP caches internally/)
+  assert.match(sessionOptions.instructions, /Only isolate TEMP, TMP, build_outputs, logs/)
+  assert.match(sessionOptions.instructions, /Preserve every other inherited setting, normal executable discovery/)
+  assert.match(sessionOptions.instructions, /package\/HTTP\/plugin caches/)
   assert.doesNotMatch(sessionOptions.instructions, /Keep TEMP, TMP, DOTNET_CLI_HOME|set NUGET_PLUGIN_PATHS to that value/)
   assert.match(sessionOptions.instructions, /not direct filesystem access outside your scopes/)
   assert.match(sessionOptions.instructions, /explicit human task message or operator-authored continuation/)
@@ -215,7 +221,7 @@ test("Devbox workspace-root sessions use supervisory guidance, isolated bundles 
     prPolicy: { isInspector: false, inspectorAgentId: randomUUID() } })
   assert.doesNotMatch(sessionOptions.instructions, /Devbox inspector diagnostic publication exception/)
   assert.doesNotMatch(sessionOptions.instructions, /Devbox inspector local-validation exception/)
-  assert.doesNotMatch(sessionOptions.instructions, /For self-hosted Devbox validation/)
+  assert.match(sessionOptions.instructions, /Pinned repository policy: application/)
   assert.match(sessionOptions.instructions, /never push or create PRs through shell commands/)
   assert.ok(sessionOptions.tools.some(tool => tool.name === "submit_branch_for_inspection"))
   assert.ok(sessionOptions.tools.some(tool => tool.name === "retire_submission_branch"))
@@ -627,7 +633,7 @@ for (const explicitRole of [true, false]) for (const [providerEnabled, postEnabl
       assert.match(this.options.instructions, /Hosted identity restrictions take precedence over skill helper permission/)
       assert.doesNotMatch(this.options.instructions, /Devbox inspector diagnostic publication exception/)
       assert.doesNotMatch(this.options.instructions, /Devbox inspector local-validation exception/)
-      assert.doesNotMatch(this.options.instructions, /For self-hosted Devbox validation/)
+      assert.doesNotMatch(this.options.instructions, /Pinned repository policy:|resolved-policy SHA-256|\.agf.yaml policies/)
       assert.doesNotMatch(this.options.instructions, /human task message or human response explicitly authorizes a named provider CLI/)
       assert.ok(this.options.instructions.includes("Post progress with the issue comments API"))
       assert.match(this.options.instructions, /worker_shared guidance and same-named skills override every repository/)

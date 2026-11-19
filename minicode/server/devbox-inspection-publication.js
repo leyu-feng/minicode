@@ -5,12 +5,14 @@ import { createAzureDevOpsPublisher, parseAzureDevOpsRepositoryUrl } from "./azu
 import { assertInspectionReceipt, createHostedPublicationTool, inspectionBindings, paperclipApi } from "./hosted-publication.js"
 import { createPaperclipTaskTools } from "./paperclip-task-tools.js"
 import { publicationBranch, publicationCommand, publicationEnvironment, validatePublicationInput } from "./pull-request-publisher.js"
+import { DEVBOX_VALIDATION_GUIDANCE } from "./repository-policy.js"
 
 const SUBMISSION = /^submission-publication-[a-f0-9]{64}$/
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex")
 
 export function createDevboxInspectionPublication({ repositories, storage, workerName, task, apiUrl, server, user,
-  clippyAuth, run = publicationCommand, fetchImpl = fetch }) {
+  clippyAuth, run = publicationCommand, fetchImpl = fetch,
+  inspectorValidationGuidance = () => DEVBOX_VALIDATION_GUIDANCE }) {
   const issueId = task.context.taskId ?? task.context.issueId
   const deployment = new URL(server).origin
   if (!task.prPolicy?.inspectorAgentId || task.prPolicy.isInspector !== false
@@ -248,7 +250,7 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
       ...(input.supersededBySubmissionId ? { supersededBySubmissionId: input.supersededBySubmissionId } : {}) }
   }
   let pending = Promise.resolve()
-  const managed = createHostedPublicationTool({ repositories: writable, task, apiUrl,
+  const managed = createHostedPublicationTool({ repositories: writable, task, apiUrl, inspectorValidationGuidance,
     request: (...args) => {
       const next = pending.then(() => execute(...args), () => execute(...args))
       pending = next

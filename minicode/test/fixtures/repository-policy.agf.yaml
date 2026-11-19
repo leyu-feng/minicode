@@ -1,0 +1,37 @@
+schema_version: "1.0.0"
+metadata:
+  id: example-repository
+  name: Example repository
+  version: "1.0.0"
+  description: Synthetic repository-policy fixture.
+interface:
+  input:
+    type: object
+  output:
+    type: object
+execution_policy:
+  id: x-minicode.repository
+  config:
+    scope: self_hosted_devbox
+    validation:
+      checks:
+        - id: integration
+          command:
+            executable: pwsh
+            arguments: [-NoProfile, -File, '.\scripts\Test-Integration.ps1']
+            artifacts_argument: -ResultsRoot
+          documentation: [README.md]
+          ports: [18080]
+          evidence: [source_commit, command, exit_code, test_counts, summary, test_results, logs, teardown]
+      additional_checks: forbid
+      rerun_on: [proposal, resubmission]
+      cleanup: run_owned_only
+      coverage: documented_scenarios_only
+    environment:
+      mode: inherit
+      isolate: [TEMP, TMP, build_outputs, logs]
+    publication:
+      workflow: company_pr_inspector
+      provider_checks: exact_pr_head
+      pending: wait
+      merge: human_only

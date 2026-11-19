@@ -531,6 +531,46 @@ opened.
 
 ## Connect as an AgentPool worker
 
+### Repository-owned workflow policy (self-hosted Devbox)
+
+A writable repository may define `.agf.yaml` using the Agent Format 1.0 envelope
+and the `x-minicode.repository` execution policy. The supported profile is
+defined by [repository-policy.schema.json](server/repository-policy.schema.json);
+[the synthetic fixture](test/fixtures/repository-policy.agf.yaml) is a complete
+example. This is a runtime extension, not built-in Agent Format behavior or a
+dependency on an AGF SDK. Unknown fields, unsupported versions, duplicate keys
+or check IDs, aliases, oversized documents and linked policy files fail closed
+before model execution. Policy files are optional for repositories not migrated.
+
+The operator's configured repository branch supplies the policy. Before source
+inspection starts, the harness reads its committed blob at the assignment-pinned
+branch tip, records the commit and a SHA-256 of the resolved JSON policy, and
+uses that snapshot for the whole assignment. Dirty files and a candidate branch
+cannot replace it. A merged policy change takes effect in a new assignment;
+existing submissions can predate the policy file. Policy updates belong on the
+configured trusted branch, never in an unreviewed submission as a way to relax
+its own gates.
+
+Precedence is built-in Minicode safety/identity/permission/publication rules,
+then the pinned repository `.agf.yaml`, then `AGENTS.md` (including supervisory
+Markdown). Older task, agent and skill workflow text cannot add contradictory
+repository validation gates. The same resolved policy supplies worker guidance,
+the verdict-tool contract and new producer-to-inspector handoffs. Publication
+authorization and server-validated exact-SHA receipts are unchanged; YAML is not
+permission to execute a helper, provision resources, read credentials or merge.
+
+The structured config selects required validation commands and evidence,
+whether additional local gates are forbidden, correction/resubmission reruns,
+inherited tooling with bounded temporary/output/log isolation, and exact-head
+provider checks after inspector approval. Keep those requirements in YAML rather
+than duplicating them in Markdown or runtime code. Other contributor explanations
+may remain in `AGENTS.md`. The harness resolves policy; the agent still executes
+the inspected, authorized repository commands and records their real results.
+
+Only `--workspace-mode workspace` uses this profile. Hosted AgentPool retains
+its existing validation contract, managed-identity restrictions and behavior.
+Validate private policies locally, not in an external playground.
+
 ### Use native Copilot CLI on a devbox
 
 New Devbox workers prefer the installed Copilot CLI by default. If no executable

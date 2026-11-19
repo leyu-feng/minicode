@@ -200,6 +200,8 @@ test("local producer submits an exact commit, reconciles handoff across restart,
   assert.equal(submitted.remoteCommit, f.revision)
   assert.equal(f.pushes, 1)
   assert.equal(f.children.length, 1)
+  assert.match(f.children[0].description, /pinned repository \.agf.yaml policy/)
+  assert.doesNotMatch(f.children[0].description, /documented change-aware build\/test scripts|Build-LeafProjects/)
   assert.equal(f.issue.unblockDescriptor.owner.agentId, f.task.agent.id)
   await assert.rejects(f.complete(), /inspection is not complete/)
   await assert.rejects(f.retire(submitted), /matching server-validated inspection receipt/)
