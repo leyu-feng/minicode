@@ -197,7 +197,7 @@ export function createPrInspectorPostback({ task, apiUrl, separateBranch = false
   const tool = {
     name: "record_pull_request",
     description: "Record the link of a PR you already created outside Paperclip using local Devbox user credentials, after inspecting another agent's branch. This tool is an API postback only: it never creates or verifies a provider PR and never receives provider credentials. Retry the same link to reconcile an uncertain postback."
-      + (separateBranch ? " The PR must use your separate worker-namespaced branch at the exact submitted remote commit. Its link is also returned to the producer's parent task for provider-verified cleanup." : "")
+      + (separateBranch ? " The PR must use a separate worker-namespaced branch at the exact submitted remote commit. A continuation on another worker must reuse the existing PR URL and original branch for this same approved inspection; the creation namespace is not the continuation worker's identity. Do not rename the branch or create another PR. Its link is also returned to the producer's parent task for provider-verified cleanup." : "")
       + (devboxBranchCleanup ? ` ${DEVBOX_BRANCH_CLEANUP_GUIDANCE}` : ""),
     parameters: {
       type: "object", additionalProperties: false, required: ["url", "title", "provider",
@@ -233,7 +233,7 @@ export function createPrInspectorPostback({ task, apiUrl, separateBranch = false
         if (!/^submission-publication-[a-f0-9]{64}$/.test(input.submissionId ?? "")
           || !/^[a-f0-9]{40}$/.test(input.reviewedCommit ?? "")
           || !/^[a-z0-9][a-z0-9_-]{0,23}$/i.test(workerName ?? "")
-          || !new RegExp(`^u/${workerName}/[a-z0-9]+(?:-[a-z0-9]+)*$`).test(input.branch ?? "")
+          || !/^u\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,23}\/[a-z0-9]+(?:-[a-z0-9]+)*$/.test(input.branch ?? "")
           || input.submissionId !== line("Submission ID") || input.reviewedCommit !== line("Remote commit")
           || input.branch === line("Branch")
           || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(issue.parentId ?? ""))

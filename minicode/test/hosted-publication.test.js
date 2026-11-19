@@ -353,7 +353,7 @@ test("external PR postback failures remain execution failures until the same lin
   assert.equal(f.publications.length, 0)
 })
 
-test("separate inspector PR postback returns the link to the producer and reconciles a partial notification without duplicates", async t => {
+test("separate inspector PR postback reconciles a partial notification on another worker without duplicates", async t => {
   const f = fixture(t, true, true, true)
   const input = { url: "https://code.example.test/project/_git/main/pullrequest/12", title: "Feature",
     provider: "azure_devops", submissionId, branch: "u/reviewer-one/feature", reviewedCommit: remoteCommit }
@@ -362,23 +362,51 @@ test("separate inspector PR postback returns the link to the producer and reconc
   assert.match(f.publication.registrationError, /postback is incomplete/)
   assert.equal(f.products.length, 1)
   f.failProducerNotification(false)
-  const receipt = await f.tool("record_pull_request").execute(input)
+  f.task.runId = "continuation-run"
+  const continuation = createPrInspectorPostback({
+    task: f.task, apiUrl: "https://paperclip.example.test", separateBranch: true, workerName: "reviewer-two",
+  })
+  const postback = continuation.tools.find(tool => tool.name === "record_pull_request")
+  const receipt = await postback.execute(input)
   assert.equal(receipt.producer.issueId, parentId)
   assert.equal(receipt.verification, "not_verified")
-  await f.tool("record_pull_request").execute(input)
+  await postback.execute(input)
   assert.equal(f.products.length, 1)
   assert.equal(f.comments.length, 2)
   assert.ok(f.comments.find(comment => comment.issueId === parentId).body.includes("retire_submission_branch"))
   assert.equal(f.products[0].metadata.sourceAgentId, agentId)
   assert.equal(f.publications.length, 0)
-  assert.equal(f.publication.registrationError, null)
+  assert.equal(continuation.registrationError, null)
 })
 
-test("separate inspector postback rejects another worker namespace and an unreviewed commit before notifying the producer", async t => {
+test("a continuation worker records an approved PR from the original worker namespace without an earlier postback", async t => {
+  const f = fixture(t, true, true, true)
+  f.task.runId = "continuation-run"
+  const continuation = createPrInspectorPostback({
+    task: f.task, apiUrl: "https://paperclip.example.test", separateBranch: true, workerName: "reviewer-two",
+  })
+  const input = { url: "https://code.example.test/project/_git/main/pullrequest/12", title: "Feature",
+    provider: "azure_devops", submissionId, branch: "u/reviewer-one/feature-1", reviewedCommit: remoteCommit }
+  const receipt = await continuation.tools.find(tool => tool.name === "record_pull_request").execute(input)
+  assert.equal(receipt.producer.issueId, parentId)
+  assert.equal(f.products.length, 1)
+  assert.equal(f.products[0].metadata.branch, input.branch)
+  assert.equal(f.products[0].metadata.inspectorAgentId, inspectorId)
+  assert.equal(f.products[0].metadata.inspectionIssueId, issueId)
+  assert.equal(f.products[0].metadata.reviewedCommit, remoteCommit)
+  assert.equal(f.publications.length, 0)
+  assert.equal(continuation.registrationError, null)
+})
+
+test("separate inspector postback rejects the producer branch, invalid refs and mismatched submission provenance", async t => {
   const f = fixture(t, true, true, true)
   const input = { url: "https://code.example.test/project/_git/main/pullrequest/12", title: "Feature",
     provider: "azure_devops", submissionId, branch: "u/reviewer-one/feature", reviewedCommit: remoteCommit }
   await assert.rejects(f.tool("record_pull_request").execute({ ...input, branch: "u/producer-one/feature" }), /separate inspector-owned/)
+  for (const branch of ["main", "u/../feature", "u/reviewer-two/feature/other", `u/${"x".repeat(25)}/feature`])
+    await assert.rejects(f.tool("record_pull_request").execute({ ...input, branch }), /separate inspector-owned/)
+  await assert.rejects(f.tool("record_pull_request").execute({ ...input,
+    submissionId: `submission-publication-${"e".repeat(64)}` }), /separate inspector-owned/)
   await assert.rejects(f.tool("record_pull_request").execute({ ...input, reviewedCommit: commit }), /separate inspector-owned/)
   assert.equal(f.products.length, 0)
   assert.equal(f.comments.length, 0)

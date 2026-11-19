@@ -706,7 +706,13 @@ auto-complete. Branch deletion is limited to the cleanup exception below.
 its link to the source task by comment,
 with the original submission ID and reviewed commit. Partial postbacks reconcile
 without duplicate work products/comments. This records an external link, not
-independent provider verification. The producer should use `retire_submission_branch`
+independent provider verification. An inspector continuation on another worker
+reuses the existing PR URL and original creation branch; it must not allocate a
+replacement branch or duplicate PR merely because the worker changed. Postback
+authorization follows the assigned inspector, immutable approval, original
+submission/SHA, repository and producer-parent bindings, not the current worker's
+branch-name prefix. Producer branches and malformed refs remain rejected.
+The producer should use `retire_submission_branch`
 to verify the separate PR and retire its original, unchanged submission. Local
 retirement requires this worker's durable receipt, the inspector's matching
 server-validated approval and PR work product, and independent Azure DevOps/Git
@@ -743,7 +749,7 @@ self-hosted Devbox workers; it is not repository-specific validation policy.
   failures leave `cleanup_pending` evidence with PR/ref/SHA/error for later cleanup.
   Do not blindly retry, fail or block otherwise verified work solely for cleanup.
   Approval, PR registration and independent provider verification still block
-  completion when missing; this does not repair cross-worker PR postback binding.
+  completion when missing; cleanup authorization does not bypass those checks.
 
 Hosted ownership and mandatory managed cleanup remain unchanged; Hosted workers
 receive no CLI deletion exception. Older providers without
