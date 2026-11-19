@@ -39,9 +39,25 @@ test("Herdr worker reporting and cleanup use pane-first arguments compatible wit
   assert.ok(calls.at(-1).includes("--clear-token"))
 })
 
+test("Herdr worker reporter supports alphanumeric workspace and pane handles", async () => {
+  for (const pane of ["wA:p2", "wA:p3", "w1Z:pAB"]) {
+    const calls = []
+    const reporter = createHerdrWorkerReporter({
+      env: { HERDR_ENV: "1", HERDR_PANE_ID: pane },
+      run: async args => { calls.push(args) },
+    })
+    await reporter.state({ state: "idle" })
+    await reporter.stop()
+    assert.equal(reporter.enabled, true)
+    assert.ok(calls.some(args => args[1] === "report-agent" && args.includes("idle")))
+    assert.ok(calls.every(args => args[2] === pane))
+  }
+})
+
 test("Herdr worker reporter stays disabled outside a dedicated Herdr pane", async () => {
   let called = false
   for (const env of [{}, { HERDR_ENV: "1", HERDR_PANE_ID: "bad" },
+    { HERDR_ENV: "1", HERDR_PANE_ID: "wA:" }, { HERDR_ENV: "1", HERDR_PANE_ID: "--current" },
     { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p2", MINICODE_WORKERS_MODE: "1" }]) {
     const reporter = createHerdrWorkerReporter({ workerName: "worker", env,
       run: async () => { called = true } })

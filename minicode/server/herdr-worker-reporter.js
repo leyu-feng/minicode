@@ -17,7 +17,7 @@ async function runHerdr(args, env) {
 export function createHerdrWorkerReporter({ workerName, env = process.env, run = runHerdr,
   log = message => process.stderr.write(`${message}\n`) } = {}) {
   const pane = env.HERDR_PANE_ID
-  if (env.HERDR_ENV !== "1" || !/^w\d+:p\d+$/.test(pane ?? "") || env.MINICODE_WORKERS_MODE === "1") {
+  if (env.HERDR_ENV !== "1" || !/^w[0-9A-Z]+:p[0-9A-Z]+$/.test(pane ?? "") || env.MINICODE_WORKERS_MODE === "1") {
     return { enabled: false, state: async () => {}, activity: () => {}, stop: async () => {} }
   }
 
