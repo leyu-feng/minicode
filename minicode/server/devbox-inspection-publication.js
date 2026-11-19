@@ -79,17 +79,19 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
       throw error
     }
   }
-  const binding = (repo, commit) => ({
-    version: 1, deployment, companyId: task.agent.companyId, agentId: task.agent.id, issueId, workerName,
+  const binding = (repo, commit, ownerWorkerName = workerName) => ({
+    version: 1, deployment, companyId: task.agent.companyId, agentId: task.agent.id, issueId, workerName: ownerWorkerName,
     repository: repo.source, repositoryAlias: repo.name, target: `refs/heads/${repo.branch}`, commit,
   })
   const check = (repo, record) => {
-    const expected = binding(repo, record.commit)
+    const ownerWorkerName = record.retirementOnly === true ? record.workerName : workerName
+    const expected = binding(repo, record.commit, ownerWorkerName)
     if (Object.entries(expected).some(([key, value]) => record[key] !== value)
+      || (record.retirementOnly === true && record.retirementWorkerName !== workerName)
       || record.submissionId !== `submission-publication-${hash(expected)}`
       || !/^[a-f0-9]{40}$/.test(record.commit ?? "")
       || !Number.isInteger(record.attempt) || record.attempt < 0 || record.attempt > 10
-      || record.baseBranch !== publicationBranch("", task.agent.name ?? task.agent.id, record.title, workerName)
+      || record.baseBranch !== publicationBranch("", task.agent.name ?? task.agent.id, record.title, ownerWorkerName)
       || record.branch !== `${record.baseBranch}${record.attempt ? `-${record.attempt}` : ""}`
       || !["ALLOCATED", "CONFLICT", "SUBMITTED", "DELETING", "CLEANUP_PENDING", "DELETED"].includes(record.state))
       throw new Error("Saved publication does not belong to this worker, agent, task and repository")
@@ -131,23 +133,52 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
     await client.verifyRepository(signal)
     return client
   }
-  const approvedReview = async (repo, accepted, url, signal) => {
+  const inspectionReview = async (repo, submissionId, outcome, signal) => {
     const snapshot = await taskTools.find(tool => tool.name === "paperclip_get_issue").execute({}, { signal })
     const reviews = snapshot.children.filter(child => child.assigneeAgentId === task.prPolicy.inspectorAgentId
-      && String(child.description ?? "").split(/\r?\n/).includes(`Submission ID: ${accepted.submissionId}`))
+      && String(child.description ?? "").split(/\r?\n/).includes(`Submission ID: ${submissionId}`))
     if (reviews.length !== 1) throw new Error("Retirement requires the unique inspector review of this submission")
     const review = await api(`/issues/${encodeURIComponent(reviews[0].id)}`, signal)
+    const actual = inspectionBindings(review, task.agent.companyId, task.prPolicy.inspectorAgentId)
     const expected = { companyId: task.agent.companyId, inspectorAgentId: task.prPolicy.inspectorAgentId,
       inspectionIssueId: review.id, sourceIssueId: issueId, sourceAgentId: task.agent.id,
-      submissionId: accepted.submissionId, reviewedCommit: accepted.commit, repositoryUrl: repo.source,
-      branch: accepted.branch }
-    const actual = inspectionBindings(review, task.agent.companyId, task.prPolicy.inspectorAgentId)
+      submissionId, repositoryUrl: repo.source }
     if (review.id !== reviews[0].id || review.companyId !== task.agent.companyId
       || review.assigneeAgentId !== task.prPolicy.inspectorAgentId || review.createdByAgentId !== task.agent.id
       || Object.entries(expected).some(([key, value]) => actual[key] !== value))
       throw new Error("Inspection review does not match the saved producer submission")
     assertInspectionReceipt(await api(`/issues/${encodeURIComponent(review.id)}/inspection-result`, signal),
-      { ...expected, outcome: "approved" })
+      { ...actual, outcome })
+    if (outcome === "changes_requested") {
+      const products = await api(`/issues/${encodeURIComponent(review.id)}/work-products`, signal)
+      if (review.status !== "blocked" || review.executionRunId || review.checkoutRunId
+        || review.unblockDescriptor?.owner?.agentId !== task.prPolicy.inspectorAgentId
+        || !Array.isArray(products) || products.some(product => product.type === "pull_request"))
+        throw new Error("Retain the earlier branch until its stopped inspection confirms rejection without a PR")
+    }
+    return { review, bindings: actual }
+  }
+  const retirementRecord = async (repo, submissionId, outcome, signal) => {
+    const saved = await read(submissionId)
+    if (saved) return { record: check(repo, saved) }
+    const inspection = await inspectionReview(repo, submissionId, outcome, signal)
+    const { branch, reviewedCommit } = inspection.bindings
+    const owner = /^u\/([a-z0-9][a-z0-9_-]{0,23})\/[a-z0-9]+(?:-[a-z0-9]+)*$/i.exec(branch)
+    if (!owner || !inspection.review.title?.startsWith("Review PR: "))
+      throw new Error("Retirement recovery requires the original managed branch allocation")
+    const title = inspection.review.title.slice("Review PR: ".length)
+    const baseBranch = publicationBranch("", task.agent.name ?? task.agent.id, title, owner[1])
+    const suffix = branch.slice(baseBranch.length)
+    const attempt = suffix === "" ? 0 : /^-(?:[1-9]|10)$/.test(suffix) ? Number(suffix.slice(1)) : -1
+    const record = { ...binding(repo, reviewedCommit, owner[1]), submissionId, branch, title, baseBranch, attempt,
+      state: "SUBMITTED", retirementOnly: true, retirementWorkerName: workerName }
+    check(repo, record)
+    return { record, inspection }
+  }
+  const approvedReview = async (repo, accepted, url, signal, inspection) => {
+    const { review, bindings } = inspection ?? await inspectionReview(repo, accepted.submissionId, "approved", signal)
+    if (bindings.reviewedCommit !== accepted.commit || bindings.branch !== accepted.branch)
+      throw new Error("Inspection review does not match the saved producer submission")
     const products = await api(`/issues/${encodeURIComponent(review.id)}/work-products`, signal)
     if (!Array.isArray(products) || products.filter(product => product.type === "pull_request" && azureDevOpsUrlsEqual(product.url, url)
       && product.metadata?.submissionId === accepted.submissionId && product.metadata?.sourceAgentId === task.agent.id
@@ -168,6 +199,7 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
       let record = await read(submissionId)
       if (record) {
         check(repo, record)
+        if (record.retirementOnly) throw new Error("A recovered retirement receipt cannot publish or resubmit a branch")
         if (record.signature !== hash(publication))
           throw new Error("Retry this submission with the same commit, title and body")
         if (["DELETING", "CLEANUP_PENDING", "DELETED"].includes(record.state))
@@ -214,19 +246,19 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
       throw new Error("All 11 worker publication branch names are occupied")
     }
     if (input.mode !== "delete_submitted_branch") throw new Error("Local producers may submit and retire branches, never create PRs")
-    const record = await read(input.submissionId)
-    if (!record) throw new Error("No owned local publication receipt exists for this submission")
-    check(repo, record)
+    const original = await retirementRecord(repo, input.submissionId,
+      input.supersededBySubmissionId ? "changes_requested" : "approved", signal)
+    const record = original.record
     if (record.state === "ALLOCATED") throw new Error("Reconcile the submitted branch before retirement")
-    const accepted = input.supersededBySubmissionId ? await read(input.supersededBySubmissionId) : record
-    if (!accepted) throw new Error("The replacement submission has no owned publication receipt")
-    check(repo, accepted)
+    const replacement = input.supersededBySubmissionId
+      ? await retirementRecord(repo, input.supersededBySubmissionId, "approved", signal) : original
+    const accepted = replacement.record
     if (!["SUBMITTED", "DELETING", "CLEANUP_PENDING", "DELETED"].includes(accepted.state)
       || !Number.isSafeInteger(input.pullRequestNumber) || input.pullRequestNumber <= 0
       || (record.pullRequestNumber && record.pullRequestNumber !== input.pullRequestNumber))
       throw new Error("Retirement requires the original confirmed replacement PR")
     const url = repo.publication.pullRequestUrlTemplate.replace("{number}", String(input.pullRequestNumber))
-    await approvedReview(repo, accepted, url, signal)
+    await approvedReview(repo, accepted, url, signal, replacement.inspection)
     const pr = await client.readPullRequest(input.pullRequestNumber, signal)
     if (pr.url !== url || pr.target !== record.target || pr.remoteCommit !== accepted.commit
       || [record.branch, accepted.branch].includes(pr.branch)

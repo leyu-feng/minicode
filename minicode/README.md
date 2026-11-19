@@ -714,8 +714,12 @@ submission/SHA, repository and producer-parent bindings, not the current worker'
 branch-name prefix. Producer branches and malformed refs remain rejected.
 The producer should use `retire_submission_branch`
 to verify the separate PR and retire its original, unchanged submission. Local
-retirement requires this worker's durable receipt, the inspector's matching
-server-validated approval and PR work product, and independent Azure DevOps/Git
+retirement uses this worker's durable receipt when available. A replacement
+worker can recover a retirement-only receipt from the original producer-created
+inspection handoff and immutable verdict, checking the original submission ID
+against its original worker/allocation binding. Recovery does not authorize
+branch publication or resubmission. Retirement still requires the inspector's
+matching server-validated approval and PR work product, and independent Azure DevOps/Git
 verification of the repository, target, exact reviewed commit and both distinct
 branch tips (a completed PR's source may already be absent). It deletes only the
 unchanged producer branch with an exact lease. A `CLEANUP_PENDING` result includes
@@ -736,10 +740,14 @@ self-hosted Devbox workers; it is not repository-specific validation policy.
   recorded submission/proposal branches no longer needed by active work.
 - Any authorized developer/inspector worker can perform that cleanup, including
   a different worker from the branch creator. Use trusted task/submission/proposal
-  provenance, not a matching worker-name prefix. Local managed receipts remain
-  worker-specific; when unavailable, the exception permits existing signed-in
-  provider tooling in the matching listed writable worktree for verification
-  and exact leased remote deletion, not other publication mutations.
+  provenance, not a matching worker-name prefix. Prefer `retire_submission_branch`;
+  replacement workers recover retirement-only provenance rather than requiring
+  access to another worker's local files. When the managed capability is
+  unavailable, the exception permits existing signed-in provider tooling in the
+  matching listed writable worktree for verification and exact leased remote
+  deletion, not other publication mutations. After external cleanup, retry the
+  managed retirement to obtain its provider-verified disposition; comments alone
+  do not satisfy the completion guard.
 - Freshly verify the repository, PR, target, approved commit, recorded branch and
   current tip. Preserve durable proposal evidence, changed/reused refs, active
   assignments and other open PRs, protected/default/target branches and all

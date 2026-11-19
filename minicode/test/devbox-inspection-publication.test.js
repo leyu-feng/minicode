@@ -5,6 +5,7 @@ import path from "node:path"
 import { randomUUID } from "node:crypto"
 import test from "node:test"
 import { createDevboxInspectionPublication } from "../server/devbox-inspection-publication.js"
+import { createPaperclipTaskTools } from "../server/paperclip-task-tools.js"
 import { publicationCommand } from "../server/pull-request-publisher.js"
 
 const sourceUrl = "https://fixture.visualstudio.com/DefaultCollection/Project/_git/Repository"
@@ -143,6 +144,26 @@ async function fixture(t) {
       options.apiUrl = "http://127.0.0.1:43210"
       publication = createDevboxInspectionPublication(options)
     },
+    async moveWorker(name) {
+      const next = path.join(root, name)
+      await git(source, "worktree", "add", "-b", `${name}-local`, next, "main")
+      options.repositories[0].path = next
+      options.workerName = name
+      options.storage = path.join(root, ".workers", name, "publications")
+      await fs.mkdir(path.dirname(options.storage))
+      task.runId = randomUUID()
+      issue.executionRunId = task.runId
+      publication = createDevboxInspectionPublication(options)
+      return next
+    },
+    finish() {
+      const tools = createPaperclipTaskTools({ apiUrl: options.apiUrl, authToken: task.authToken,
+        runId: task.runId, issueId: issue.id, agentId: task.agent.id, companyId: task.agent.companyId,
+        assertCanComplete: () => publication.assertCanComplete() })
+      return tools.find(tool => tool.name === "paperclip_update_issue").execute({
+        status: "done", comment: "Existing PR provider-verified; submission retirement reconciled.",
+      })
+    },
     setInspector(value) { liveInspector = value }, failHandoff(value) { failHandoff = value },
     losePush() { losePush = true }, conflict(value) { conflict = value },
     denyDeletion(value) { denyDeletion = value },
@@ -271,6 +292,103 @@ test("Azure PR URL compatibility never aliases another repository, PR or credent
   }), /same original PR/)
 })
 
+test("a replacement worker reconciles an already-merged and cleaned submission, then completes through the real guard", async t => {
+  const f = await fixture(t)
+  const submitted = await f.submit()
+  await f.approve(submitted)
+  const originalFile = path.join(f.storage, `${submitted.submissionId}.json`)
+  const original = await fs.readFile(originalFile, "utf8")
+  f.setPr({ ...f.pr, status: "completed" })
+  await f.git(f.workspace, "push", f.remote, `:refs/heads/${submitted.branch}`, `:${f.pr.sourceRefName}`)
+  await f.moveWorker("worker-two")
+  const registered = f.products.get(submitted.reviewIssueId)
+  f.products.set(submitted.reviewIssueId, [])
+  await assert.rejects(f.retire(submitted), /confirmed PR work product/)
+  await assert.rejects(f.finish(), /Branch inspection is not complete/)
+  f.products.set(submitted.reviewIssueId, registered)
+  const retired = await f.retire(submitted)
+  assert.equal(retired.state, "DELETED")
+  assert.equal(retired.pullRequest.verification, "provider_verified")
+  assert.equal(retired.pullRequest.remoteCommit, submitted.remoteCommit)
+  const recovered = JSON.parse(await fs.readFile(path.join(f.options.storage, `${submitted.submissionId}.json`), "utf8"))
+  assert.equal(recovered.retirementOnly, true)
+  assert.equal(recovered.workerName, "worker-one")
+  assert.equal(recovered.retirementWorkerName, "worker-two")
+  f.restart()
+  assert.equal((await f.retire(submitted)).state, "DELETED")
+  assert.equal((await f.finish()).status, "done")
+  assert.equal(f.pushes, 1)
+  assert.equal(await fs.readFile(originalFile, "utf8"), original)
+})
+
+test("cross-worker retirement deletes only the attested original with an exact lease and preserves the new worktree", async t => {
+  const f = await fixture(t)
+  const submitted = await f.submit()
+  await f.approve(submitted)
+  const next = await f.moveWorker("worker-two")
+  const before = await f.git(next, "rev-parse", "HEAD")
+  const retired = await f.retire(submitted)
+  assert.equal(retired.state, "DELETED")
+  assert.equal(f.pushes, 2)
+  const deletion = f.commands.filter(args => args.includes("push")).at(-1)
+  assert.ok(deletion.includes(`--force-with-lease=refs/heads/${submitted.branch}:${submitted.remoteCommit}`))
+  assert.equal(deletion.at(-1), `:refs/heads/${submitted.branch}`)
+  assert.equal(await f.git(next, "rev-parse", "HEAD"), before)
+  assert.match(await f.git(next, "ls-remote", "--heads", f.remote, f.pr.sourceRefName), new RegExp(f.revision))
+  assert.equal((await f.finish()).status, "done")
+})
+
+test("cross-worker recovery retains a changed or reused original and persists a completion-safe cleanup warning", async t => {
+  const f = await fixture(t)
+  const submitted = await f.submit()
+  await f.approve(submitted)
+  const initial = await f.git(f.workspace, "rev-parse", "HEAD^")
+  await f.git(f.workspace, "push", "--force", f.remote, `${initial}:refs/heads/${submitted.branch}`)
+  await f.moveWorker("worker-two")
+  const pending = await f.retire(submitted)
+  assert.equal(pending.state, "CLEANUP_PENDING")
+  assert.equal(pending.pullRequest.verification, "provider_verified")
+  assert.match(pending.cleanupError, /tip changed/)
+  await f.git(f.workspace, "push", f.remote, `${f.revision}:refs/heads/${submitted.branch}`)
+  f.restart()
+  assert.equal((await f.retire(submitted)).state, "CLEANUP_PENDING")
+  assert.equal(f.pushes, 1)
+  assert.equal((await f.finish()).status, "done")
+})
+
+test("retirement recovery rejects mismatched task, immutable approval, allocation, PR registration and provider evidence", async t => {
+  const f = await fixture(t)
+  const submitted = await f.submit()
+  await f.approve(submitted)
+  await f.moveWorker("worker-two")
+  const review = f.children[0], savedReview = structuredClone(review)
+  const savedReceipt = structuredClone(f.receipts.get(review.id))
+  const savedProducts = structuredClone(f.products.get(review.id)), savedPr = structuredClone(f.pr)
+  for (const [label, change] of [
+    ["company", () => { review.companyId = randomUUID() }],
+    ["parent", () => { review.parentId = randomUUID() }],
+    ["creator", () => { review.createdByAgentId = randomUUID() }],
+    ["repository", () => { review.description = review.description.replace(sourceUrl, "https://other.visualstudio.com/Project/_git/Repository") }],
+    ["allocation", () => {
+      review.description = review.description.replace("u/worker-one/", "u/unrelated-worker/")
+      f.receipts.get(review.id).result.branch = submitted.branch.replace("u/worker-one/", "u/unrelated-worker/")
+    }],
+    ["approval", () => { f.receipts.get(review.id).result.outcome = "changes_requested" }],
+    ["reviewed commit", () => { f.receipts.get(review.id).result.reviewedCommit = "a".repeat(40) }],
+    ["registration", () => { f.products.set(review.id, []) }],
+    ["provider", () => { f.setPr({ ...savedPr, targetRefName: "refs/heads/other" }) }],
+  ]) {
+    Object.assign(review, structuredClone(savedReview))
+    f.receipts.set(review.id, structuredClone(savedReceipt))
+    f.products.set(review.id, structuredClone(savedProducts))
+    f.setPr(structuredClone(savedPr))
+    change()
+    await assert.rejects(f.retire(submitted), /does not match|does not belong|invalid assigned-issue child list|receipt|confirmed PR work product|exact reviewed commit and target/, label)
+    assert.deepEqual(await fs.readdir(f.options.storage), [])
+    assert.equal(f.pushes, 1)
+  }
+})
+
 test("an uncertain branch push is reconciled from its saved allocation without a second push", async t => {
   const f = await fixture(t)
   f.losePush()
@@ -389,7 +507,7 @@ test("retirement accepts branches already cleaned by another worker or merged-PR
   await f.complete()
 })
 
-for (const denied of [false, true]) test(`a verified replacement ${denied ? "defers" : "completes"} related branch cleanup across Azure URL aliases without touching the inspector branch`, async t => {
+for (const denied of [false, true]) test(`a verified replacement ${denied ? "defers" : "completes"} cross-worker cleanup across Azure URL aliases without touching the inspector branch`, async t => {
   const f = await fixture(t)
   const original = await f.submit()
   const review = f.children.find(child => child.id === original.reviewIssueId)
@@ -402,6 +520,7 @@ for (const denied of [false, true]) test(`a verified replacement ${denied ? "def
   const replacement = await f.call("submit_branch_for_inspection", { ...f.input, commit: corrected })
   await f.approve(replacement)
   f.products.get(replacement.reviewIssueId)[0].url = `${sourceUrl}/pullrequest/12`
+  await f.moveWorker("worker-two")
   f.denyDeletion(denied)
   const retired = await f.retire(replacement)
   assert.equal(retired.state, denied ? "CLEANUP_PENDING" : "DELETED")
