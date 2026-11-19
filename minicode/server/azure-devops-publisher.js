@@ -32,6 +32,20 @@ function repositoryUrl(value) {
 
 export { repositoryUrl as parseAzureDevOpsRepositoryUrl }
 
+export function azureDevOpsUrlsEqual(left, right) {
+  const canonical = value => {
+    if (typeof value !== "string" || !URL.canParse(value)) return value
+    const url = new URL(value)
+    const legacy = url.hostname.match(/^([a-z0-9][a-z0-9-]*)\.visualstudio\.com$/i)
+    if (legacy) {
+      url.hostname = "dev.azure.com"
+      url.pathname = `/${legacy[1]}${url.pathname.replace(/^\/defaultcollection(?=\/)/i, "")}`
+    }
+    return url.href
+  }
+  return canonical(left) === canonical(right)
+}
+
 export function createAzureDevOpsTokenProvider({ organization, user, repoRoot, env,
   clippyAuth = DEFAULT_CLIPPY_AUTH, run = publicationCommand }) {
   let cached, pending

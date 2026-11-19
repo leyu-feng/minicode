@@ -225,6 +225,52 @@ test("local producer submits an exact commit, reconciles handoff across restart,
   assert.equal(f.pushes, 2)
 })
 
+test("Azure PR URL aliases reconcile registration, deferred cleanup and retries without rewriting the registered link", async t => {
+  const f = await fixture(t)
+  const submitted = await f.submit()
+  await f.approve(submitted)
+  const registered = f.products.get(submitted.reviewIssueId)[0]
+  const legacy = "https://fixture.visualstudio.com/Project/_git/Repository/pullrequest/12"
+  registered.url = `${sourceUrl}/pullrequest/12`
+  const input = { repository: "application", submissionId: submitted.submissionId, url: legacy }
+  f.denyDeletion(true)
+  const pending = await f.call("retire_submission_branch", input)
+  assert.equal(pending.state, "CLEANUP_PENDING")
+  assert.equal(pending.pullRequest.verification, "provider_verified")
+  assert.equal(pending.pullRequest.url, prUrl)
+  await f.complete()
+  f.denyDeletion(false)
+  assert.equal((await f.call("retire_submission_branch", { ...input, url: registered.url })).state, "DELETED")
+  assert.equal((await f.retire(submitted)).state, "DELETED")
+  assert.equal(registered.url, `${sourceUrl}/pullrequest/12`)
+  assert.match(await f.git(f.workspace, "ls-remote", "--heads", f.remote, f.pr.sourceRefName), new RegExp(f.revision))
+  await f.complete()
+})
+
+test("Azure PR URL compatibility never aliases another repository, PR or credential-bearing URL", async t => {
+  const f = await fixture(t)
+  const submitted = await f.submit()
+  await f.approve(submitted)
+  const commands = f.commands.length
+  const legacy = "https://fixture.visualstudio.com/Project/_git/Repository/pullrequest/12"
+  for (const url of [
+    legacy.replace("fixture.visualstudio.com", "other.visualstudio.com"),
+    legacy.replace("/Project/", "/Other/"), legacy.replace("/Repository/", "/Other/"),
+    legacy.replace("visualstudio.com", "visualstudio.com.example.test"),
+    legacy.replace("https:", "http:"), legacy.replace("https://", "https://user:secret@"),
+    legacy.replace(".com/", ".com:444/"), `${legacy}?other=1`, `${legacy}#other`,
+  ]) await assert.rejects(f.call("retire_submission_branch", {
+    repository: "application", submissionId: submitted.submissionId, url,
+  }), /configured repository/)
+  assert.equal(f.commands.length, commands)
+  assert.equal(f.pushes, 1)
+  f.denyDeletion(true)
+  await f.retire(submitted)
+  await assert.rejects(f.call("retire_submission_branch", {
+    repository: "application", submissionId: submitted.submissionId, url: prUrl.replace("/12", "/13"),
+  }), /same original PR/)
+})
+
 test("an uncertain branch push is reconciled from its saved allocation without a second push", async t => {
   const f = await fixture(t)
   f.losePush()
@@ -343,7 +389,7 @@ test("retirement accepts branches already cleaned by another worker or merged-PR
   await f.complete()
 })
 
-for (const denied of [false, true]) test(`a verified replacement ${denied ? "defers" : "completes"} related branch cleanup without touching the inspector branch`, async t => {
+for (const denied of [false, true]) test(`a verified replacement ${denied ? "defers" : "completes"} related branch cleanup across Azure URL aliases without touching the inspector branch`, async t => {
   const f = await fixture(t)
   const original = await f.submit()
   const review = f.children.find(child => child.id === original.reviewIssueId)
@@ -355,6 +401,7 @@ for (const denied of [false, true]) test(`a verified replacement ${denied ? "def
   const corrected = await f.git(f.workspace, "rev-parse", "HEAD")
   const replacement = await f.call("submit_branch_for_inspection", { ...f.input, commit: corrected })
   await f.approve(replacement)
+  f.products.get(replacement.reviewIssueId)[0].url = `${sourceUrl}/pullrequest/12`
   f.denyDeletion(denied)
   const retired = await f.retire(replacement)
   assert.equal(retired.state, denied ? "CLEANUP_PENDING" : "DELETED")

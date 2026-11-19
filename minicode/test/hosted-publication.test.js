@@ -428,6 +428,15 @@ test("producer retirement is repository-bound, fails explicitly and reconciles o
   assert.equal(f.publication.registrationError, null)
 })
 
+test("Hosted retirement retains exact URL matching for Azure DevOps aliases", async t => {
+  const f = fixture(t)
+  f.repositories[0].publication.pullRequestUrlTemplate = "https://dev.azure.com/fixture/Project/_git/Repository/pullrequest/{number}"
+  await assert.rejects(f.tool("retire_submission_branch").execute({
+    repository: "main", submissionId, url: "https://fixture.visualstudio.com/Project/_git/Repository/pullrequest/12",
+  }), /configured repository/)
+  assert.equal(f.publications.length, 0)
+})
+
 test("Devbox deferred retirement cannot bypass independent provider verification", async t => {
   const f = fixture(t)
   const url = "https://code.example.test/project/_git/main/pullrequest/12"

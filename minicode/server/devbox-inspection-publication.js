@@ -1,7 +1,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
-import { createAzureDevOpsPublisher, parseAzureDevOpsRepositoryUrl } from "./azure-devops-publisher.js"
+import { azureDevOpsUrlsEqual, createAzureDevOpsPublisher, parseAzureDevOpsRepositoryUrl } from "./azure-devops-publisher.js"
 import { assertInspectionReceipt, createHostedPublicationTool, inspectionBindings, paperclipApi } from "./hosted-publication.js"
 import { createPaperclipTaskTools } from "./paperclip-task-tools.js"
 import { publicationBranch, publicationCommand, publicationEnvironment, validatePublicationInput } from "./pull-request-publisher.js"
@@ -149,7 +149,7 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
     assertInspectionReceipt(await api(`/issues/${encodeURIComponent(review.id)}/inspection-result`, signal),
       { ...expected, outcome: "approved" })
     const products = await api(`/issues/${encodeURIComponent(review.id)}/work-products`, signal)
-    if (!Array.isArray(products) || products.filter(product => product.type === "pull_request" && product.url === url
+    if (!Array.isArray(products) || products.filter(product => product.type === "pull_request" && azureDevOpsUrlsEqual(product.url, url)
       && product.metadata?.submissionId === accepted.submissionId && product.metadata?.sourceAgentId === task.agent.id
       && product.metadata?.inspectionIssueId === review.id && product.metadata?.reviewedCommit === accepted.commit).length !== 1)
       throw new Error("Retirement requires the inspector's confirmed PR work product")
@@ -269,7 +269,7 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
   }
   let pending = Promise.resolve()
   const managed = createHostedPublicationTool({ repositories: writable, task, apiUrl, inspectorValidationGuidance,
-    devboxBranchCleanup: true,
+    devboxBranchCleanup: true, pullRequestUrlsEqual: azureDevOpsUrlsEqual,
     request: (...args) => {
       const next = pending.then(() => execute(...args), () => execute(...args))
       pending = next

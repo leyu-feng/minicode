@@ -292,7 +292,7 @@ export function createPrInspectorPostback({ task, apiUrl, separateBranch = false
 }
 
 export function createHostedPublicationTool({ repositories, task, apiUrl, request, inspectorValidationGuidance,
-  devboxBranchCleanup = false }) {
+  devboxBranchCleanup = false, pullRequestUrlsEqual = (left, right) => left === right }) {
   const writable = repositories.filter(repo => !repo.readOnly)
   const aliases = writable.map(repo => repo.alias ?? repo.name)
   const issueId = task.context.taskId ?? task.context.issueId
@@ -307,7 +307,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
   const pendingSubmissions = new Set()
   const retirementUrls = new Map()
   const deferredCleanup = (receipt, url) => devboxBranchCleanup && receipt?.state === "CLEANUP_PENDING"
-    && receipt.pullRequest?.verification === "provider_verified" && receipt.pullRequest.url === url
+    && receipt.pullRequest?.verification === "provider_verified" && pullRequestUrlsEqual(receipt.pullRequest.url, url)
     && /^[a-f0-9]{40}$/.test(receipt.pullRequest.remoteCommit ?? "")
     && typeof receipt.cleanupError === "string" && receipt.cleanupError.trim().length > 0
   const repository = input => {
@@ -349,7 +349,7 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
     const accepted = await readReview(replacement[0])
     const products = await paperclipApi(task, apiUrl, `/issues/${encodeURIComponent(accepted.id)}/work-products`, "GET", undefined, options?.signal)
     if (!Array.isArray(products)) throw new Error("Paperclip returned an invalid replacement work-product list")
-    const matching = products.filter(product => product.type === "pull_request" && product.url === input.url
+    const matching = products.filter(product => product.type === "pull_request" && pullRequestUrlsEqual(product.url, input.url)
       && product.metadata?.submissionId === input.submissionId && product.metadata?.sourceAgentId === task.agent.id
       && product.metadata?.inspectionIssueId === accepted.id
       && product.metadata?.reviewedCommit === handoffValue(accepted, "Remote commit"))
@@ -525,10 +525,10 @@ export function createHostedPublicationTool({ repositories, task, apiUrl, reques
         const url = new URL(input.url)
         const number = Number(url.pathname.split("/").at(-1))
         if (!Number.isSafeInteger(number) || number <= 0 || number > 2147483647
-          || url.href !== repo.publication.pullRequestUrlTemplate.replace("{number}", String(number)))
+          || !pullRequestUrlsEqual(url.href, repo.publication.pullRequestUrlTemplate.replace("{number}", String(number))))
           throw new Error("Submission retirement requires a PR link in the configured repository")
         const key = `retire:${input.submissionId}`
-        if (retirementUrls.has(input.submissionId) && retirementUrls.get(input.submissionId) !== url.href)
+        if (retirementUrls.has(input.submissionId) && !pullRequestUrlsEqual(retirementUrls.get(input.submissionId), url.href))
           throw new Error("Retry submission retirement with the same original PR URL")
         retirementUrls.set(input.submissionId, url.href)
         handoffFailures.set(key, `Submission ${input.submissionId} cleanup is unconfirmed. Retry the same PR link and verify provider state.`)
