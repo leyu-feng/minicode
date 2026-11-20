@@ -180,10 +180,10 @@ export async function createAzureDevOpsPublisher({ repoRoot, organization, proje
     const info = await readRepository(signal)
     if (!same(info.id, bound.id) || !same(info.project.id, bound.project.id))
       throw new Error("Azure DevOps repository changed; restart the worker")
-    return { repositoryId: bound.id, projectId: bound.project.id }
+    return { repositoryId: bound.id, projectId: bound.project.id, defaultBranch: info.defaultBranch }
   }
   publisher.readPullRequest = async (number, signal) => {
-    await publisher.verifyRepository(signal)
+    const { defaultBranch } = await publisher.verifyRepository(signal)
     const pr = await api(`/pullrequests/${number}`, { signal })
     if (pr?.pullRequestId !== number || !["active", "completed"].includes(pr.status)
       || !same(pr.repository?.id, bound.id) || !same(pr.repository?.project?.id, bound.project.id)
@@ -197,7 +197,8 @@ export async function createAzureDevOpsPublisher({ repoRoot, organization, proje
       throw new Error("Azure DevOps did not confirm the PR's full commit message")
     return { verification: "provider_verified", number, state: pr.status,
       url: publisher.pullRequestUrl(number), branch: pr.sourceRefName.slice("refs/heads/".length),
-      target: pr.targetRefName, remoteCommit: commit.commitId, commitMessage: commit.comment }
+      target: pr.targetRefName, remoteCommit: commit.commitId, commitMessage: commit.comment,
+      isDraft: pr.isDraft, autoCompleteSet: Boolean(pr.autoCompleteSetBy), defaultBranch }
   }
   return publisher
 }

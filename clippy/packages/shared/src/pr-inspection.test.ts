@@ -17,6 +17,7 @@ describe("inspection result input", () => {
     { submissionId: "unbound-submission" }, { body: "" }, { body: "x".repeat(32001) },
     { inspectorAgentId: "11111111-1111-4111-8111-111111111111" },
     { runId: "11111111-1111-4111-8111-111111111111" },
+    { revision: { branch: "u/another-worker/feature", expectedCommit: "c".repeat(40) } },
   ])("rejects unsupported, ambiguous or caller-forged fields: %j", (override) => {
     expect(recordPrInspectionResultSchema.safeParse({ ...input, ...override }).success).toBe(false);
   });

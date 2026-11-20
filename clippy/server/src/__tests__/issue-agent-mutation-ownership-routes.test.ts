@@ -74,7 +74,8 @@ const mockWorkProductService = vi.hoisted(() => ({
   remove: vi.fn(),
   update: vi.fn(),
 }));
-const mockPrPostbackAllowed = vi.hoisted(() => vi.fn(async (_companyId: string, _agentId: string) => {}));
+const mockPrPostbackAllowed = vi.hoisted(() => vi.fn(async (_companyId: string, _agentId: string, _issueId: string, _publication?: unknown) => {}));
+const mockInspectionResults = vi.hoisted(() => ({ get: vi.fn(), requireApproved: vi.fn() }));
 
 const mockStorageService = vi.hoisted(() => ({
   provider: "local_disk",
@@ -199,6 +200,9 @@ function registerRouteMocks() {
   }));
   vi.doMock("../services/pr-inspector.js", () => ({
     prInspectorService: () => ({ assertPrPostbackAllowed: mockPrPostbackAllowed }),
+  }));
+  vi.doMock("../services/pr-inspection-results.js", () => ({
+    prInspectionResultService: () => mockInspectionResults,
   }));
 
   vi.doMock("../services/external-objects.js", () => ({
@@ -474,6 +478,8 @@ describe("agent issue mutation checkout ownership", () => {
     routeModules.value.__clearIssueListResponseCacheForTests();
     vi.clearAllMocks();
     mockPrPostbackAllowed.mockReset().mockResolvedValue(undefined);
+    mockInspectionResults.get.mockReset().mockResolvedValue(null);
+    mockInspectionResults.requireApproved.mockReset();
     mockIssueTreeControlService.getActivePauseHoldGate.mockReset().mockResolvedValue(null);
     mockChatRunRetries.prepareFailedChatRunRetry.mockReset();
     mockChatRunRetries.processFailedChatRunRetry.mockReset();
@@ -1184,13 +1190,28 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  it("revalidates publication approval for the current owning run without elevating ordinary receipt reads", async () => {
+    mockInspectionResults.requireApproved.mockResolvedValue({ id: "checked-approval" });
+    const app = createApp(ownerActor());
+    await request(app).get(`/api/issues/${issueId}/inspection-result?requireApproved=true`).expect(200, { id: "checked-approval" });
+    expect(mockInspectionResults.requireApproved).toHaveBeenCalledWith(companyId, issueId, ownerAgentId, ownerRunId);
+    expect(mockInspectionResults.get).not.toHaveBeenCalled();
+    mockInspectionResults.requireApproved.mockClear();
+    await request(createApp(peerActor())).get(`/api/issues/${issueId}/inspection-result?requireApproved=true`).expect(409);
+    await request(createApp(boardActor())).get(`/api/issues/${issueId}/inspection-result?requireApproved=true`).expect(403);
+    expect(mockInspectionResults.requireApproved).not.toHaveBeenCalled();
+    await request(app).get(`/api/issues/${issueId}/inspection-result`).expect(200);
+    expect(mockInspectionResults.get).toHaveBeenCalledWith(companyId, issueId);
+  });
+
   it("rejects an ordinary agent's PR postback before recording its link", async () => {
     mockPrPostbackAllowed.mockRejectedValue(new HttpError(403, "Only this company's PR Inspector may record a PR"));
     await request(createApp(ownerActor())).post(`/api/issues/${issueId}/work-products`).send({
       type: "pull_request", provider: "github", title: "Externally created PR",
       url: "https://github.com/example/project/pull/12",
     }).expect(403);
-    expect(mockPrPostbackAllowed).toHaveBeenCalledWith(companyId, ownerAgentId);
+    expect(mockPrPostbackAllowed).toHaveBeenCalledWith(companyId, ownerAgentId, issueId,
+      expect.objectContaining({ type: "pull_request", url: "https://github.com/example/project/pull/12" }));
     expect(mockWorkProductService.createForIssue).not.toHaveBeenCalled();
   });
 
@@ -1199,7 +1220,8 @@ describe("agent issue mutation checkout ownership", () => {
     await request(createApp(ownerActor())).patch("/api/work-products/product-1").send({
       type: "pull_request", provider: "github", url: "https://github.com/example/project/pull/12",
     }).expect(403);
-    expect(mockPrPostbackAllowed).toHaveBeenCalledWith(companyId, ownerAgentId);
+    expect(mockPrPostbackAllowed).toHaveBeenCalledWith(companyId, ownerAgentId, issueId,
+      expect.objectContaining({ type: "pull_request", url: "https://github.com/example/project/pull/12" }));
     expect(mockWorkProductService.update).not.toHaveBeenCalled();
   });
 

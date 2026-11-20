@@ -147,7 +147,7 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
       || review.assigneeAgentId !== task.prPolicy.inspectorAgentId || review.createdByAgentId !== task.agent.id
       || Object.entries(expected).some(([key, value]) => actual[key] !== value))
       throw new Error("Inspection review does not match the saved producer submission")
-    assertInspectionReceipt(await api(`/issues/${encodeURIComponent(review.id)}/inspection-result`, signal),
+    const receipt = assertInspectionReceipt(await api(`/issues/${encodeURIComponent(review.id)}/inspection-result`, signal),
       { ...actual, outcome })
     if (outcome === "changes_requested") {
       const products = await api(`/issues/${encodeURIComponent(review.id)}/work-products`, signal)
@@ -156,7 +156,7 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
         || !Array.isArray(products) || products.some(product => product.type === "pull_request"))
         throw new Error("Retain the earlier branch until its stopped inspection confirms rejection without a PR")
     }
-    return { review, bindings: actual }
+    return { review, bindings: actual, receipt }
   }
   const retirementRecord = async (repo, submissionId, outcome, signal) => {
     const saved = await read(submissionId)
@@ -246,19 +246,30 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
       throw new Error("All 11 worker publication branch names are occupied")
     }
     if (input.mode !== "delete_submitted_branch") throw new Error("Local producers may submit and retire branches, never create PRs")
-    const original = await retirementRecord(repo, input.submissionId,
-      input.supersededBySubmissionId ? "changes_requested" : "approved", signal)
+    const replacement = input.supersededBySubmissionId
+      ? await retirementRecord(repo, input.supersededBySubmissionId, "approved", signal) : undefined
+    if (replacement && !replacement.inspection)
+      replacement.inspection = await inspectionReview(repo, input.supersededBySubmissionId, "approved", signal)
+    const revision = replacement?.inspection.receipt.result.revision
+    const prior = revision ? await api(`/issues/${encodeURIComponent(revision.previousInspectionIssueId)}`, signal) : undefined
+    const publishedRevision = prior && inspectionBindings(prior, task.agent.companyId, task.prPolicy.inspectorAgentId).submissionId === input.submissionId
+    const outcome = input.supersededBySubmissionId && !publishedRevision ? "changes_requested" : "approved"
+    const original = await retirementRecord(repo, input.submissionId, outcome, signal)
+    if (input.supersededBySubmissionId) {
+      original.inspection ??= await inspectionReview(repo, input.submissionId, outcome, signal)
+      if (publishedRevision && (original.inspection.review.id !== revision.previousInspectionIssueId
+        || original.inspection.receipt.id !== revision.previousReceiptId || original.record.commit !== revision.expectedCommit))
+        throw new Error("Published submission retirement requires the fresh revision's exact previous approval")
+    }
     const record = original.record
     if (record.state === "ALLOCATED") throw new Error("Reconcile the submitted branch before retirement")
-    const replacement = input.supersededBySubmissionId
-      ? await retirementRecord(repo, input.supersededBySubmissionId, "approved", signal) : original
-    const accepted = replacement.record
+    const accepted = (replacement ?? original).record
     if (!["SUBMITTED", "DELETING", "CLEANUP_PENDING", "DELETED"].includes(accepted.state)
       || !Number.isSafeInteger(input.pullRequestNumber) || input.pullRequestNumber <= 0
       || (record.pullRequestNumber && record.pullRequestNumber !== input.pullRequestNumber))
       throw new Error("Retirement requires the original confirmed replacement PR")
     const url = repo.publication.pullRequestUrlTemplate.replace("{number}", String(input.pullRequestNumber))
-    await approvedReview(repo, accepted, url, signal, replacement.inspection)
+    await approvedReview(repo, accepted, url, signal, (replacement ?? original).inspection)
     const pr = await client.readPullRequest(input.pullRequestNumber, signal)
     if (pr.url !== url || pr.target !== record.target || pr.remoteCommit !== accepted.commit
       || [record.branch, accepted.branch].includes(pr.branch)
@@ -301,7 +312,7 @@ export function createDevboxInspectionPublication({ repositories, storage, worke
   }
   let pending = Promise.resolve()
   const managed = createHostedPublicationTool({ repositories: writable, task, apiUrl, inspectorValidationGuidance,
-    devboxBranchCleanup: true, pullRequestUrlsEqual: azureDevOpsUrlsEqual,
+    devboxBranchCleanup: true, allowPrRevision: true, pullRequestUrlsEqual: azureDevOpsUrlsEqual,
     request: (...args) => {
       const next = pending.then(() => execute(...args), () => execute(...args))
       pending = next

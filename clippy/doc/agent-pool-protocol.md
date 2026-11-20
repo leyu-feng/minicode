@@ -164,6 +164,26 @@ decision and its server-derived bindings. Authorized readers use GET on that sam
 endpoint; a missing receipt returns null.
 Receipt bodies are human-readable findings, not authorization inputs.
 
+For publication preflight, `GET` on this endpoint with `?requireApproved=true`
+requires the current active, unpaused, checkout-owning inspector run. It revalidates
+the immutable approved receipt and its original source/publication bindings; an
+ordinary authorized receipt read does not grant publication authority.
+
+Post-publication producer revisions receive a **new** independent inspection.
+Its receipt's optional server-derived `revision` contains
+`{previousInspectionIssueId, previousReceiptId, workProductId, provider, url, branch, expectedCommit}`.
+The previous same-company/source/producer/repository approval and inspector-created
+PR work product establish that binding, including on legacy handoffs without a
+revision header. It is not accepted in the result POST input and never rewrites
+the original receipt. Board-only PR associations cannot confer this authority.
+Revision inspection dispatch requires `pr_inspection_revision_v1`; older workers
+remain eligible for ordinary create-only inspection, not existing-PR revisions.
+The Devbox `update_inspected_pull_request` tool takes no identity overrides and
+advances only this original active non-draft PR/ref under the exact-old-SHA lease,
+provider-verifying the new head before postback. Changed bindings, target, draft
+or auto-complete state fail closed with no duplicate-PR fallback. New-head CI and
+normal review/human gates remain required; historical results do not transfer.
+
 The shared `record_inspection_result` tool persists the receipt, publishes findings
 on the review, and returns requested changes to the producer's direct parent.
 Record `approved` before creating/posting a PR, or `changes_requested` before

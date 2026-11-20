@@ -727,6 +727,42 @@ the provider-verified PR and an explicit `cleanupError`, not a deletion claim;
 its durable local receipt allows completion and later reconciliation. Already
 absent submission branches are treated as deleted after the same verification.
 
+#### Existing PR revisions
+
+After publication, corrections remain with the original producer. An operator
+must reopen a completed source task through the normal controls; comments do not
+reopen terminal tasks, and execution holds are never cleared by publication.
+`submit_branch_for_inspection` checks the source before any branch/review writes
+and finds its previous published inspection. The new review is bound to the same
+PR, not a duplicate. `revisionOfInspectionIssueId` can confirm the expected previous
+inspection when supplied. Unsupported publishers fail before branch publication.
+
+The inspector compares the complete original and corrected trees, independently
+runs the required checks at the new exact producer SHA, and records a **new**
+immutable receipt. The server derives its optional `revision` binding from the
+same-company/source/producer/repository's original approved receipt and
+inspector-published PR work product. It also recognizes existing published
+inspections for older review handoffs without a revision header. Historical
+approvals remain unchanged; callers cannot supply revision authority in findings.
+Revision assignments require worker capability `pr_inspection_revision_v1`.
+
+Only then does `update_inspected_pull_request` advance the original inspector
+branch with its exact expected-old-SHA lease, including when a different Devbox
+worker now owns the inspection. It accepts no PR, repository, branch or SHA
+overrides. Repository identity, active non-draft status, no auto-complete, configured
+target and both provider/Git source tips are checked before mutation. The new tip
+is provider-verified before the fresh review is registered and its producer is
+notified. Uncertain pushes/postbacks reconcile that same immutable intent; changed
+bindings or leases block rather than creating another PR. Ordinary new-PR branch
+creation remains create-only, and the separate diagnostic-draft exception is
+unchanged.
+
+Fresh CI and normal review/human policies must cover the **new head**. Old-head
+success is not evidence for the revision. The producer provider-verifies the same
+PR through `retire_submission_branch`, which retires only unchanged related
+submission branches and requests superseded-review closure without rewriting old
+verdicts. The PR source branch remains intact; no merge or auto-complete is enabled.
+
 #### Devbox branch cleanup
 
 This general developer/inspector exception applies only when both roles run on

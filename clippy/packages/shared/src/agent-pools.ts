@@ -20,6 +20,7 @@ export const AGENT_POOL_HOSTED_WORKSPACE = "hosted_workspace_v2";
 export const AGENT_POOL_GITHUB_CREDENTIAL = "github_credential_v1";
 export const AGENT_POOL_GIT_IDENTITY = "git_identity_v1";
 export const AGENT_POOL_PR_INSPECTOR = "pr_inspector_v1";
+export const AGENT_POOL_PR_REVISION = "pr_inspection_revision_v1";
 export const agentPoolPrPolicySchema = z.object({
   inspectorAgentId: z.string().uuid().nullable(),
   isInspector: z.boolean(),

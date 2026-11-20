@@ -5,6 +5,7 @@ import path from "node:path"
 import { randomUUID } from "node:crypto"
 import test from "node:test"
 import { createDevboxInspectionPublication } from "../server/devbox-inspection-publication.js"
+import { createDevboxPrInspectorPublication } from "../server/devbox-pr-revision.js"
 import { createPaperclipTaskTools } from "../server/paperclip-task-tools.js"
 import { publicationCommand } from "../server/pull-request-publisher.js"
 
@@ -42,8 +43,10 @@ async function fixture(t) {
     status: "in_progress", executionRunId: task.runId }
   const children = [], comments = [], receipts = new Map(), products = new Map(), commands = []
   const reviewComments = new Map()
+  const inspectorTasks = new Map()
+  let failRegistration = false, beforeRevisionPush, defaultBranch = "refs/heads/main"
   let liveInspector = task.prPolicy.inspectorAgentId, failHandoff = false, losePush = false, pushes = 0, conflict = false, denyDeletion = false
-  let pr = { pullRequestId: 12, status: "active",
+  let pr = { pullRequestId: 12, status: "active", isDraft: false,
     repository: { id: repositoryId, project: { id: projectId } },
     sourceRefName: "refs/heads/u/inspector-one/feature", targetRefName: "refs/heads/main",
     lastMergeSourceCommit: { commitId: revision } }
@@ -62,8 +65,15 @@ async function fixture(t) {
         error.refConflict = true
         throw error
       }
+      if (beforeRevisionPush && args.at(-1).endsWith(`:${pr.sourceRefName}`)) {
+        const action = beforeRevisionPush
+        beforeRevisionPush = undefined
+        await action()
+      }
     }
     const output = await publicationCommand(file, args.map(arg => arg === sourceUrl ? remote : arg), options)
+    if (args.includes("push") && args.at(-1).endsWith(`:${pr.sourceRefName}`))
+      pr = { ...pr, lastMergeSourceCommit: { commitId: args.at(-1).split(":")[0] } }
     if (losePush && args.includes("push")) {
       losePush = false
       throw new Error("Transport failed after push; outcome unknown")
@@ -80,12 +90,13 @@ async function fixture(t) {
       return Response.json({ commitId, comment: await git(workspace, "show", "-s", "--format=%B", commitId) })
     }
     return Response.json({ id: repositoryId, name: "Repository",
-      project: { id: projectId, name: "Project" }, remoteUrl: sourceUrl, defaultBranch: "refs/heads/main" })
+      project: { id: projectId, name: "Project" }, remoteUrl: sourceUrl, defaultBranch })
   }
   t.mock.method(globalThis, "fetch", async (value, options) => {
     const url = new URL(value), route = url.pathname, body = options.body ? JSON.parse(options.body) : undefined
     assert.equal(options.headers.Authorization, `Bearer ${task.authToken}`)
-    assert.equal(options.headers["X-Paperclip-Run-Id"], task.runId)
+    const actor = inspectorTasks.get(options.headers["X-Paperclip-Run-Id"]) ?? task
+    assert.equal(options.headers["X-Paperclip-Run-Id"], actor.runId)
     if (route.endsWith("/pr-inspector")) return Response.json({ agentId: liveInspector })
     if (route.endsWith(`/issues/${issue.id}`)) {
       if (options.method === "PATCH") {
@@ -94,7 +105,14 @@ async function fixture(t) {
       }
       return Response.json(issue)
     }
-    if (route.endsWith(`/issues/${issue.id}/comments`)) return Response.json(comments)
+    if (route.endsWith(`/issues/${issue.id}/comments`)) {
+      if (options.method === "POST") {
+        const comment = { ...body, id: randomUUID(), issueId: issue.id, authorAgentId: actor.agent.id }
+        comments.push(comment)
+        return Response.json(comment)
+      }
+      return Response.json(comments)
+    }
     if (route.endsWith("/agents"))
       return Response.json([{ id: task.prPolicy.inspectorAgentId, companyId: task.agent.companyId, name: "Inspector", status: "idle" }])
     if (route.endsWith(`/companies/${task.agent.companyId}/issues`)) {
@@ -110,14 +128,24 @@ async function fixture(t) {
     if (route.endsWith("/comments")) {
       const childId = route.split("/").at(-2), saved = reviewComments.get(childId) ?? []
       if (options.method === "POST") {
-        saved.push({ ...body, id: randomUUID(), issueId: childId, authorAgentId: task.agent.id })
+        saved.push({ ...body, id: randomUUID(), issueId: childId, authorAgentId: actor.agent.id })
         reviewComments.set(childId, saved)
         return Response.json(saved.at(-1))
       }
       return Response.json(saved)
     }
     if (route.endsWith("/inspection-result")) return Response.json(receipts.get(route.split("/").at(-2)) ?? null)
-    if (route.endsWith("/work-products")) return Response.json(products.get(route.split("/").at(-2)) ?? [])
+    if (route.endsWith("/work-products")) {
+      const target = route.split("/").at(-2), saved = products.get(target) ?? []
+      if (options.method === "POST") {
+        if (failRegistration) return new Response("Registration failed", { status: 503 })
+        const product = { ...body, id: randomUUID(), companyId: task.agent.companyId, issueId: target, createdByRunId: actor.runId }
+        saved.push(product)
+        products.set(target, saved)
+        return Response.json(product)
+      }
+      return Response.json(saved)
+    }
     throw new Error(`Unexpected Paperclip route ${route}`)
   })
   const options = { repositories: [
@@ -167,17 +195,154 @@ async function fixture(t) {
     setInspector(value) { liveInspector = value }, failHandoff(value) { failHandoff = value },
     losePush() { losePush = true }, conflict(value) { conflict = value },
     denyDeletion(value) { denyDeletion = value },
+    failRegistration(value) { failRegistration = value },
+    setDefaultBranch(value) { defaultBranch = value },
+    async changeSource() {
+      await fs.writeFile(path.join(workspace, "code.txt"), "corrected cumulative feature")
+      await commit(workspace)
+      const tree = await git(workspace, "rev-parse", "HEAD^{tree}")
+      const revision = await git(workspace, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+        "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", "main", "-m", "Producer-confirmed cumulative correction")
+      await git(workspace, "reset", "--keep", revision)
+      return revision
+    },
+    async raceRevision() {
+      const foreign = await git(workspace, "rev-parse", "main")
+      beforeRevisionPush = async () => {
+        const old = pr.lastMergeSourceCommit.commitId
+        await git(workspace, "push", `--force-with-lease=${pr.sourceRefName}:${old}`, remote, `${foreign}:${pr.sourceRefName}`)
+        pr = { ...pr, lastMergeSourceCommit: { commitId: foreign } }
+      }
+      return foreign
+    },
+    async inspector(submission, previous, worker = "inspector-two") {
+      const inspectorTask = { ...task, runId: randomUUID(), context: { issueId: submission.reviewIssueId },
+        agent: { ...task.agent, id: task.prPolicy.inspectorAgentId, name: "Inspector" },
+        prPolicy: { inspectorAgentId: task.prPolicy.inspectorAgentId, isInspector: true } }
+      inspectorTasks.set(inspectorTask.runId, inspectorTask)
+      const review = children.find(child => child.id === submission.reviewIssueId)
+      Object.assign(review, { status: "in_progress", executionRunId: inspectorTask.runId, checkoutRunId: inspectorTask.runId })
+      recordInspection(submission, "approved")
+      const approval = receipts.get(review.id), prior = receipts.get(previous.reviewIssueId)
+      approval.result.revision = { previousInspectionIssueId: previous.reviewIssueId,
+        previousReceiptId: prior.id, workProductId: products.get(previous.reviewIssueId)[0].id,
+        provider: "azure_devops", url: prUrl, branch: pr.sourceRefName.slice("refs/heads/".length),
+        expectedCommit: previous.remoteCommit }
+      const checkout = path.join(root, worker), inspectorStorage = path.join(root, ".workers", worker, "publications")
+      await git(source, "worktree", "add", "-b", `${worker}-local`, checkout, submission.remoteCommit)
+      await fs.mkdir(path.dirname(inspectorStorage), { recursive: true })
+      const publication = createDevboxPrInspectorPublication({ ...options, task: inspectorTask, storage: inspectorStorage,
+        workerName: worker, repositories: [{ ...options.repositories[0], path: checkout }] })
+      return { publication, approval, review, checkout,
+        update: () => publication.tools.find(tool => tool.name === "update_inspected_pull_request").execute({}) }
+    },
     get pushes() { return pushes }, get pr() { return pr }, setPr(value) { pr = value },
     async approve(submission) {
       const review = children.find(child => child.id === submission.reviewIssueId)
       recordInspection(submission, "approved")
-      products.set(review.id, [{ type: "pull_request", url: prUrl, metadata: { submissionId: submission.submissionId,
-        sourceAgentId: task.agent.id, inspectionIssueId: review.id, reviewedCommit: submission.remoteCommit } }])
+      products.set(review.id, [{ id: randomUUID(), issueId: review.id, provider: "azure_devops", type: "pull_request", url: prUrl,
+        createdByRunId: receipts.get(review.id).result.runId,
+        metadata: { publicationMode: "external", submissionId: submission.submissionId, sourceBranch: submission.branch,
+          sourceAgentId: task.agent.id, inspectorAgentId: task.prPolicy.inspectorAgentId,
+          branch: pr.sourceRefName.slice("refs/heads/".length), inspectionIssueId: review.id, reviewedCommit: submission.remoteCommit } }])
       pr = { ...pr, lastMergeSourceCommit: { commitId: submission.remoteCommit } }
       await git(workspace, "push", remote, `${submission.remoteCommit}:${pr.sourceRefName}`)
     },
   }
 }
+
+async function preparedRevision(t) {
+  const f = await fixture(t)
+  const original = await f.submit()
+  await f.approve(original)
+  await f.retire(original)
+  await f.finish()
+  const priorReview = f.children.find(child => child.id === original.reviewIssueId)
+  Object.assign(priorReview, { status: "blocked", executionRunId: null, checkoutRunId: null,
+    unblockDescriptor: { owner: { agentId: f.task.prPolicy.inspectorAgentId }, action: "Await source correction" } })
+  const originalApproval = structuredClone(f.receipts.get(original.reviewIssueId))
+  f.issue.status = "in_progress"
+  f.task.runId = randomUUID()
+  f.issue.executionRunId = f.task.runId
+  f.restart()
+  const corrected = await f.changeSource()
+  const revision = await f.call("submit_branch_for_inspection", { ...f.input, commit: corrected })
+  const inspector = await f.inspector(revision, original)
+  return { f, original, originalApproval, corrected, revision, inspector }
+}
+
+test("an independently approved revision updates the same PR across workers and reconciles uncertain push and failed postback", async t => {
+  const { f, original, originalApproval, corrected, revision, inspector } = await preparedRevision(t)
+  assert.match(inspector.review.description, new RegExp(`Revision of inspection: ${original.reviewIssueId}`))
+  assert.match(inspector.review.description, /Never create a new PR or replacement PR branch/)
+  assert.match(inspector.review.description, /update_inspected_pull_request/)
+  const before = f.pushes
+  f.losePush()
+  await assert.rejects(inspector.update(), /Transport failed after push/)
+  assert.equal(f.pushes, before + 1)
+  f.failRegistration(true)
+  await assert.rejects(inspector.update(), /HTTP 503/)
+  assert.equal(f.pushes, before + 1)
+  assert.equal(await f.git(f.workspace, "rev-parse", "HEAD"), corrected)
+  assert.equal(f.pr.pullRequestId, 12)
+  assert.equal(f.pr.lastMergeSourceCommit.commitId, corrected)
+  assert.throws(() => inspector.publication.assertCanComplete(), /postback is incomplete|unconfirmed/)
+  f.failRegistration(false)
+  const receipt = await inspector.update()
+  assert.equal(receipt.url, prUrl)
+  assert.equal(receipt.branch, "u/inspector-one/feature")
+  assert.equal(receipt.verification, "provider_verified")
+  assert.equal(receipt.reused, true)
+  assert.equal(receipt.requiresFreshHeadChecks, true)
+  assert.equal(f.pushes, before + 1)
+  assert.equal(f.products.get(revision.reviewIssueId).length, 1)
+  assert.equal(f.products.get(revision.reviewIssueId)[0].metadata.providerVerifiedCommit, corrected)
+  assert.deepEqual(f.receipts.get(original.reviewIssueId), originalApproval)
+  assert.ok(f.commands.some(args => args.includes(`--force-with-lease=refs/heads/u/inspector-one/feature:${original.remoteCommit}`)))
+  await inspector.update()
+  inspector.publication.assertCanComplete()
+  assert.equal(f.products.get(revision.reviewIssueId).length, 1)
+  assert.equal(f.pushes, before + 1)
+  await f.retire(revision)
+  await f.complete()
+  assert.match(f.reviewComments.get(original.reviewIssueId)[0].body, /previously published.*superseded/)
+  assert.match(f.reviewComments.get(original.reviewIssueId)[0].body, /original immutable approval remains historical/)
+  assert.equal((await f.git(f.workspace, "ls-remote", "--heads", f.remote, f.pr.sourceRefName)).split(/\s/)[0], corrected)
+  assert.deepEqual(f.receipts.get(original.reviewIssueId), originalApproval)
+})
+
+test("a real concurrent source change loses the original revision lease without overwriting it or creating another PR", async t => {
+  const { f, originalApproval, original, revision, inspector } = await preparedRevision(t)
+  const before = f.pushes, foreign = await f.raceRevision()
+  await assert.rejects(inspector.update(), /failed|stale|rejected/)
+  assert.equal(f.pushes, before + 1)
+  assert.equal((await f.git(f.workspace, "ls-remote", "--heads", f.remote, f.pr.sourceRefName)).split(/\s/)[0], foreign)
+  await assert.rejects(inspector.update(), /lease changed/)
+  assert.equal(f.pushes, before + 1)
+  assert.equal(f.products.get(revision.reviewIssueId), undefined)
+  assert.equal(f.pr.pullRequestId, 12)
+  assert.deepEqual(f.receipts.get(original.reviewIssueId), originalApproval)
+})
+
+test("revision publication rejects missing approval, draft or auto-complete PRs, retargeting and caller overrides before pushing", async t => {
+  const { f, inspector, revision } = await preparedRevision(t)
+  const before = f.pushes, validPr = f.pr
+  f.receipts.delete(revision.reviewIssueId)
+  await assert.rejects(inspector.update(), /receipt is required/)
+  f.receipts.set(revision.reviewIssueId, inspector.approval)
+  for (const change of [{ isDraft: true }, { autoCompleteSetBy: { id: randomUUID() } }, { targetRefName: "refs/heads/other" }]) {
+    f.setPr({ ...validPr, ...change })
+    await assert.rejects(inspector.update(), /original active non-draft PR/)
+  }
+  f.setPr(validPr)
+  f.setDefaultBranch(validPr.sourceRefName)
+  await assert.rejects(inspector.update(), /original active non-draft PR/)
+  f.setDefaultBranch("refs/heads/main")
+  const update = inspector.publication.tools.find(tool => tool.name === "update_inspected_pull_request")
+  await assert.rejects(update.execute({ branch: "u/inspector-one/other" }), /no.*overrides/)
+  assert.equal(f.pushes, before)
+  assert.equal(f.products.get(revision.reviewIssueId), undefined)
+})
 
 test("GitHub workspace repositories do not block Azure inspection or gain publication rights", async t => {
   const f = await fixture(t)

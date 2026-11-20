@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { and, eq, gt, inArray, isNotNull, isNull, ne, notInArray, sql } from "drizzle-orm";
-import { agents, agentPools, agentPoolWorkers, companies, heartbeatRuns, issues, type Db } from "@paperclipai/db";
+import { agents, agentPools, agentPoolWorkers, companies, heartbeatRuns, issues, issueWorkProducts, prInspectionResults, type Db } from "@paperclipai/db";
 import { AGENT_POOL_CLAUDECODE_DEFAULT_MODEL, agentPoolNameSchema, agentPoolHarnessIdSchema, agentPoolHarnessModelSchema,
   agentPoolRequiresGitHubLogin, hostedAgentRepositoriesSchema, type AgentPool, type HostedWorkerRepository,
   type hostedAgentPoolWorkerSchema, type hostedAgentPoolSlotsSchema } from "@paperclipai/shared";
@@ -373,6 +373,29 @@ export function agentPoolService(db: Db) {
         .where(and(eq(agentPools.companyId, ctx.agent.companyId), eq(agentPools.name, name)));
       if (prPolicy.isInspector && (pool?.type !== "devbox" || harness !== "default"))
         throw conflict("The PR Inspector requires the default Devbox harness.");
+      ctx.context.paperclipPrRevisionRequired = false;
+      const issueId = ctx.context.issueId ?? ctx.context.taskId;
+      if (prPolicy.isInspector && typeof issueId === "string") {
+        const [review] = await db.select({ parentId: issues.parentId, description: issues.description }).from(issues)
+          .where(and(eq(issues.companyId, ctx.agent.companyId), eq(issues.id, issueId)));
+        if (review?.parentId) {
+          const [published] = await db.select({ id: issues.id }).from(issues)
+            .innerJoin(prInspectionResults, and(eq(prInspectionResults.inspectionIssueId, issues.id),
+              eq(prInspectionResults.companyId, issues.companyId)))
+            .innerJoin(issueWorkProducts, and(eq(issueWorkProducts.issueId, issues.id),
+              eq(issueWorkProducts.companyId, issues.companyId), eq(issueWorkProducts.type, "pull_request")))
+            .where(and(eq(issues.companyId, ctx.agent.companyId), eq(issues.parentId, review.parentId), ne(issues.id, issueId),
+              eq(sql<string>`${prInspectionResults.result}->>'outcome'`, "approved"))).limit(1);
+          ctx.context.paperclipPrRevisionRequired = Boolean(published)
+            || (review.description ?? "").split(/\r?\n/).some(line => line.startsWith("Revision of inspection: "));
+          if (!ctx.context.paperclipPrRevisionRequired) {
+            const [parentPr] = await db.select({ id: issueWorkProducts.id }).from(issueWorkProducts).where(and(
+              eq(issueWorkProducts.companyId, ctx.agent.companyId), eq(issueWorkProducts.issueId, review.parentId),
+              eq(issueWorkProducts.type, "pull_request"))).limit(1);
+            ctx.context.paperclipPrRevisionRequired = Boolean(parentPr);
+          }
+        }
+      }
       if (!pool || pool.type !== "hosted") {
         if (harness !== "default") throw badRequest("Harness selection is only available for Hosted pools.");
         return { prPolicy };

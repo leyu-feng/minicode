@@ -224,6 +224,19 @@ describe("AgentPool execution channel", () => {
     expect(client.messages).toEqual([]);
     expect(broker.status(client.id)).toBe("idle");
   });
+  it("reserves revision inspections only on workers with the managed existing-PR capability", async () => {
+    const { broker, worker } = await harness();
+    const old = await worker();
+    const ctx = context();
+    ctx.context.paperclipPrRevisionRequired = true;
+    expect(broker.hasAvailableWorker(ctx)).toBe(false);
+    expect(broker.reserveAvailableWorker(ctx)).toBe(false);
+    const current = await worker(randomUUID(), randomUUID(), null, true, ["skill_bundle_v1", "pr_inspection_revision_v1"]);
+    expect(broker.reserveAvailableWorker(ctx)).toBe(true);
+    expect(broker.reservedWorker(ctx.runId)?.id).toBe(current.id);
+    expect(old.messages).toEqual([]);
+    broker.releaseReservation(ctx.runId);
+  });
   it("preserves the actual final response without inferring task completion from exit zero", async () => {
     const { broker, worker } = await harness();
     const client = await worker();

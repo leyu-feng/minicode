@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { createPrInspectorPostback, createHostedPublicationTool } from "../server/hosted-publication.js"
+import { assertInspectionReceipt, createPrInspectorPostback, createHostedPublicationTool } from "../server/hosted-publication.js"
 import { createPaperclipTaskTools } from "../server/paperclip-task-tools.js"
 
 const agentId = "11111111-1111-4111-8111-111111111111"
@@ -175,6 +175,18 @@ function fixture(t, isInspector = false, inspectorExists = true, separateBranch 
     get sourceUnblockDescriptor() { return sourceUnblockDescriptor },
   }
 }
+
+test("terminal producer preflight rejects submission before provider or review side effects", async t => {
+  const f = fixture(t)
+  for (const status of ["done", "cancelled"]) {
+    f.reviewStatus(status)
+    await assert.rejects(f.tool("submit_branch_for_inspection").execute({ repository: "main", commit,
+      title: "Feature", body: "Correction for an existing PR." }), /operator reopening/)
+  }
+  assert.equal(f.publications.length, 0)
+  assert.equal(f.children.length, 0)
+  assert.equal(f.waitingWrites, 0)
+})
 
 test("ordinary agents receive branch submission and owned retirement, handing off idempotently without creating a PR", async t => {
   const f = fixture(t)
@@ -713,6 +725,18 @@ test("a blocked checkpoint cannot conceal an uncertain producer handback", async
   await assert.rejects(f.tool("record_inspection_blocked").execute(blockedInput), /Reconcile pending/)
   assert.match(f.publication.registrationError, /findings delivery is unconfirmed/)
   assert.equal(f.waitingWrites, 0)
+})
+
+test("receipt diagnostics identify rejected fields without disclosing expected or received values", () => {
+  assert.throws(() => assertInspectionReceipt(null, { companyId }),
+    /Invalid fields: receipt.id, result.schema, result.runId, result.companyId$/)
+  const receipt = inspectionReceipt({ schema: "private-schema", runId: "private-run", reviewedCommit: "private-commit" })
+  assert.throws(() => assertInspectionReceipt(receipt, { reviewedCommit: remoteCommit }), error => {
+    assert.match(error.message, /Invalid fields: result.schema, result.runId, result.reviewedCommit$/)
+    for (const value of ["private-schema", "private-run", "private-commit", remoteCommit])
+      assert.ok(!error.message.includes(value))
+    return true
+  })
 })
 
 test("inspection tools reject unknown schemas, actor overrides, wrong commits and missing approval receipts", async t => {

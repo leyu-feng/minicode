@@ -11263,7 +11263,18 @@ export function issueRoutes(
   router.get("/issues/:id/inspection-result", async (req, res) => {
     const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
     if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
-    const receipt = await prInspectionResultService(db).get(issue.companyId, issue.id);
+    const service = prInspectionResultService(db);
+    if (req.query.requireApproved === "true") {
+      if (req.actor.type !== "agent" || !req.actor.agentId) throw forbidden("Inspector run authentication required");
+      if (!(await assertAgentIssueMutationAllowed(req, res, issue))
+        || !(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+      const runId = requireAgentRunId(req, res);
+      if (!runId) return;
+      const approved = await service.requireApproved(issue.companyId, issue.id, req.actor.agentId, runId);
+      res.json(await runRedactions.redactForIssue(issue.companyId, issue.id, approved));
+      return;
+    }
+    const receipt = await service.get(issue.companyId, issue.id);
     res.json(await runRedactions.redactForIssue(issue.companyId, issue.id, receipt));
   });
 
@@ -11311,7 +11322,7 @@ export function issueRoutes(
         sourceTrust: await sourceTrustForActorWrite(issue, actor),
       };
       if (req.actor.type === "agent" && createInput.type === "pull_request")
-        await prInspectorService(db).assertPrPostbackAllowed(issue.companyId, req.actor.agentId, issue.id);
+        await prInspectorService(db).assertPrPostbackAllowed(issue.companyId, req.actor.agentId, issue.id, createInput);
       const createdByRunId = await resolveWorkProductCreatedByRunId(
         req,
         res,
@@ -11741,7 +11752,7 @@ export function issueRoutes(
       if (req.actor.type === "agent" && (patch.type === "pull_request"
         || (existing.type === "pull_request" && ["type", "provider", "url", "externalId", "metadata"]
           .some(key => Object.hasOwn(patch, key)))))
-        await prInspectorService(db).assertPrPostbackAllowed(issue.companyId, req.actor.agentId, issue.id);
+        await prInspectorService(db).assertPrPostbackAllowed(issue.companyId, req.actor.agentId, issue.id, { ...existing, ...patch });
       const createdByRunId = await resolveWorkProductCreatedByRunId(
         req,
         res,
